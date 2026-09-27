@@ -8,6 +8,7 @@ import flight4s.core.codegen.*
 import flight4s.core.compiler.*
 import flight4s.core.dsl.CudaDsl.*
 import flight4s.core.ir.SourceSpan
+import flight4s.core.unsafe.raw.RawCuda
 
 class NvrtcCompilerSuite extends FunSuite:
   private val nativeLibraryConfigured =
@@ -69,7 +70,7 @@ class NvrtcCompilerSuite extends FunSuite:
             "--gpu-architecture=compute_80"
           )
         )
-        assertEquals(artifact.generated, generated)
+        assertGeneratedInput(artifact.input, generated)
       case Left(failure) =>
         fail(failure.message + "\n" + failure.compileLog)
 
@@ -125,7 +126,7 @@ class NvrtcCompilerSuite extends FunSuite:
             "Scala source: BrokenKernel.scala:12:5"
           )
         )
-        assertEquals(failure.generated, generated)
+        assertGeneratedInput(failure.input, generated)
         assertEquals(
           failure.compilerOptions.values,
           Vector(
@@ -135,6 +136,48 @@ class NvrtcCompilerSuite extends FunSuite:
         )
       case Right(_) =>
         fail("invalid CUDA source unexpectedly compiled")
+
+  test("NVRTC compiles caller-provided raw CUDA without changing its source"):
+    assume(
+      nativeLibraryConfigured,
+      "set flight4s.cuda.native.path to run JNI tests"
+    )
+
+    val definition = RawCuda.kernel(
+      entryPoint = "rawSaturate",
+      signature = params(output[Float]("output")),
+      source =
+        """extern "C" __global__ void rawSaturate(float* output) {
+          |  output[threadIdx.x] = __saturatef(1.5f);
+          |}
+          |""".stripMargin,
+      compilerOptions = CompilerOptions(),
+      launchRequirements = KernelLaunchRequirements()
+    )
+    NvrtcCompiler.compile(
+      definition,
+      ComputeCapability(8, 0),
+      "raw_saturate.cu"
+    ) match
+      case Right(artifact) =>
+        val ptxText = String(
+          IArray.genericWrapArray(artifact.ptx).toArray,
+          StandardCharsets.UTF_8
+        )
+
+        artifact.input match
+          case input: NvrtcCompilationInput.Raw[?] =>
+            assert(input.definition eq definition)
+          case _: NvrtcCompilationInput.Generated =>
+            fail("expected caller-provided raw source provenance")
+        assertEquals(
+          artifact.provenance,
+          NvrtcSourceProvenance.CallerProvidedRaw
+        )
+        assertEquals(artifact.input.source, definition.source)
+        assert(ptxText.contains(".entry rawSaturate"))
+      case Left(failure) =>
+        fail(failure.message + "\n" + failure.compileLog)
 
   test("NVRTC diagnostics remap generated statements to Scala call sites"):
     assume(
@@ -210,3 +253,13 @@ class NvrtcCompilerSuite extends FunSuite:
     intercept[IllegalArgumentException](
       NvrtcCompiler.compile(nonEmpty, target, "bad\u0000name.cu")
     )
+
+  private def assertGeneratedInput(
+      input: NvrtcCompilationInput,
+      expected: GeneratedCudaModule
+  ): Unit =
+    input match
+      case generated: NvrtcCompilationInput.Generated =>
+        assertEquals(generated.module, expected)
+      case _: NvrtcCompilationInput.Raw[?] =>
+        fail("expected a DSL-generated NVRTC compilation input")

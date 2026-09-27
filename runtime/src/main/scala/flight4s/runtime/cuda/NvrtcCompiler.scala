@@ -2,13 +2,14 @@ package flight4s.runtime.cuda
 
 import flight4s.core.codegen.GeneratedCudaModule
 import flight4s.core.compiler.*
+import flight4s.core.unsafe.raw.RawCudaKernel
 import flight4s.runtime.cuda.internal.NativeNvrtcCompiler
 
 private[cuda] trait NvrtcCompilerBackend:
   def version(): Either[NvrtcVersionQueryFailure, NvrtcVersion]
 
   def compile(
-      generated: GeneratedCudaModule,
+      input: NvrtcCompilationInput,
       target: ComputeCapability,
       programName: String
   ): Either[NvrtcCompileFailure, NvrtcArtifact]
@@ -32,17 +33,17 @@ private[cuda] object NativeNvrtcCompilerBackend extends NvrtcCompilerBackend:
       )
 
   override def compile(
-      generated: GeneratedCudaModule,
+      input: NvrtcCompilationInput,
       target: ComputeCapability,
       programName: String
   ): Either[NvrtcCompileFailure, NvrtcArtifact] =
-    NvrtcCompiler.validateRequest(generated, programName)
+    NvrtcCompiler.validateRequest(input, programName)
     val compilerOptions = NvrtcCompileOptions.resolve(
-      generated.compilerOptions,
+      input.compilerOptions,
       target
     )
     val nativeResult = NativeNvrtcCompiler.compile(
-      generated.cudaSource,
+      input.source,
       programName,
       compilerOptions.values
     )
@@ -54,7 +55,7 @@ private[cuda] object NativeNvrtcCompilerBackend extends NvrtcCompilerBackend:
     if nativeResult.resultCode == 0 then
       Right(
         NvrtcArtifact(
-          generated = generated,
+          input = input,
           ptx = IArray.unsafeFromArray(nativeResult.ptx.clone()),
           compileLog = nativeResult.compileLog,
           nvrtcVersion = version,
@@ -66,7 +67,7 @@ private[cuda] object NativeNvrtcCompilerBackend extends NvrtcCompilerBackend:
     else
       Left(
         NvrtcCompileFailure(
-          generated = generated,
+          input = input,
           resultCode = nativeResult.resultCode,
           resultName = nativeResult.resultName,
           compileLog = nativeResult.compileLog,
@@ -84,19 +85,59 @@ object NvrtcCompiler:
     NativeNvrtcCompilerBackend.version()
 
   def compile(
+      input: NvrtcCompilationInput,
+      target: ComputeCapability
+  ): Either[NvrtcCompileFailure, NvrtcArtifact] =
+    compile(input, target, DefaultProgramName)
+
+  def compile(
+      input: NvrtcCompilationInput,
+      target: ComputeCapability,
+      programName: String
+  ): Either[NvrtcCompileFailure, NvrtcArtifact] =
+    NativeNvrtcCompilerBackend.compile(input, target, programName)
+
+  def compile(
+      generated: GeneratedCudaModule,
+      target: ComputeCapability
+  ): Either[NvrtcCompileFailure, NvrtcArtifact] =
+    compile(generated, target, DefaultProgramName)
+
+  def compile(
       generated: GeneratedCudaModule,
       target: ComputeCapability,
-      programName: String = DefaultProgramName
+      programName: String
   ): Either[NvrtcCompileFailure, NvrtcArtifact] =
-    NativeNvrtcCompilerBackend.compile(generated, target, programName)
+    compile(
+      NvrtcCompilationInput.generated(generated),
+      target,
+      programName
+    )
+
+  def compile[Args <: Tuple](
+      raw: RawCudaKernel[Args],
+      target: ComputeCapability
+  ): Either[NvrtcCompileFailure, NvrtcArtifact] =
+    compile(raw, target, DefaultProgramName)
+
+  def compile[Args <: Tuple](
+      raw: RawCudaKernel[Args],
+      target: ComputeCapability,
+      programName: String
+  ): Either[NvrtcCompileFailure, NvrtcArtifact] =
+    compile(NvrtcCompilationInput.raw(raw), target, programName)
 
   private[cuda] def validateRequest(
-      generated: GeneratedCudaModule,
+      input: NvrtcCompilationInput,
       programName: String
   ): Unit =
     require(
-      generated.cudaSource.nonEmpty,
-      "generated CUDA source must not be empty"
+      input != null,
+      "NVRTC compilation input must not be null"
+    )
+    require(
+      input.source != null && input.source.nonEmpty,
+      "CUDA source must not be empty"
     )
     require(
       programName.nonEmpty,

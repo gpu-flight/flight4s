@@ -1217,7 +1217,7 @@ class CudaResourcesSuite extends FunSuite:
     )
     val target = ComputeCapability(8, 0)
     val artifact = NvrtcArtifact(
-      generated = generatedModule,
+      input = NvrtcCompilationInput.generated(generatedModule),
       ptx = IArray.unsafeFromArray(
         s".version 8.0\n// ${definition.name}\n".getBytes(
           StandardCharsets.UTF_8

@@ -4,10 +4,13 @@ import munit.FunSuite
 
 import flight4s.core.codegen.{
   CompilerOptions,
+  KernelLaunchRequirements,
   SourceMap,
   SourceMapEntry
 }
+import flight4s.core.dsl.CudaDsl.params
 import flight4s.core.ir.SourceSpan
+import flight4s.core.unsafe.raw.RawCuda
 
 class NvrtcArtifactsSuite extends FunSuite:
   test("compute capability produces the NVRTC virtual architecture"):
@@ -143,3 +146,36 @@ class NvrtcArtifactsSuite extends FunSuite:
       "block_reduce_sum.cu:12:5: error #123: invalid expression\n" +
         "Scala source: ReductionKernel.scala:24:7"
     )
+
+  test("raw compilation diagnostics preserve CUDA locations without Scala mapping"):
+    val definition = RawCuda.kernel(
+      entryPoint = "brokenRawKernel",
+      signature = params(),
+      source = "extern \"C\" __global__ void brokenRawKernel( {}",
+      compilerOptions = CompilerOptions(),
+      launchRequirements = KernelLaunchRequirements()
+    )
+    val input = NvrtcCompilationInput.raw(definition)
+    val target = ComputeCapability(8, 0)
+    val failure = NvrtcCompileFailure(
+      input = input,
+      resultCode = 6,
+      resultName = "NVRTC_ERROR_COMPILATION",
+      compileLog =
+        "raw_kernel.cu(1,36): error: expected a closing parenthesis",
+      nvrtcVersion = NvrtcVersion(13, 0),
+      target = target,
+      compilerOptions = NvrtcCompileOptions.resolve(
+        definition.compilerOptions,
+        target
+      ),
+      programName = "raw_kernel.cu"
+    )
+
+    val diagnostic = failure.diagnostics.head
+    assert(failure.input eq input)
+    assertEquals(failure.provenance, NvrtcSourceProvenance.CallerProvidedRaw)
+    assertEquals(diagnostic.generatedLocation.file, "raw_kernel.cu")
+    assertEquals(diagnostic.generatedLocation.line, 1)
+    assertEquals(diagnostic.generatedLocation.column, Some(36))
+    assertEquals(diagnostic.sourceSpan, None)

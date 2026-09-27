@@ -10,9 +10,17 @@ import scala.jdk.CollectionConverters.*
 
 import munit.FunSuite
 
-import flight4s.core.codegen.{CompilerOptions, GeneratedCudaModule, SourceMap, SourceMapEntry}
+import flight4s.core.codegen.{
+  CompilerOptions,
+  GeneratedCudaModule,
+  KernelLaunchRequirements,
+  SourceMap,
+  SourceMapEntry
+}
 import flight4s.core.compiler.*
+import flight4s.core.dsl.CudaDsl.params
 import flight4s.core.ir.SourceSpan
+import flight4s.core.unsafe.raw.RawCuda
 
 class NvrtcArtifactStoreSuite extends FunSuite:
   private val target = ComputeCapability(8, 0)
@@ -29,8 +37,8 @@ class NvrtcArtifactStoreSuite extends FunSuite:
       assertEquals(store.store(key, initialArtifact), Right(()))
 
       val loaded = load(store, key, remapped)
-      assertEquals(loaded.generated, remapped)
-      assertEquals(loaded.generated.sourceMap, remapped.sourceMap)
+      assertEquals(generatedModule(loaded.input), remapped)
+      assertEquals(loaded.input.sourceMap, remapped.sourceMap)
       assertEquals(ptxText(loaded), ptxText(initialArtifact))
       assertEquals(loaded.compileLog, initialArtifact.compileLog)
       assertEquals(loaded.nvrtcVersion, initialArtifact.nvrtcVersion)
@@ -51,6 +59,50 @@ class NvrtcArtifactStoreSuite extends FunSuite:
       val module = generated("Missing.scala")
 
       assertEquals(store.load(compilationKey(module), module), Right(None))
+    }
+
+  test("rejects raw provenance until the persistent schema supports it"):
+    withStore { store =>
+      val input = NvrtcCompilationInput.raw(
+        RawCuda.kernel(
+          entryPoint = "rawPersistentKernel",
+          signature = params(),
+          source =
+            "extern \"C\" __global__ void rawPersistentKernel() {}\n",
+          compilerOptions = CompilerOptions(),
+          launchRequirements = KernelLaunchRequirements()
+        )
+      )
+      val key = NvrtcCompilationKey.derive(
+        input,
+        target,
+        version,
+        programName
+      )
+      val artifact = NvrtcArtifact(
+        input = input,
+        ptx = IArray.unsafeFromArray(
+          ".version 8.0\n.entry rawPersistentKernel() {}\n"
+            .getBytes(StandardCharsets.UTF_8)
+        ),
+        compileLog = "",
+        nvrtcVersion = version,
+        target = target,
+        compilerOptions = NvrtcCompileOptions.resolve(
+          input.compilerOptions,
+          target
+        ),
+        programName = programName
+      )
+
+      store.store(key, artifact) match
+        case Left(error: NvrtcArtifactStoreUnsupportedProvenance) =>
+          assertEquals(error.key, key)
+          assertEquals(
+            error.provenance,
+            NvrtcSourceProvenance.CallerProvidedRaw
+          )
+        case other => fail(s"expected an unsupported-provenance failure, found $other")
     }
 
   test("rejects an artifact whose PTX bytes no longer match the manifest"):
@@ -227,7 +279,7 @@ class NvrtcArtifactStoreSuite extends FunSuite:
 
   private def artifact(module: GeneratedCudaModule): NvrtcArtifact =
     NvrtcArtifact(
-      generated = module,
+      input = NvrtcCompilationInput.generated(module),
       ptx = IArray.unsafeFromArray(
         ".version 8.0\n.entry persistentKernel() {}\n"
           .getBytes(StandardCharsets.UTF_8)
@@ -238,6 +290,14 @@ class NvrtcArtifactStoreSuite extends FunSuite:
       compilerOptions = NvrtcCompileOptions.resolve(module.compilerOptions, target),
       programName = programName
     )
+
+  private def generatedModule(
+      input: NvrtcCompilationInput
+  ): GeneratedCudaModule =
+    input match
+      case generated: NvrtcCompilationInput.Generated => generated.module
+      case _: NvrtcCompilationInput.Raw[?] =>
+        fail("expected a DSL-generated NVRTC compilation input")
 
   private def ptxText(artifact: NvrtcArtifact): String =
     String(IArray.genericWrapArray(artifact.ptx).toArray, StandardCharsets.UTF_8)

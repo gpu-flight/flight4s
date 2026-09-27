@@ -7,7 +7,11 @@ import scala.util.control.NonFatal
 
 import flight4s.core.abi.{DeviceAddress, NativeLaunchRequest}
 import flight4s.core.codegen.GeneratedKernel
-import flight4s.core.compiler.{ComputeCapability, NvrtcArtifact}
+import flight4s.core.compiler.{
+  ComputeCapability,
+  NvrtcArtifact,
+  NvrtcCompilationInput
+}
 import flight4s.core.ir.{DeviceBuffer, KernelInvocation, KernelSignature}
 import flight4s.core.launch.LaunchConfig
 import flight4s.core.types.CudaType
@@ -1393,10 +1397,13 @@ final class CudaModule private[cuda] (
   private def owns[Args <: Tuple](
       generated: GeneratedKernel[Args]
   ): Boolean =
-    artifact.generated.kernels.exists { candidate =>
-      candidate.name == generated.name &&
-      (candidate.signature eq generated.signature)
-    }
+    artifact.input match
+      case input: NvrtcCompilationInput.Generated =>
+        input.module.kernels.exists { candidate =>
+          candidate.name == generated.name &&
+          (candidate.signature eq generated.signature)
+        }
+      case _: NvrtcCompilationInput.Raw[?] => false
 
 final class CudaFunction[Args <: Tuple] private[cuda] (
     val module: CudaModule,
