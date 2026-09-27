@@ -8,9 +8,17 @@ import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
 
 import munit.FunSuite
 
-import flight4s.core.codegen.{CompilerOptions, GeneratedCudaModule, SourceMap, SourceMapEntry}
+import flight4s.core.codegen.{
+  CompilerOptions,
+  GeneratedCudaModule,
+  KernelLaunchRequirements,
+  SourceMap,
+  SourceMapEntry
+}
 import flight4s.core.compiler.*
+import flight4s.core.dsl.CudaDsl.params
 import flight4s.core.ir.SourceSpan
+import flight4s.core.unsafe.raw.RawCuda
 
 class NvrtcCompilationCacheSuite extends FunSuite:
   private val target = ComputeCapability(8, 0)
@@ -28,9 +36,9 @@ class NvrtcCompilationCacheSuite extends FunSuite:
 
     assertEquals(backend.compileCount, 1)
     assertEquals(cache.entryCount, 1)
-    assertEquals(initialArtifact.generated, first)
-    assertEquals(cachedArtifact.generated, remapped)
-    assertEquals(cachedArtifact.generated.sourceMap, remapped.sourceMap)
+    assertEquals(generatedModule(initialArtifact.input), first)
+    assertEquals(generatedModule(cachedArtifact.input), remapped)
+    assertEquals(cachedArtifact.input.sourceMap, remapped.sourceMap)
     assertEquals(ptxText(cachedArtifact), ptxText(initialArtifact))
 
   test("compiler-relevant input changes miss the cache"):
@@ -47,6 +55,25 @@ class NvrtcCompilationCacheSuite extends FunSuite:
 
     assertEquals(backend.compileCount, 3)
     assertEquals(cache.entryCount, 3)
+
+  test("a raw cache hit rebinds PTX metadata to the current input"):
+    val first = rawInput()
+    val rebound = rawInput()
+    val backend = RecordingBackend()
+    val cache = NvrtcCompilationCache(2, backend)
+
+    val initialArtifact = compiled(cache, first)
+    val cachedArtifact = compiled(cache, rebound)
+
+    assertEquals(backend.compileCount, 1)
+    assertEquals(cache.entryCount, 1)
+    assert(initialArtifact.input eq first)
+    assert(cachedArtifact.input eq rebound)
+    assertEquals(
+      cachedArtifact.provenance,
+      NvrtcSourceProvenance.CallerProvidedRaw
+    )
+    assertEquals(ptxText(cachedArtifact), ptxText(initialArtifact))
 
   test("failed compilations are shared in flight but not retained"):
     val backend = RecordingBackend()
@@ -107,8 +134,8 @@ class NvrtcCompilationCacheSuite extends FunSuite:
         case Left(error) => fail(error.message)
 
       assertEquals(backend.compileCount, 1)
-      assertEquals(firstArtifact.generated, module)
-      assertEquals(secondArtifact.generated, module)
+      assertEquals(generatedModule(firstArtifact.input), module)
+      assertEquals(generatedModule(secondArtifact.input), module)
       assert(!(firstArtifact.ptx.asInstanceOf[AnyRef] eq secondArtifact.ptx.asInstanceOf[AnyRef]))
     finally
       release.countDown()
@@ -172,7 +199,7 @@ class NvrtcCompilationCacheSuite extends FunSuite:
       val fromDisk = compiled(cache, remapped)
 
       assertEquals(backend.compileCount, 1)
-      assertEquals(fromDisk.generated, remapped)
+      assertEquals(generatedModule(fromDisk.input), remapped)
       assertEquals(cache.entryCount, 1)
 
       assertEquals(cache.clearPersistent(), Right(()))
@@ -181,6 +208,44 @@ class NvrtcCompilationCacheSuite extends FunSuite:
       compiled(cache, remapped)
 
       assertEquals(backend.compileCount, 2)
+    }
+
+  test("persistent cache keeps raw artifacts in memory only"):
+    withStore { store =>
+      val backend = RecordingBackend()
+      val cache = NvrtcCompilationCache.persistent(2, backend, store)
+
+      compiled(cache, rawInput())
+      cache.clear()
+      compiled(cache, rawInput())
+
+      assertEquals(backend.compileCount, 2)
+      assertEquals(cache.entryCount, 1)
+    }
+
+  test("persistent generated inputs retain their explicit codegen version"):
+    withStore { store =>
+      val backend = RecordingBackend()
+      val cache = NvrtcCompilationCache.persistent(2, backend, store)
+      val initialModule = generated("VersionedInitial.scala")
+      val remappedModule = initialModule.copy(
+        sourceMap = sourceMap("VersionedRemapped.scala")
+      )
+      val initial = NvrtcCompilationInput.generated(
+        initialModule,
+        codegenVersion = 19
+      )
+      val remapped = NvrtcCompilationInput.generated(
+        remappedModule,
+        codegenVersion = 19
+      )
+
+      compiled(cache, initial)
+      cache.clear()
+      val fromDisk = compiled(cache, remapped)
+
+      assertEquals(backend.compileCount, 1)
+      assert(fromDisk.input eq remapped)
     }
 
   test("persistent cache removes a corrupt entry, recompiles, and repairs the store"):
@@ -252,6 +317,14 @@ class NvrtcCompilationCacheSuite extends FunSuite:
       case Right(artifact) => artifact
       case Left(error) => fail(error.message)
 
+  private def compiled(
+      cache: NvrtcCompilationCache,
+      input: NvrtcCompilationInput
+  ): NvrtcArtifact =
+    cache.compile(input, target, programName) match
+      case Right(artifact) => artifact
+      case Left(error) => fail(error.message)
+
   private def generated(sourceFile: String): GeneratedCudaModule =
     GeneratedCudaModule(
       cudaSource =
@@ -271,13 +344,25 @@ class NvrtcCompilationCacheSuite extends FunSuite:
       )
     )
 
+  private def rawInput(): NvrtcCompilationInput.Raw[EmptyTuple] =
+    NvrtcCompilationInput.raw(
+      RawCuda.kernel(
+        entryPoint = "rawCachedKernel",
+        signature = params(),
+        source =
+          "extern \"C\" __global__ void rawCachedKernel() {}\n",
+        compilerOptions = CompilerOptions(),
+        launchRequirements = KernelLaunchRequirements()
+      )
+    )
+
   private def successfulArtifact(
-      generated: GeneratedCudaModule,
+      input: NvrtcCompilationInput,
       target: ComputeCapability,
       programName: String
   ): NvrtcArtifact =
     NvrtcArtifact(
-      generated = generated,
+      input = input,
       ptx = IArray.unsafeFromArray(
         ".version 8.0\n.entry cachedKernel() {}\n"
           .getBytes(StandardCharsets.UTF_8)
@@ -286,26 +371,26 @@ class NvrtcCompilationCacheSuite extends FunSuite:
       nvrtcVersion = version,
       target = target,
       compilerOptions = NvrtcCompileOptions.resolve(
-        generated.compilerOptions,
+        input.compilerOptions,
         target
       ),
       programName = programName
     )
 
   private def failedCompilation(
-      generated: GeneratedCudaModule,
+      input: NvrtcCompilationInput,
       target: ComputeCapability,
       programName: String
   ): NvrtcCompileFailure =
     NvrtcCompileFailure(
-      generated = generated,
+      input = input,
       resultCode = 6,
       resultName = "NVRTC_ERROR_COMPILATION",
       compileLog = "cached_kernel.cu(1): error: broken source",
       nvrtcVersion = version,
       target = target,
       compilerOptions = NvrtcCompileOptions.resolve(
-        generated.compilerOptions,
+        input.compilerOptions,
         target
       ),
       programName = programName
@@ -316,6 +401,14 @@ class NvrtcCompilationCacheSuite extends FunSuite:
       IArray.genericWrapArray(artifact.ptx).toArray,
       StandardCharsets.UTF_8
     )
+
+  private def generatedModule(
+      input: NvrtcCompilationInput
+  ): GeneratedCudaModule =
+    input match
+      case generated: NvrtcCompilationInput.Generated => generated.module
+      case _: NvrtcCompilationInput.Raw[?] =>
+        fail("expected a DSL-generated NVRTC compilation input")
 
   private def awaitCondition(condition: => Boolean): Unit =
     val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
@@ -357,9 +450,9 @@ class NvrtcCompilationCacheSuite extends FunSuite:
     private var compileGate = Option.empty[(CountDownLatch, CountDownLatch)]
 
     var compileAction:
-        (GeneratedCudaModule, ComputeCapability, String, Int) => Either[NvrtcCompileFailure, NvrtcArtifact] =
-      (generated, target, programName, _) =>
-        Right(successfulArtifact(generated, target, programName))
+        (NvrtcCompilationInput, ComputeCapability, String, Int) => Either[NvrtcCompileFailure, NvrtcArtifact] =
+      (input, target, programName, _) =>
+        Right(successfulArtifact(input, target, programName))
 
     def compileCount: Int = synchronized(compileAttempts)
 
@@ -379,7 +472,7 @@ class NvrtcCompilationCacheSuite extends FunSuite:
       }
 
     override def compile(
-        generated: GeneratedCudaModule,
+        input: NvrtcCompilationInput,
         target: ComputeCapability,
         programName: String
     ): Either[NvrtcCompileFailure, NvrtcArtifact] =
@@ -391,4 +484,4 @@ class NvrtcCompilationCacheSuite extends FunSuite:
         started.countDown()
         release.await()
       }
-      action(generated, target, programName, attempt)
+      action(input, target, programName, attempt)

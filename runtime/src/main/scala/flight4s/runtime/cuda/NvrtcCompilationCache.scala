@@ -5,12 +5,13 @@ import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ExecutionExce
 
 import flight4s.core.codegen.GeneratedCudaModule
 import flight4s.core.compiler.*
+import flight4s.core.unsafe.raw.RawCudaKernel
 
 /**
  * A caller-owned, bounded cache of successful NVRTC PTX compilations.
  *
- * Cached payloads deliberately exclude source-map metadata. Each result is
- * rebound to the `GeneratedCudaModule` supplied by the current caller.
+ * Cached payloads deliberately exclude caller-specific compilation-input
+ * metadata. Each result is rebound to the input supplied by the current caller.
  */
 final class NvrtcCompilationCache private[cuda] (
     val maximumEntries: Int,
@@ -47,29 +48,65 @@ final class NvrtcCompilationCache private[cuda] (
     )
 
   def compile(
-      generated: GeneratedCudaModule,
-      target: ComputeCapability,
-      programName: String = NvrtcCompiler.DefaultProgramName
+      input: NvrtcCompilationInput,
+      target: ComputeCapability
   ): Either[NvrtcCompilationError, NvrtcArtifact] =
-    NvrtcCompiler.validateRequest(generated, programName)
+    compile(input, target, NvrtcCompiler.DefaultProgramName)
+
+  def compile(
+      input: NvrtcCompilationInput,
+      target: ComputeCapability,
+      programName: String
+  ): Either[NvrtcCompilationError, NvrtcArtifact] =
+    NvrtcCompiler.validateRequest(input, programName)
 
     backend.version() match
       case Left(failure) => Left(failure)
       case Right(version) =>
         val key = NvrtcCompilationKey.derive(
-          generated,
+          input,
           target,
           version,
           programName
         )
 
         completedArtifact(key) match
-          case Some(artifact) => artifact.rebind(generated)
-          case None => compileOrAwait(key, generated, target, programName)
+          case Some(artifact) => artifact.rebind(input)
+          case None => compileOrAwait(key, input, target, programName)
+
+  def compile(
+      generated: GeneratedCudaModule,
+      target: ComputeCapability
+  ): Either[NvrtcCompilationError, NvrtcArtifact] =
+    compile(generated, target, NvrtcCompiler.DefaultProgramName)
+
+  def compile(
+      generated: GeneratedCudaModule,
+      target: ComputeCapability,
+      programName: String
+  ): Either[NvrtcCompilationError, NvrtcArtifact] =
+    compile(
+      NvrtcCompilationInput.generated(generated),
+      target,
+      programName
+    )
+
+  def compile[Args <: Tuple](
+      raw: RawCudaKernel[Args],
+      target: ComputeCapability
+  ): Either[NvrtcCompilationError, NvrtcArtifact] =
+    compile(raw, target, NvrtcCompiler.DefaultProgramName)
+
+  def compile[Args <: Tuple](
+      raw: RawCudaKernel[Args],
+      target: ComputeCapability,
+      programName: String
+  ): Either[NvrtcCompilationError, NvrtcArtifact] =
+    compile(NvrtcCompilationInput.raw(raw), target, programName)
 
   private def compileOrAwait(
       key: NvrtcCompilationKey,
-      generated: GeneratedCudaModule,
+      input: NvrtcCompilationInput,
       target: ComputeCapability,
       programName: String
   ): Either[NvrtcCompilationError, NvrtcArtifact] =
@@ -77,12 +114,12 @@ final class NvrtcCompilationCache private[cuda] (
     val existing = inFlight.putIfAbsent(key, created)
 
     if existing == null then
-      compileOwned(key, generated, target, programName, created)
-    else await(existing).rebind(generated)
+      compileOwned(key, input, target, programName, created)
+    else await(existing).rebind(input)
 
   private def compileOwned(
       key: NvrtcCompilationKey,
-      generated: GeneratedCudaModule,
+      input: NvrtcCompilationInput,
       target: ComputeCapability,
       programName: String,
       future: CompletableFuture[CachedCompilation]
@@ -91,25 +128,25 @@ final class NvrtcCompilationCache private[cuda] (
       completedArtifact(key) match
         case Some(artifact) =>
           future.complete(artifact)
-          artifact.rebind(generated)
+          artifact.rebind(input)
         case None =>
-          persistentArtifact(key, generated) match
+          persistentArtifact(key, input) match
             case Some(artifact) =>
               store(key, artifact)
               future.complete(artifact)
-              artifact.rebind(generated)
+              artifact.rebind(input)
             case None =>
-              backend.compile(generated, target, programName) match
+              backend.compile(input, target, programName) match
                 case Right(artifact) =>
                   val cached = CachedArtifact.from(artifact)
                   store(key, cached)
                   persist(key, artifact)
                   future.complete(cached)
-                  cached.rebind(generated)
+                  cached.rebind(input)
                 case Left(failure) =>
                   val cached = CachedFailure.from(failure)
                   future.complete(cached)
-                  cached.rebind(generated)
+                  cached.rebind(input)
     catch
       case exception: Throwable =>
         future.completeExceptionally(exception)
@@ -135,23 +172,29 @@ final class NvrtcCompilationCache private[cuda] (
 
   private def persistentArtifact(
       key: NvrtcCompilationKey,
-      generated: GeneratedCudaModule
+      input: NvrtcCompilationInput
   ): Option[CachedArtifact] =
-    artifactStore.flatMap { store =>
-      store.load(key, generated) match
-        case Right(Some(artifact)) => Some(CachedArtifact.from(artifact))
-        case Right(None) => None
-        case Left(_: NvrtcArtifactStoreIoFailure) => None
-        case Left(_) =>
-          store.remove(key)
-          None
-    }
+    input match
+      case generated: NvrtcCompilationInput.Generated =>
+        artifactStore.flatMap { store =>
+          store.load(key, generated) match
+            case Right(Some(artifact)) => Some(CachedArtifact.from(artifact))
+            case Right(None) => None
+            case Left(_: NvrtcArtifactStoreIoFailure) => None
+            case Left(_) =>
+              store.remove(key)
+              None
+        }
+      case _: NvrtcCompilationInput.Raw[?] => None
 
   private def persist(
       key: NvrtcCompilationKey,
       artifact: NvrtcArtifact
   ): Unit =
-    artifactStore.foreach(_.store(key, artifact))
+    artifact.input match
+      case _: NvrtcCompilationInput.Generated =>
+        artifactStore.foreach(_.store(key, artifact))
+      case _: NvrtcCompilationInput.Raw[?] => ()
 
   private def await(
       future: CompletableFuture[CachedCompilation]
@@ -200,7 +243,7 @@ private[cuda] object NvrtcCompilationCache:
 
 private sealed trait CachedCompilation:
   def rebind(
-      generated: GeneratedCudaModule
+      input: NvrtcCompilationInput
   ): Either[NvrtcCompilationError, NvrtcArtifact]
 
 private final case class CachedArtifact(
@@ -212,11 +255,11 @@ private final case class CachedArtifact(
     programName: String
 ) extends CachedCompilation:
   override def rebind(
-      generated: GeneratedCudaModule
+      input: NvrtcCompilationInput
   ): Either[NvrtcCompilationError, NvrtcArtifact] =
     Right(
       NvrtcArtifact(
-        generated = generated,
+        input = input,
         ptx = IArray.unsafeFromArray(ptx.clone()),
         compileLog = compileLog,
         nvrtcVersion = nvrtcVersion,
@@ -247,11 +290,11 @@ private final case class CachedFailure(
     programName: String
 ) extends CachedCompilation:
   override def rebind(
-      generated: GeneratedCudaModule
+      input: NvrtcCompilationInput
   ): Either[NvrtcCompilationError, NvrtcArtifact] =
     Left(
       NvrtcCompileFailure(
-        generated = generated,
+        input = input,
         resultCode = resultCode,
         resultName = resultName,
         compileLog = compileLog,

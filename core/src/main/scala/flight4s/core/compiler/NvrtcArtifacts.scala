@@ -1,6 +1,6 @@
 package flight4s.core.compiler
 
-import flight4s.core.codegen.{CompilerOptions, GeneratedCudaModule}
+import flight4s.core.codegen.CompilerOptions
 
 final case class ComputeCapability private (
     major: Int,
@@ -73,22 +73,24 @@ object NvrtcCompileOptions:
     new NvrtcCompileOptions(values)
 
 sealed trait NvrtcCompilation:
-  def generated: GeneratedCudaModule
+  def input: NvrtcCompilationInput
   def compileLog: String
   def nvrtcVersion: NvrtcVersion
   def target: ComputeCapability
   def compilerOptions: NvrtcCompileOptions
   def programName: String
 
+  final def provenance: NvrtcSourceProvenance = input.provenance
+
   final def diagnostics: Vector[NvrtcDiagnostic] =
     NvrtcDiagnostics.parse(
       compileLog,
-      generated.sourceMap,
+      input.sourceMap,
       programName
     )
 
 final case class NvrtcArtifact(
-    generated: GeneratedCudaModule,
+    input: NvrtcCompilationInput,
     ptx: IArray[Byte],
     compileLog: String,
     nvrtcVersion: NvrtcVersion,
@@ -99,7 +101,7 @@ final case class NvrtcArtifact(
   require(ptx.nonEmpty, "successful NVRTC compilation must contain PTX")
 
 final case class NvrtcCompileFailure(
-    generated: GeneratedCudaModule,
+    input: NvrtcCompilationInput,
     resultCode: Int,
     resultName: String,
     compileLog: String,

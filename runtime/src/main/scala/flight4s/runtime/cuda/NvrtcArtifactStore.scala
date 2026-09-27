@@ -53,6 +53,15 @@ final case class NvrtcArtifactStoreSourceMismatch(
   override def message: String =
     s"NVRTC artifact store entry $key at $path does not match the supplied CUDA source"
 
+final case class NvrtcArtifactStoreUnsupportedProvenance(
+    key: NvrtcCompilationKey,
+    path: Path,
+    provenance: NvrtcSourceProvenance
+) extends NvrtcArtifactStoreError:
+  override def message: String =
+    s"NVRTC artifact store entry $key at $path does not support source " +
+      s"provenance $provenance"
+
 /**
  * Persistent storage for successful NVRTC compilation artifacts.
  *
@@ -80,10 +89,16 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
       key: NvrtcCompilationKey,
       generated: GeneratedCudaModule
   ): Either[NvrtcArtifactStoreError, Option[NvrtcArtifact]] =
+    load(key, NvrtcCompilationInput.generated(generated))
+
+  private[cuda] def load(
+      key: NvrtcCompilationKey,
+      input: NvrtcCompilationInput.Generated
+  ): Either[NvrtcArtifactStoreError, Option[NvrtcArtifact]] =
     val entry = entryPath(key)
     try
       if !Files.exists(entry) then Right(None)
-      else loadEntry(key, generated, entry).map(Some(_))
+      else loadEntry(key, input, entry).map(Some(_))
     catch
       case exception: IOException =>
         Left(ioFailure("read artifact", entry, exception))
@@ -101,15 +116,25 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
       artifact: NvrtcArtifact
   ): Either[NvrtcArtifactStoreError, Unit] =
     val entry = entryPath(key)
-    validateIdentity(
-      key,
-      entry,
-      artifact.generated,
-      artifact.nvrtcVersion,
-      artifact.target,
-      artifact.compilerOptions,
-      artifact.programName
-    ).flatMap(_ => writeArtifact(key, artifact, entry))
+    artifact.input match
+      case generated: NvrtcCompilationInput.Generated =>
+        validateIdentity(
+          key,
+          entry,
+          generated,
+          artifact.nvrtcVersion,
+          artifact.target,
+          artifact.compilerOptions,
+          artifact.programName
+        ).flatMap(_ => writeArtifact(key, generated.module, artifact, entry))
+      case _: NvrtcCompilationInput.Raw[?] =>
+        Left(
+          NvrtcArtifactStoreUnsupportedProvenance(
+            key,
+            entry,
+            artifact.provenance
+          )
+        )
 
   /** Removes the completed entry for `key`, if one exists. */
   def remove(key: NvrtcCompilationKey): Either[NvrtcArtifactStoreError, Unit] =
@@ -149,9 +174,10 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
 
   private def loadEntry(
       key: NvrtcCompilationKey,
-      generated: GeneratedCudaModule,
+      input: NvrtcCompilationInput.Generated,
       entry: Path
   ): Either[NvrtcArtifactStoreError, NvrtcArtifact] =
+    val generated = input.module
     val manifestPath = entry.resolve(ManifestFileName)
     for
       manifestBytes <- readFile(key, manifestPath)
@@ -176,7 +202,7 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
       _ <- validateIdentity(
         key,
         manifestPath,
-        generated,
+        input,
         version,
         target,
         compilerOptions,
@@ -203,7 +229,7 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
         manifest.compileLogSha256
       )
     yield NvrtcArtifact(
-      generated = generated,
+      input = input,
       ptx = IArray.unsafeFromArray(ptx),
       compileLog = String(compileLog, StandardCharsets.UTF_8),
       nvrtcVersion = version,
@@ -214,6 +240,7 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
 
   private def writeArtifact(
       key: NvrtcCompilationKey,
+      generated: GeneratedCudaModule,
       artifact: NvrtcArtifact,
       entry: Path
   ): Either[NvrtcArtifactStoreError, Unit] =
@@ -226,7 +253,7 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
       else
         val created = Files.createTempDirectory(parent, s".${key.toString}.")
         temporary = Some(created)
-        writeEntry(created, key, artifact)
+        writeEntry(created, key, generated, artifact)
         try
           Files.move(created, entry, StandardCopyOption.ATOMIC_MOVE)
           temporary = None
@@ -274,12 +301,13 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
   private def validateIdentity(
       key: NvrtcCompilationKey,
       path: Path,
-      generated: GeneratedCudaModule,
+      input: NvrtcCompilationInput.Generated,
       version: NvrtcVersion,
       target: ComputeCapability,
       compilerOptions: NvrtcCompileOptions,
       programName: String
   ): Either[NvrtcArtifactStoreError, Unit] =
+    val generated = input.module
     val expectedOptions = NvrtcCompileOptions.resolve(
       generated.compilerOptions,
       target
@@ -294,7 +322,7 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
       )
     else
       val derived = NvrtcCompilationKey.derive(
-        generated,
+        input,
         target,
         version,
         programName
@@ -312,9 +340,10 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
   private def writeEntry(
       temporary: Path,
       key: NvrtcCompilationKey,
+      generated: GeneratedCudaModule,
       artifact: NvrtcArtifact
   ): Unit =
-    val source = artifact.generated.cudaSource.getBytes(StandardCharsets.UTF_8)
+    val source = generated.cudaSource.getBytes(StandardCharsets.UTF_8)
     val ptx = IArray.genericWrapArray(artifact.ptx).toArray
     val compileLog = artifact.compileLog.getBytes(StandardCharsets.UTF_8)
 
