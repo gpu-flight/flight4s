@@ -53,22 +53,13 @@ final case class NvrtcArtifactStoreSourceMismatch(
   override def message: String =
     s"NVRTC artifact store entry $key at $path does not match the supplied CUDA source"
 
-final case class NvrtcArtifactStoreUnsupportedProvenance(
-    key: NvrtcCompilationKey,
-    path: Path,
-    provenance: NvrtcSourceProvenance
-) extends NvrtcArtifactStoreError:
-  override def message: String =
-    s"NVRTC artifact store entry $key at $path does not support source " +
-      s"provenance $provenance"
-
 /**
  * Persistent storage for successful NVRTC compilation artifacts.
  *
  * Entries are atomically published under a deterministic compilation key. The
  * stored payload deliberately excludes source-map metadata: callers supply the
- * current [[GeneratedCudaModule]] when loading, so diagnostics always retain
- * the current Scala source provenance.
+ * current [[NvrtcCompilationInput]] when loading, so typed metadata and
+ * diagnostics retain the current caller's input.
  */
 final class NvrtcArtifactStore private[cuda] (root: Path):
   require(root != null, "NVRTC artifact store root must not be null")
@@ -91,9 +82,10 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
   ): Either[NvrtcArtifactStoreError, Option[NvrtcArtifact]] =
     load(key, NvrtcCompilationInput.generated(generated))
 
-  private[cuda] def load(
+  /** Loads generated or raw PTX and rebinds it to the current typed input. */
+  def load(
       key: NvrtcCompilationKey,
-      input: NvrtcCompilationInput.Generated
+      input: NvrtcCompilationInput
   ): Either[NvrtcArtifactStoreError, Option[NvrtcArtifact]] =
     val entry = entryPath(key)
     try
@@ -116,25 +108,15 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
       artifact: NvrtcArtifact
   ): Either[NvrtcArtifactStoreError, Unit] =
     val entry = entryPath(key)
-    artifact.input match
-      case generated: NvrtcCompilationInput.Generated =>
-        validateIdentity(
-          key,
-          entry,
-          generated,
-          artifact.nvrtcVersion,
-          artifact.target,
-          artifact.compilerOptions,
-          artifact.programName
-        ).flatMap(_ => writeArtifact(key, generated.module, artifact, entry))
-      case _: NvrtcCompilationInput.Raw[?] =>
-        Left(
-          NvrtcArtifactStoreUnsupportedProvenance(
-            key,
-            entry,
-            artifact.provenance
-          )
-        )
+    validateIdentity(
+      key,
+      entry,
+      artifact.input,
+      artifact.nvrtcVersion,
+      artifact.target,
+      artifact.compilerOptions,
+      artifact.programName
+    ).flatMap(_ => writeArtifact(key, artifact, entry))
 
   /** Removes the completed entry for `key`, if one exists. */
   def remove(key: NvrtcCompilationKey): Either[NvrtcArtifactStoreError, Unit] =
@@ -174,14 +156,16 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
 
   private def loadEntry(
       key: NvrtcCompilationKey,
-      input: NvrtcCompilationInput.Generated,
+      input: NvrtcCompilationInput,
       entry: Path
   ): Either[NvrtcArtifactStoreError, NvrtcArtifact] =
-    val generated = input.module
     val manifestPath = entry.resolve(ManifestFileName)
     for
       manifestBytes <- readFile(key, manifestPath)
       manifest <- parseManifest(key, manifestPath, manifestBytes)
+      _ <-
+        if manifest.provenance == input.provenance then Right(())
+        else Left(invalid(key, manifestPath, "source provenance does not match the supplied input"))
       source <- readVerifiedFile(
         key,
         entry.resolve(CudaSourceFileName),
@@ -190,7 +174,7 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
       _ <-
         if MessageDigest.isEqual(
             source,
-            generated.cudaSource.getBytes(StandardCharsets.UTF_8)
+            input.source.getBytes(StandardCharsets.UTF_8)
           )
         then Right(())
         else Left(NvrtcArtifactStoreSourceMismatch(key, entry))
@@ -240,7 +224,6 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
 
   private def writeArtifact(
       key: NvrtcCompilationKey,
-      generated: GeneratedCudaModule,
       artifact: NvrtcArtifact,
       entry: Path
   ): Either[NvrtcArtifactStoreError, Unit] =
@@ -253,7 +236,7 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
       else
         val created = Files.createTempDirectory(parent, s".${key.toString}.")
         temporary = Some(created)
-        writeEntry(created, key, generated, artifact)
+        writeEntry(created, key, artifact)
         try
           Files.move(created, entry, StandardCopyOption.ATOMIC_MOVE)
           temporary = None
@@ -301,15 +284,14 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
   private def validateIdentity(
       key: NvrtcCompilationKey,
       path: Path,
-      input: NvrtcCompilationInput.Generated,
+      input: NvrtcCompilationInput,
       version: NvrtcVersion,
       target: ComputeCapability,
       compilerOptions: NvrtcCompileOptions,
       programName: String
   ): Either[NvrtcArtifactStoreError, Unit] =
-    val generated = input.module
     val expectedOptions = NvrtcCompileOptions.resolve(
-      generated.compilerOptions,
+      input.compilerOptions,
       target
     )
     if compilerOptions != expectedOptions then
@@ -317,7 +299,7 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
         invalid(
           key,
           path,
-          "resolved compiler options do not match the generated module"
+          "resolved compiler options do not match the supplied input"
         )
       )
     else
@@ -340,10 +322,9 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
   private def writeEntry(
       temporary: Path,
       key: NvrtcCompilationKey,
-      generated: GeneratedCudaModule,
       artifact: NvrtcArtifact
   ): Unit =
-    val source = generated.cudaSource.getBytes(StandardCharsets.UTF_8)
+    val source = artifact.input.source.getBytes(StandardCharsets.UTF_8)
     val ptx = IArray.genericWrapArray(artifact.ptx).toArray
     val compileLog = artifact.compileLog.getBytes(StandardCharsets.UTF_8)
 
@@ -363,6 +344,14 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
       ptx: Array[Byte],
       compileLog: Array[Byte]
   ): String =
+    val provenanceFields = artifact.provenance match
+      case NvrtcSourceProvenance.DslGenerated(codegenVersion) =>
+        Vector(
+          "source.provenance" -> "dsl",
+          "source.codegen.version" -> codegenVersion.toString
+        )
+      case NvrtcSourceProvenance.CallerProvidedRaw =>
+        Vector("source.provenance" -> "raw")
     val values = Vector(
       "schema" -> SchemaVersion.toString,
       "key" -> key.toString,
@@ -372,7 +361,7 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
       "target.minor" -> artifact.target.minor.toString,
       "program.name" -> encode(artifact.programName),
       "options.count" -> artifact.compilerOptions.values.size.toString
-    ) ++ artifact.compilerOptions.values.zipWithIndex.map { case (option, index) =>
+    ) ++ provenanceFields ++ artifact.compilerOptions.values.zipWithIndex.map { case (option, index) =>
       s"option.$index" -> encode(option)
     } ++ Vector(
       "cuda.sha256" -> sha256(source),
@@ -394,11 +383,15 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
           _ <-
             if schema == SchemaVersion then Right(())
             else Left(NvrtcArtifactStoreUnsupportedSchema(key, path, schema))
+          provenance <- parseProvenance(key, path, fields)
           optionCount <- integerField(key, path, fields, "options.count")
           _ <-
             if optionCount > 0 then Right(())
             else Left(invalid(key, path, "options.count must be positive"))
-          expectedFields = RequiredFields ++
+          provenanceFields = provenance match
+            case NvrtcSourceProvenance.DslGenerated(_) => Set("source.codegen.version")
+            case NvrtcSourceProvenance.CallerProvidedRaw => Set.empty[String]
+          expectedFields = RequiredFields ++ provenanceFields ++
             (0 until optionCount).map(index => s"option.$index").toSet
           _ <-
             if fields.keySet == expectedFields then Right(())
@@ -477,6 +470,7 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
           ptxSha256 <- sha256Field(key, path, fields, "ptx.sha256")
           compileLogSha256 <- sha256Field(key, path, fields, "log.sha256")
         yield Manifest(
+          provenance = provenance,
           nvrtcMajor = nvrtcMajor,
           nvrtcMinor = nvrtcMinor,
           targetMajor = targetMajor,
@@ -487,6 +481,21 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
           ptxSha256 = ptxSha256,
           compileLogSha256 = compileLogSha256
         )
+    }
+
+  private def parseProvenance(
+      key: NvrtcCompilationKey,
+      path: Path,
+      fields: Map[String, String]
+  ): Either[NvrtcArtifactStoreError, NvrtcSourceProvenance] =
+    stringField(key, path, fields, "source.provenance").flatMap {
+      case "raw" => Right(NvrtcSourceProvenance.CallerProvidedRaw)
+      case "dsl" =>
+        integerField(key, path, fields, "source.codegen.version").flatMap { version =>
+          if version > 0 then Right(NvrtcSourceProvenance.DslGenerated(version))
+          else Left(invalid(key, path, "source.codegen.version must be positive"))
+        }
+      case other => Left(invalid(key, path, s"unknown source provenance: $other"))
     }
 
   private def parseFields(
@@ -598,15 +607,16 @@ final class NvrtcArtifactStore private[cuda] (root: Path):
       )
 
 object NvrtcArtifactStore:
-  private val SchemaVersion = 1
+  private val SchemaVersion = 2
   private val ManifestFileName = "manifest"
-  private val CudaSourceFileName = "generated.cu"
+  private val CudaSourceFileName = "source.cu"
   private val PtxFileName = "artifact.ptx"
   private val CompileLogFileName = "compile.log"
   private val Sha256Pattern = "[0-9a-f]{64}".r
   private val RequiredFields = Set(
     "schema",
     "key",
+    "source.provenance",
     "nvrtc.major",
     "nvrtc.minor",
     "target.major",
@@ -622,6 +632,7 @@ object NvrtcArtifactStore:
     new NvrtcArtifactStore(root)
 
   private final case class Manifest(
+      provenance: NvrtcSourceProvenance,
       nvrtcMajor: Int,
       nvrtcMinor: Int,
       targetMajor: Int,

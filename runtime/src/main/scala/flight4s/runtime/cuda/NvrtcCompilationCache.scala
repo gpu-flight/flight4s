@@ -174,27 +174,21 @@ final class NvrtcCompilationCache private[cuda] (
       key: NvrtcCompilationKey,
       input: NvrtcCompilationInput
   ): Option[CachedArtifact] =
-    input match
-      case generated: NvrtcCompilationInput.Generated =>
-        artifactStore.flatMap { store =>
-          store.load(key, generated) match
-            case Right(Some(artifact)) => Some(CachedArtifact.from(artifact))
-            case Right(None) => None
-            case Left(_: NvrtcArtifactStoreIoFailure) => None
-            case Left(_) =>
-              store.remove(key)
-              None
-        }
-      case _: NvrtcCompilationInput.Raw[?] => None
+    artifactStore.flatMap { store =>
+      store.load(key, input) match
+        case Right(Some(artifact)) => Some(CachedArtifact.from(artifact))
+        case Right(None) => None
+        case Left(_: NvrtcArtifactStoreIoFailure) => None
+        case Left(_) =>
+          store.remove(key)
+          None
+    }
 
   private def persist(
       key: NvrtcCompilationKey,
       artifact: NvrtcArtifact
   ): Unit =
-    artifact.input match
-      case _: NvrtcCompilationInput.Generated =>
-        artifactStore.foreach(_.store(key, artifact))
-      case _: NvrtcCompilationInput.Raw[?] => ()
+    artifactStore.foreach(_.store(key, artifact))
 
   private def await(
       future: CompletableFuture[CachedCompilation]
