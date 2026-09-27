@@ -5,16 +5,19 @@ import java.security.MessageDigest
 import java.util.HexFormat
 import scala.util.control.NonFatal
 
-import flight4s.core.abi.{DeviceAddress, NativeLaunchRequest}
+import flight4s.core.abi.{DeviceAddress, NativeArgumentStorage, NativeLaunchRequest}
 import flight4s.core.codegen.GeneratedKernel
 import flight4s.core.compiler.{
   ComputeCapability,
   NvrtcArtifact,
-  NvrtcCompilationInput
+  NvrtcCompilationInput,
+  NvrtcKernelInput,
+  NvrtcSourceProvenance
 }
 import flight4s.core.ir.{DeviceBuffer, KernelInvocation, KernelSignature}
 import flight4s.core.launch.LaunchConfig
 import flight4s.core.types.CudaType
+import flight4s.core.unsafe.raw.{RawCudaInvocation, RawCudaKernel}
 import flight4s.runtime.cuda.internal.*
 
 final case class CudaDriverFailure(
@@ -1308,6 +1311,24 @@ final class CudaModule private[cuda] (
     context.synchronizedLifecycle(lifetime.isOpen && context.isOpen)
 
   def function[Args <: Tuple](
+      raw: RawCudaKernel[Args]
+  ): Either[CudaDriverFailure, CudaFunction[Args]] =
+    context.synchronizedLifecycle {
+      requireOpen()
+      val owned = artifact.input match
+        case input: NvrtcCompilationInput.Raw[?] => input.definition eq raw
+        case _: NvrtcCompilationInput.Generated => false
+      require(
+        owned,
+        s"raw kernel ${raw.entryPoint} does not belong to this CUDA module artifact"
+      )
+      resolveFunction(
+        NvrtcKernelInput(raw.entryPoint, raw.signature, raw.launchRequirements),
+        Some(raw)
+      )
+    }
+
+  def function[Args <: Tuple](
       generated: GeneratedKernel[Args]
   ): Either[CudaDriverFailure, CudaFunction[Args]] =
     context.synchronizedLifecycle {
@@ -1316,52 +1337,61 @@ final class CudaModule private[cuda] (
         owns(generated),
         s"kernel ${generated.name} does not belong to this CUDA module artifact"
       )
-      val functionResult =
-        backend.resolveFunction(
-          context.nativeHandle,
-          shared.handle,
-          generated.name
-        )
-      if functionResult.status.succeeded then
-        require(
-          functionResult.handle != 0L,
-          "successful CUDA function lookup returned a null handle"
-        )
-        val attributesResult = backend.queryFunctionAttributes(
-          context.nativeHandle,
-          functionResult.handle
-        )
-        if attributesResult.status.succeeded then
-          Right(
-            new CudaFunction(
-              this,
-              generated,
-              functionResult.handle,
-              CudaFunctionAttributes(
-                maxThreadsPerBlock = attributesResult.maxThreadsPerBlock,
-                staticSharedMemoryBytes =
-                  attributesResult.staticSharedMemoryBytes,
-                constantMemoryBytes = attributesResult.constantMemoryBytes,
-                localMemoryBytes = attributesResult.localMemoryBytes,
-                registersPerThread = attributesResult.registersPerThread
-              )
+      val canonical = artifact.input.kernels.find(_.entryPoint == generated.name).get
+      resolveFunction(
+        NvrtcKernelInput(generated.name, generated.signature, canonical.launchRequirements),
+        None
+      )
+    }
+
+  private def resolveFunction[Args <: Tuple](
+      kernel: NvrtcKernelInput[Args],
+      rawDefinition: Option[RawCudaKernel[Args]]
+  ): Either[CudaDriverFailure, CudaFunction[Args]] =
+    val functionResult = backend.resolveFunction(
+      context.nativeHandle,
+      shared.handle,
+      kernel.entryPoint
+    )
+    if functionResult.status.succeeded then
+      require(
+        functionResult.handle != 0L,
+        "successful CUDA function lookup returned a null handle"
+      )
+      val attributesResult = backend.queryFunctionAttributes(
+        context.nativeHandle,
+        functionResult.handle
+      )
+      if attributesResult.status.succeeded then
+        Right(
+          new CudaFunction(
+            this,
+            kernel,
+            rawDefinition,
+            functionResult.handle,
+            CudaFunctionAttributes(
+              maxThreadsPerBlock = attributesResult.maxThreadsPerBlock,
+              staticSharedMemoryBytes = attributesResult.staticSharedMemoryBytes,
+              constantMemoryBytes = attributesResult.constantMemoryBytes,
+              localMemoryBytes = attributesResult.localMemoryBytes,
+              registersPerThread = attributesResult.registersPerThread
             )
           )
-        else
-          Left(
-            CudaDriverFailure.fromStatus(
-              s"CUDA function attribute query for ${generated.name}",
-              attributesResult.status
-            )
-          )
+        )
       else
         Left(
           CudaDriverFailure.fromStatus(
-            s"CUDA function lookup for ${generated.name}",
-            functionResult.status
+            s"CUDA function attribute query for ${kernel.entryPoint}",
+            attributesResult.status
           )
         )
-    }
+    else
+      Left(
+        CudaDriverFailure.fromStatus(
+          s"CUDA function lookup for ${kernel.entryPoint}",
+          functionResult.status
+        )
+      )
 
   override def close(): Unit =
     context.synchronizedLifecycle {
@@ -1407,12 +1437,14 @@ final class CudaModule private[cuda] (
 
 final class CudaFunction[Args <: Tuple] private[cuda] (
     val module: CudaModule,
-    val generated: GeneratedKernel[Args],
+    val kernel: NvrtcKernelInput[Args],
+    private val rawDefinition: Option[RawCudaKernel[Args]],
     private val handle: Long,
     val attributes: CudaFunctionAttributes
 ):
-  def name: String = generated.name
-  def signature: KernelSignature[Args] = generated.signature
+  def name: String = kernel.entryPoint
+  def signature: KernelSignature[Args] = kernel.signature
+  def provenance: NvrtcSourceProvenance = module.artifact.provenance
   def isValid: Boolean = module.isOpen
 
   def launch(
@@ -1428,8 +1460,21 @@ final class CudaFunction[Args <: Tuple] private[cuda] (
   ): Either[CudaLaunchFailure, Unit] =
     launchOn(invocation, config, Some(stream))
 
+  def launch(
+      invocation: RawCudaInvocation[Args],
+      config: LaunchConfig
+  ): Either[CudaLaunchFailure, Unit] =
+    launchOn(invocation, config, None)
+
+  def launch(
+      invocation: RawCudaInvocation[Args],
+      config: LaunchConfig,
+      stream: CudaStream
+  ): Either[CudaLaunchFailure, Unit] =
+    launchOn(invocation, config, Some(stream))
+
   private def launchOn(
-      invocation: KernelInvocation[Args],
+      invocation: KernelInvocation[Args] | RawCudaInvocation[Args],
       config: LaunchConfig,
       stream: Option[CudaStream]
   ): Either[CudaLaunchFailure, Unit] =
@@ -1438,11 +1483,17 @@ final class CudaFunction[Args <: Tuple] private[cuda] (
       validateInvocation(invocation).flatMap { _ =>
         validateDynamicSharedMemory(config).flatMap { _ =>
           validateStream(stream).flatMap { streamHandle =>
-            val request = invocation.nativeLaunchRequest(config)
+            val arguments = invocation match
+              case value: KernelInvocation[Args] => value.arguments
+              case value: RawCudaInvocation[Args] => value.arguments
+            val request = NativeLaunchRequest.materialize(
+              config,
+              NativeArgumentStorage.materialize(signature.pack(arguments))
+            )
             val status = stream match
               case Some(value) =>
                 value.submitTracked(
-                  launchResources(invocation)
+                  launchResources(arguments)
                 ) { trackedStreamHandle =>
                   module.submit(
                     handle,
@@ -1452,7 +1503,7 @@ final class CudaFunction[Args <: Tuple] private[cuda] (
                 }
               case None =>
                 module.context.submitDefaultTracked(
-                  launchResources(invocation)
+                  launchResources(arguments)
                 ) {
                   module.submit(handle, streamHandle, request)
                 }
@@ -1478,23 +1529,30 @@ final class CudaFunction[Args <: Tuple] private[cuda] (
     }
 
   private def validateInvocation(
-      invocation: KernelInvocation[Args]
+      invocation: KernelInvocation[Args] | RawCudaInvocation[Args]
   ): Either[CudaLaunchFailure, Unit] =
-    if invocation.kernel.name == name &&
-        (invocation.kernel.signature eq signature)
-    then Right(())
+    val (matches, actualName) = invocation match
+      case value: KernelInvocation[Args] =>
+        (
+          rawDefinition.isEmpty && value.kernel.name == name &&
+            (value.kernel.signature eq signature),
+          value.kernel.name
+        )
+      case value: RawCudaInvocation[Args] =>
+        (rawDefinition.exists(_ eq value.kernel), value.kernel.entryPoint)
+    if matches then Right(())
     else
       Left(
         CudaLaunchFailure.InvocationMismatch(
           expectedKernel = name,
-          actualKernel = invocation.kernel.name
+          actualKernel = actualName
         )
       )
 
   private def validateDynamicSharedMemory(
       config: LaunchConfig
   ): Either[CudaLaunchFailure, Unit] =
-    generated.launchRequirements.dynamicSharedMemory match
+    kernel.launchRequirements.dynamicSharedMemory match
       case None => Right(())
       case Some(requirement)
           if config.dynamicSharedMemoryBytes == 0 =>
@@ -1533,9 +1591,9 @@ final class CudaFunction[Args <: Tuple] private[cuda] (
         Right(value.nativeHandle)
 
   private def launchResources(
-      invocation: KernelInvocation[Args]
+      arguments: Args
   ): Vector[CudaInFlightResource] =
-    val buffers = invocation.arguments.productIterator.collect {
+    val buffers = arguments.productIterator.collect {
       case resource: CudaInFlightResource => resource
     }.toVector
     module +: buffers

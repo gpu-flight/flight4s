@@ -11,9 +11,38 @@ import flight4s.core.compiler.*
 import flight4s.core.dsl.CudaDsl.*
 import flight4s.core.ir.Kernel
 import flight4s.core.launch.{Block as LaunchBlock, Grid, LaunchConfig}
+import flight4s.core.unsafe.raw.{RawCuda, RawCudaKernel}
 import flight4s.runtime.cuda.internal.*
 
 class CudaResourcesSuite extends FunSuite:
+  test("raw kernels resolve with typed signatures and function attributes"):
+    val backend = RecordingBackend()
+    val raw = rawDefinition()
+    val context = openedContext(backend)
+    try
+      val module = context.load(rawArtifact(raw)).toOption.get
+      val function = module.function(raw).toOption.get
+      assertEquals(function.name, raw.entryPoint)
+      assert(function.signature eq raw.signature)
+      assertEquals(function.attributes, defaultFunctionAttributes)
+      module.close()
+      assert(!function.isValid)
+    finally context.close()
+
+  test("raw function resolution rejects a different definition before driver lookup"):
+    val backend = RecordingBackend()
+    val raw = rawDefinition()
+    val other = RawCuda.kernel(
+      raw.entryPoint, raw.signature, raw.source + "// different body\n",
+      raw.compilerOptions, raw.launchRequirements
+    )
+    val context = openedContext(backend)
+    try
+      val module = context.load(rawArtifact(raw)).toOption.get
+      intercept[IllegalArgumentException](module.function(other))
+      assert(!backend.events.exists(_.startsWith("resolve:")))
+    finally context.close()
+
   test("context owns modules and module closure invalidates functions"):
     val backend = RecordingBackend()
     val fixture = generatedFixture("ownedKernel")
@@ -49,6 +78,190 @@ class CudaResourcesSuite extends FunSuite:
     module.close()
     assertEquals(backend.events.count(_ == "release:0"), 1)
     intercept[IllegalStateException](function.nativeHandle)
+
+  test("raw and generated provenance stay separate even when native PTX is shared"):
+    val backend = RecordingBackend()
+    val generated = generatedFixture("sameKernel")
+    val raw = RawCuda.kernel(
+      generated.kernel.name, generated.kernel.signature, generated.kernel.cudaSource,
+      generated.kernel.compilerOptions, generated.kernel.launchRequirements
+    )
+    val rawCompiled = rawArtifact(raw).copy(ptx = generated.artifact.ptx)
+    val context = openedContext(backend)
+    try
+      val dslModule = context.load(generated.artifact).toOption.get
+      val rawModule = context.load(rawCompiled).toOption.get
+      assertEquals(backend.events.count(_ == "load:100"), 1)
+      intercept[IllegalArgumentException](dslModule.function(raw))
+      intercept[IllegalArgumentException](rawModule.function(generated.kernel))
+      val dslFunction = dslModule.function(generated.kernel).toOption.get
+      val rawFunction = rawModule.function(raw).toOption.get
+      assertEquals(rawFunction.provenance, NvrtcSourceProvenance.CallerProvidedRaw)
+      val config = LaunchConfig(Grid.x(1), LaunchBlock.x(1))
+      assert(dslFunction.launch(raw.bind(EmptyTuple), config).isLeft)
+      assert(rawFunction.launch(generated.definition.bind(EmptyTuple), config).isLeft)
+      assert(!backend.events.exists(_.startsWith("launch:")))
+      dslModule.close()
+      assert(rawFunction.isValid)
+      assertEquals(rawFunction.launch(raw.bind(EmptyTuple), config), Right(()))
+    finally context.close()
+
+  test("raw launches pack ABI bytes and retain resources on default and explicit streams"):
+    for explicit <- Vector(false, true) do
+      val backend = RecordingBackend()
+      val raw = RawCuda.kernel(
+        "rawBuffer", params(input[Float]("data"), value[Int]("count")),
+        "extern \"C\" __global__ void rawBuffer(const float* data, int count) {}",
+        CompilerOptions(), KernelLaunchRequirements()
+      )
+      val context = openedContext(backend)
+      try
+        val module = context.load(rawArtifact(raw)).toOption.get
+        val function = module.function(raw).toOption.get
+        val device = context.allocate[Float](4).toOption.get
+        val stream = if explicit then Some(context.createStream().toOption.get) else None
+        val config = LaunchConfig(Grid.x(2), LaunchBlock.x(32))
+        val invocation = raw.bind((device, 4))
+        val result = stream match
+          case Some(value) => function.launch(invocation, config, value)
+          case None => function.launch(invocation, config)
+        assertEquals(result, Right(()))
+        val request = backend.lastLaunch.get
+        assertEquals(request.config, config)
+        assertEquals(request.argumentOffsets.toVector, Vector(0, 8))
+        assertEquals(request.argumentCount, 2)
+        val bytes = request.argumentBuffer.order(ByteOrder.nativeOrder())
+        assertEquals(bytes.getLong(0), 1000L)
+        assertEquals(bytes.getInt(8), 4)
+        assertEquals(backend.events.last, s"launch:100:300:${if explicit then 400 else 0}:2:32")
+        assert(!backend.events.exists(_.startsWith("synchronize")))
+        module.close()
+        device.close()
+        assert(!backend.events.exists(_.startsWith("unload:")))
+        assert(!backend.events.exists(_.startsWith("free:")))
+        intercept[IllegalStateException](function.launch(invocation, config))
+        val completed = stream.fold(context.synchronize())(_.synchronize())
+        assertEquals(completed, Right(()))
+        assert(backend.events.exists(_.startsWith("unload:")))
+        assert(backend.events.exists(_.startsWith("free:")))
+      finally context.close()
+
+  test("raw invocation identity and stream context are checked before launch"):
+    val backend = RecordingBackend()
+    val raw = rawDefinition()
+    val other = RawCuda.kernel(
+      raw.entryPoint, raw.signature, raw.source, raw.compilerOptions, raw.launchRequirements
+    )
+    val context = openedContext(backend)
+    val foreign = openedContext(backend)
+    try
+      val module = context.load(rawArtifact(raw)).toOption.get
+      val function = module.function(raw).toOption.get
+      val config = LaunchConfig(Grid.x(1), LaunchBlock.x(1))
+      assertEquals(
+        function.launch(other.bind(Tuple1(1)), config),
+        Left(CudaLaunchFailure.InvocationMismatch(raw.entryPoint, other.entryPoint))
+      )
+      assertEquals(
+        function.launch(raw.bind(Tuple1(1)), config, foreign.createStream().toOption.get),
+        Left(CudaLaunchFailure.StreamContextMismatch(raw.entryPoint))
+      )
+      val closedStream = context.createStream().toOption.get
+      closedStream.close()
+      intercept[IllegalStateException](function.launch(raw.bind(Tuple1(1)), config, closedStream))
+      assert(!backend.events.exists(_.startsWith("launch:")))
+      module.close()
+      intercept[IllegalStateException](module.function(raw))
+    finally
+      context.close()
+      foreign.close()
+
+  test("raw dynamic shared-memory requirements are enforced before launch"):
+    val backend = RecordingBackend()
+    val raw = RawCuda.kernel(
+      "rawDynamic", params(), "extern \"C\" __global__ void rawDynamic() {}",
+      CompilerOptions(),
+      KernelLaunchRequirements(Some(DynamicSharedMemoryRequirement(4, 4)))
+    )
+    val context = openedContext(backend)
+    try
+      val function = context.load(rawArtifact(raw)).toOption.get.function(raw).toOption.get
+      def launch(bytes: Int) = function.launch(
+        raw.bind(EmptyTuple), LaunchConfig(Grid.x(1), LaunchBlock.x(32), bytes)
+      )
+      assertEquals(launch(0), Left(CudaLaunchFailure.DynamicSharedMemoryRequired(raw.entryPoint, 4)))
+      assertEquals(launch(6), Left(CudaLaunchFailure.InvalidDynamicSharedMemorySize(raw.entryPoint, 6, 4, 4)))
+      assertEquals(launch(128), Right(()))
+      assertEquals(backend.events.count(_.startsWith("launch:")), 1)
+    finally context.close()
+
+  test("generated lookup retains canonical launch requirements"):
+    val backend = RecordingBackend()
+    val fixture = generatedFixture(kernel("canonical", params()) { _ =>
+      dynamicSharedArray[Float]("scratch")
+      ()
+    })
+    val context = openedContext(backend)
+    try
+      val module = context.load(fixture.artifact).toOption.get
+      val changed = fixture.kernel.copy(launchRequirements = KernelLaunchRequirements())
+      val function = module.function(changed).toOption.get
+      assertEquals(function.kernel.launchRequirements, fixture.kernel.launchRequirements)
+      assertEquals(
+        function.launch(fixture.definition.bind(EmptyTuple), LaunchConfig(Grid.x(1), LaunchBlock.x(32))),
+        Left(CudaLaunchFailure.DynamicSharedMemoryRequired("canonical", 4))
+      )
+      assert(!backend.events.exists(_.startsWith("launch:")))
+    finally context.close()
+
+  test("raw function failures retain driver diagnostics and release failed launch leases"):
+    val backend = RecordingBackend()
+    val raw = rawDefinition()
+    val context = openedContext(backend)
+    try
+      val module = context.load(rawArtifact(raw)).toOption.get
+      backend.resolveStatus = failureStatus("CUDA_ERROR_NOT_FOUND")
+      assertEquals(module.function(raw).swap.toOption.get.resultName, "CUDA_ERROR_NOT_FOUND")
+      backend.resolveStatus = successStatus
+      backend.functionAttributesStatus = failureStatus("CUDA_ERROR_INVALID_HANDLE")
+      assertEquals(module.function(raw).swap.toOption.get.resultName, "CUDA_ERROR_INVALID_HANDLE")
+      backend.functionAttributesStatus = successStatus
+      val function = module.function(raw).toOption.get
+      backend.launchStatus = failureStatus("CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES")
+      function.launch(raw.bind(Tuple1(4)), LaunchConfig(Grid.x(1), LaunchBlock.x(1))) match
+        case Left(CudaLaunchFailure.Driver(failure)) =>
+          assertEquals(failure.resultName, "CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES")
+        case other => fail(s"expected a driver failure, found $other")
+      module.close()
+      assert(backend.events.exists(_.startsWith("unload:")))
+      assert(!backend.events.exists(_.startsWith("synchronize")))
+    finally context.close()
+
+  test("persistent raw artifacts resolve only against the rebound caller definition"):
+    val directory = java.nio.file.Files.createTempDirectory("flight4s-raw-launch-")
+    val store = NvrtcArtifactStore(directory)
+    val original = rawDefinition()
+    val current = rawDefinition()
+    val artifact = rawArtifact(original)
+    val key = NvrtcCompilationKey.derive(
+      artifact.input, artifact.target, artifact.nvrtcVersion, artifact.programName
+    )
+    val backend = RecordingBackend()
+    val context = openedContext(backend)
+    try
+      assertEquals(store.store(key, artifact), Right(()))
+      val loaded = store.load(key, NvrtcCompilationInput.raw(current)).toOption.flatten.get
+      val module = context.load(loaded).toOption.get
+      intercept[IllegalArgumentException](module.function(original))
+      val function = module.function(current).toOption.get
+      assertEquals(
+        function.launch(current.bind(Tuple1(3)), LaunchConfig(Grid.x(1), LaunchBlock.x(1))),
+        Right(())
+      )
+    finally
+      context.close()
+      store.clear()
+      java.nio.file.Files.delete(directory)
 
   test("context reuses one native module while matching PTX wrappers remain open"):
     val backend = RecordingBackend()
@@ -1198,6 +1411,23 @@ class CudaResourcesSuite extends FunSuite:
   ): CudaContext =
     CudaContext.open(0, backend).toOption.get
 
+  private def rawDefinition(): RawCudaKernel[Tuple1[Int]] =
+    RawCuda.kernel(
+      "rawKernel", params(value[Int]("count")),
+      "extern \"C\" __global__ void rawKernel(int count) {}\n",
+      CompilerOptions(), KernelLaunchRequirements()
+    )
+
+  private def rawArtifact[Args <: Tuple](raw: RawCudaKernel[Args]): NvrtcArtifact =
+    val target = ComputeCapability(8, 0)
+    NvrtcArtifact(
+      NvrtcCompilationInput.raw(raw),
+      IArray.unsafeFromArray(s".version 8.0\n// ${raw.entryPoint}\n".getBytes(StandardCharsets.UTF_8)),
+      "", NvrtcVersion(12, 0), target,
+      NvrtcCompileOptions.resolve(raw.compilerOptions, target),
+      s"${raw.entryPoint}.cu"
+    )
+
   private def generatedFixture(
       name: String
   ): GeneratedFixture[EmptyTuple] =
@@ -1268,6 +1498,7 @@ class CudaResourcesSuite extends FunSuite:
 
   private final class RecordingBackend extends CudaDriverBackend:
     val events: ArrayBuffer[String] = ArrayBuffer.empty
+    var lastLaunch = Option.empty[flight4s.core.abi.NativeLaunchRequest]
     var loadStatus: NativeCudaDriverStatus = successStatus
     var unloadStatus: NativeCudaDriverStatus = successStatus
     var resolveStatus: NativeCudaDriverStatus = successStatus
@@ -1375,6 +1606,7 @@ class CudaResourcesSuite extends FunSuite:
         streamHandle: Long,
         request: flight4s.core.abi.NativeLaunchRequest
     ): NativeCudaDriverStatus =
+      lastLaunch = Some(request)
       events +=
         s"launch:$contextHandle:$functionHandle:$streamHandle:" +
           s"${request.gridX}:${request.blockX}"
