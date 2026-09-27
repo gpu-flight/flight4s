@@ -9,10 +9,54 @@ import flight4s.core.compiler.NvrtcArtifact
 import flight4s.core.dsl.CudaDsl.*
 import flight4s.core.ir.Kernel
 import flight4s.core.launch.{Block as LaunchBlock, Grid, LaunchConfig}
+import flight4s.core.unsafe.raw.RawCuda
 
 class CudaResourcesJniSuite extends FunSuite:
   private val nativeLibraryConfigured =
     sys.props.contains("flight4s.cuda.native.path")
+
+  test("raw vectorAdd compiles loads launches and matches the CPU result"):
+    assume(nativeLibraryConfigured, "set flight4s.cuda.native.path to run JNI tests")
+    val raw = RawCuda.kernel(
+      "rawVectorAdd",
+      params(input[Float]("a"), input[Float]("b"), output[Float]("out"), value[Int]("n")),
+      """extern "C" __global__ void rawVectorAdd(
+        |    const float* a, const float* b, float* out, int n) {
+        |  int i = blockIdx.x * blockDim.x + threadIdx.x;
+        |  if (i < n) out[i] = a[i] + b[i];
+        |}
+        |""".stripMargin,
+      CompilerOptions(), KernelLaunchRequirements()
+    )
+    val context = openContext()
+    try
+      val artifact = NvrtcCompiler.compile(raw, context.computeCapability, "raw_vector_add.cu") match
+        case Right(value) => value
+        case Left(failure) => fail(failure.message + "\n" + failure.compileLog)
+      val module = context.load(artifact).fold(failure => fail(failure.message), identity)
+      val function = module.function(raw).fold(failure => fail(failure.message), identity)
+      val stream = context.createStream().toOption.get
+      val count = 513
+      val a = Array.tabulate(count)(_.toFloat)
+      val b = Array.tabulate(count)(i => (i * 2).toFloat)
+      val left = context.allocate[Float](count).toOption.get
+      val right = context.allocate[Float](count).toOption.get
+      val out = context.allocate[Float](count).toOption.get
+      assertEquals(left.copyFrom(a), Right(()))
+      assertEquals(right.copyFrom(b), Right(()))
+      assertEquals(
+        function.launch(
+          raw.bind((left, right, out, count)),
+          LaunchConfig(Grid.x((count + 255) / 256), LaunchBlock.x(256)), stream
+        ),
+        Right(())
+      )
+      module.close()
+      assert(!function.isValid)
+      assertEquals(stream.synchronize(), Right(()))
+      val actual = out.copyToArray().toOption.get
+      assertEquals(actual.toVector, a.zip(b).map(_ + _).toVector)
+    finally context.close()
 
   test("NVRTC artifact loads and resolves a typed CUDA function"):
     assume(

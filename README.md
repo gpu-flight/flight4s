@@ -61,10 +61,10 @@ provides:
   explicit streams;
 - reverse-creation-order cleanup across context-owned modules, buffers, and
   streams;
-- typed function resolution that preserves the generated kernel signature and
+- typed function resolution that preserves generated or raw kernel signatures and
   retains Driver-reported resource attributes;
 - typed `CudaFunction.launch` submission from the original
-  `KernelInvocation[Args]`;
+  `KernelInvocation[Args]` or `RawCudaInvocation[Args]`;
 - source-compatible default-stream launch and same-context explicit-stream
   launch with automatic in-flight resource retention;
 - explicit context synchronization through `CudaContext.synchronize()`;
@@ -74,6 +74,8 @@ provides:
 - CUDA declaration emission for constants, global parameters, static and
   dynamic shared memory, and lexical local memory;
 - a generated, compiled, and executed typed `vectorAdd` integration test;
+- a handwritten raw CUDA `vectorAdd` compiled, loaded, and executed through the
+  same typed runtime with CPU-reference verification;
 - a generated, compiled, and executed dynamic shared-memory block reduction
   with CPU-reference verification;
 - golden-source tests, native NVRTC contract tests, JNI integration tests, and
@@ -133,8 +135,25 @@ Fine-grained expression/operator spans remain a later increment.
   `clear()` clears memory only, while `clearPersistent()` clears the disk layer.
   Manifest schema v2 stores source in `source.cu` and records provenance.
   Schema v1 entries are treated as incompatible cache entries and rebuilt on
-  successful compilation. Typed raw-kernel function resolution and launch are
-  still planned.
+  successful compilation.
+
+### Raw CUDA interoperability
+
+`flight4s.core.unsafe.raw.RawCuda.kernel` accepts handwritten CUDA C++ with an
+explicit typed signature, compiler options, and launch requirements. Compile
+with `NvrtcCompiler.compile(raw, target)`, load the artifact with
+`context.load(artifact)`, resolve with `module.function(raw)`, and submit
+`function.launch(raw.bind(arguments), config, stream)`.
+
+Raw definitions must be the ones retained by the current artifact. Cache hits
+rebind to the current caller's definition; native PTX sharing does not allow
+cross-artifact or generated/raw invocation substitution. CUDA source/ABI
+agreement remains the caller's responsibility. Raw code does not pass through
+the DSL validator or IR optimizer.
+
+`CudaFunction.kernel` exposes source-neutral entry-point, signature, and launch
+metadata, replacing the pre-alpha `generated` accessor. Original generated or
+raw source remains available through `function.module.artifact.input`.
 
 ### Native module reuse
 
