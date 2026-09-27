@@ -9,6 +9,11 @@ does not bind the overall platform to one GPU vendor, leaving room for future
 HIP or Metal backends after the CUDA architecture and backend boundary are
 proven.
 
+The goal is CUDA programming in a Scala style, including functional
+composition: reusable typed expressions and staged transformations, with
+explicit memory and synchronization effects. Raw CUDA is an interoperability
+path alongside the Scala DSL.
+
 ## Status
 
 Flight4s is pre-alpha and under active design. The current implementation
@@ -109,21 +114,27 @@ Fine-grained expression/operator spans remain a later increment.
 
 ### Compilation artifacts and caches
 
-- **Identity:** A versioned canonical SHA-256 covers generated CUDA, resolved
-  options, target, compiler/codegen versions, program name, and kernel
-  ABI/launch metadata.
+- **Identity:** A versioned canonical SHA-256 covers CUDA source and its
+  generated/raw provenance, resolved options, target, compiler version,
+  generated-source codegen version, program name, and kernel ABI/launch metadata.
 - **Memory:** `NvrtcCompilationCache` is a caller-owned bounded in-memory LRU
   of successful PTX compilations. Cache hits rebind PTX metadata to the current
-  generated Scala artifact.
+  typed compilation input.
 - **Persistent artifacts:** `NvrtcCompiler.version()` queries the loaded
   compiler without creating or compiling a program, so it participates in the
   key before lookup. The versioned, checksum-verified `NvrtcArtifactStore`
-  atomically persists generated CUDA C++, PTX, compiler logs, and compilation
-  metadata while rebinding diagnostics to the current Scala source map.
+  atomically persists generated or raw CUDA C++, PTX, compiler logs, and
+  compilation metadata. Reload validates provenance and compilation identity
+  before rebinding to the caller's typed input. Generated diagnostics use the
+  current Scala source map; raw diagnostics retain CUDA locations.
 - **Persistent mode:** `NvrtcCompilationCache.persistent(maximumEntries,
   store)` composes memory, disk, then NVRTC. Store I/O failures are cache
   misses; invalid entries are removed and repaired by successful recompilation.
   `clear()` clears memory only, while `clearPersistent()` clears the disk layer.
+  Manifest schema v2 stores source in `source.cu` and records provenance.
+  Schema v1 entries are treated as incompatible cache entries and rebuilt on
+  successful compilation. Typed raw-kernel function resolution and launch are
+  still planned.
 
 ### Native module reuse
 

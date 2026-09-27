@@ -210,17 +210,98 @@ class NvrtcCompilationCacheSuite extends FunSuite:
       assertEquals(backend.compileCount, 2)
     }
 
-  test("persistent cache keeps raw artifacts in memory only"):
+  test("persistent cache reloads raw artifacts after memory is cleared"):
     withStore { store =>
       val backend = RecordingBackend()
       val cache = NvrtcCompilationCache.persistent(2, backend, store)
 
-      compiled(cache, rawInput())
+      val original = compiled(cache, rawInput())
       cache.clear()
-      compiled(cache, rawInput())
+      val rebound = rawInput()
+      val loaded = compiled(cache, rebound)
 
-      assertEquals(backend.compileCount, 2)
+      assertEquals(backend.compileCount, 1)
       assertEquals(cache.entryCount, 1)
+      assert(loaded.input eq rebound)
+      assertEquals(ptxText(loaded), ptxText(original))
+      assertEquals(loaded.diagnostics.head.sourceSpan, None)
+
+      val restartedBackend = RecordingBackend()
+      val restarted = NvrtcCompilationCache.persistent(
+        2, restartedBackend, NvrtcArtifactStore(store.directory)
+      )
+      val fromDisk = compiled(restarted, rawInput())
+      assertEquals(restartedBackend.compileCount, 0)
+      assertEquals(ptxText(fromDisk), ptxText(original))
+      assert(!(fromDisk.ptx.asInstanceOf[AnyRef] eq original.ptx.asInstanceOf[AnyRef]))
+
+      assertEquals(restarted.clearPersistent(), Right(()))
+      restarted.clear()
+      compiled(restarted, rawInput())
+      assertEquals(restartedBackend.compileCount, 1)
+    }
+
+  test("persistent raw entries recover from corrupt payloads and provenance"):
+    Vector("artifact.ptx", "source.cu", "compile.log", "manifest").foreach { file =>
+      withStore { store =>
+        val backend = RecordingBackend()
+        val cache = NvrtcCompilationCache.persistent(2, backend, store)
+        val input = rawInput()
+        val key = NvrtcCompilationKey.derive(input, target, version, programName)
+        compiled(cache, input)
+        cache.clear()
+        val path = store.entryPath(key).resolve(file)
+        val corrupt = if file == "manifest" then
+          Files.readString(path).replace("source.provenance=raw", "source.provenance=unknown")
+        else "corrupt payload"
+        Files.writeString(path, corrupt)
+
+        compiled(cache, input)
+        assertEquals(backend.compileCount, 2)
+        cache.clear()
+        compiled(cache, rawInput())
+        assertEquals(backend.compileCount, 2)
+      }
+    }
+
+  test("persistent cache replaces schema 1 entries after recompilation"):
+    withStore { store =>
+      val backend = RecordingBackend()
+      val cache = NvrtcCompilationCache.persistent(2, backend, store)
+      val module = generated("Legacy.scala")
+      val key = NvrtcCompilationKey.derive(module, target, version, programName)
+      compiled(cache, module)
+      cache.clear()
+      val entry = store.entryPath(key)
+      val manifest = entry.resolve("manifest")
+      Files.writeString(manifest, Files.readString(manifest).linesIterator
+        .filterNot(_.startsWith("source."))
+        .map(_.replace("schema=2", "schema=1")).mkString("", "\n", "\n"))
+      Files.move(entry.resolve("source.cu"), entry.resolve("generated.cu"))
+
+      compiled(cache, module)
+      assertEquals(backend.compileCount, 2)
+      assert(!Files.exists(entry.resolve("generated.cu")))
+      assert(Files.readString(manifest).contains("schema=2\n"))
+      cache.clear()
+      compiled(cache, module)
+      assertEquals(backend.compileCount, 2)
+    }
+
+  test("raw compilation failures never create persistent entries"):
+    withStore { store =>
+      val backend = RecordingBackend()
+      backend.compileAction = (input, target, name, _) =>
+        Left(failedCompilation(input, target, name))
+      val cache = NvrtcCompilationCache.persistent(2, backend, store)
+      val input = rawInput()
+      val key = NvrtcCompilationKey.derive(input, target, version, programName)
+
+      assert(cache.compile(input, target, programName).isLeft)
+      assert(cache.compile(input, target, programName).isLeft)
+      assertEquals(backend.compileCount, 2)
+      assertEquals(cache.entryCount, 0)
+      assert(!Files.exists(store.entryPath(key)))
     }
 
   test("persistent generated inputs retain their explicit codegen version"):

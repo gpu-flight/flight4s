@@ -12,14 +12,15 @@ import munit.FunSuite
 
 import flight4s.core.codegen.{
   CompilerOptions,
+  DynamicSharedMemoryRequirement,
   GeneratedCudaModule,
   KernelLaunchRequirements,
   SourceMap,
   SourceMapEntry
 }
 import flight4s.core.compiler.*
-import flight4s.core.dsl.CudaDsl.params
-import flight4s.core.ir.SourceSpan
+import flight4s.core.dsl.CudaDsl.{params, value}
+import flight4s.core.ir.{KernelSignature, SourceSpan}
 import flight4s.core.unsafe.raw.RawCuda
 
 class NvrtcArtifactStoreSuite extends FunSuite:
@@ -48,7 +49,7 @@ class NvrtcArtifactStoreSuite extends FunSuite:
 
       val entry = store.entryPath(key)
       assert(Files.isRegularFile(entry.resolve("manifest")))
-      assert(Files.isRegularFile(entry.resolve("generated.cu")))
+      assert(Files.isRegularFile(entry.resolve("source.cu")))
       assert(Files.isRegularFile(entry.resolve("artifact.ptx")))
       assert(Files.isRegularFile(entry.resolve("compile.log")))
       assert(!Files.exists(entry.resolve("source-map")))
@@ -61,7 +62,7 @@ class NvrtcArtifactStoreSuite extends FunSuite:
       assertEquals(store.load(compilationKey(module), module), Right(None))
     }
 
-  test("rejects raw provenance until the persistent schema supports it"):
+  test("stores raw artifacts with explicit source provenance"):
     withStore { store =>
       val input = NvrtcCompilationInput.raw(
         RawCuda.kernel(
@@ -95,14 +96,100 @@ class NvrtcArtifactStoreSuite extends FunSuite:
         programName = programName
       )
 
-      store.store(key, artifact) match
-        case Left(error: NvrtcArtifactStoreUnsupportedProvenance) =>
-          assertEquals(error.key, key)
-          assertEquals(
-            error.provenance,
-            NvrtcSourceProvenance.CallerProvidedRaw
-          )
-        case other => fail(s"expected an unsupported-provenance failure, found $other")
+      assertEquals(store.store(key, artifact), Right(()))
+      val manifest = Files.readString(store.entryPath(key).resolve("manifest"))
+      assert(manifest.contains("schema=2\n"))
+      assert(manifest.contains("source.provenance=raw\n"))
+      assert(!manifest.contains("source.codegen.version"))
+      assertEquals(Files.readString(store.entryPath(key).resolve("source.cu")), input.source)
+      val rebound = NvrtcCompilationInput.raw(
+        RawCuda.kernel(
+          "rawPersistentKernel", params(), input.source,
+          input.compilerOptions, KernelLaunchRequirements()
+        )
+      )
+      val loaded = store.load(key, rebound) match
+        case Right(Some(result)) => result
+        case other => fail(s"expected a raw artifact, found $other")
+      assert(loaded.input eq rebound)
+      assertEquals(loaded.provenance, NvrtcSourceProvenance.CallerProvidedRaw)
+      assertEquals(ptxText(loaded), ptxText(artifact))
+    }
+
+  test("raw reload validates ABI, entry point, launch requirements, source, and options"):
+    withStore { store =>
+      val initial = rawInput(params(value[Int]("count")))
+      val key = NvrtcCompilationKey.derive(initial, target, version, programName)
+      assertEquals(store.store(key, artifact(initial)), Right(()))
+      val changed = Vector(
+        rawInput(params(value[Float]("count"))),
+        rawInput(params(value[Int]("renamed"))),
+        rawInput(params(value[Int]("count")), entryPoint = "otherKernel"),
+        rawInput(params(value[Int]("count")), requirements = KernelLaunchRequirements(
+          dynamicSharedMemory = Some(DynamicSharedMemoryRequirement(4, 4))
+        )),
+        rawInput(params(value[Int]("count")), options = CompilerOptions(
+          additionalNvrtcOptions = Vector("--use_fast_math")
+        ))
+      )
+      changed.foreach { input =>
+        assert(store.load(key, input).left.exists(_.isInstanceOf[NvrtcArtifactStoreInvalidEntry]))
+      }
+      val changedSource = rawInput(params(value[Int]("count")), source = initial.source + "// changed\n")
+      assert(store.load(key, changedSource).left.exists(_.isInstanceOf[NvrtcArtifactStoreSourceMismatch]))
+    }
+
+  test("raw diagnostics and signatures rebind to the current caller after reload"):
+    withStore { store =>
+      val initial = rawInput(params(value[Int]("count")))
+      val rebound = rawInput(params(value[Int]("count")))
+      val key = NvrtcCompilationKey.derive(initial, target, version, programName)
+      assertEquals(store.store(key, artifact(initial)), Right(()))
+      val loaded = store.load(key, rebound).toOption.flatten.getOrElse(fail("missing artifact"))
+      assert(loaded.input eq rebound)
+      assert(loaded.input.kernels.head.signature eq rebound.kernels.head.signature)
+      assertEquals(loaded.diagnostics.head.generatedLocation.file, programName)
+      assertEquals(loaded.diagnostics.head.sourceSpan, None)
+    }
+
+  test("manifest rejects malformed provenance and codegen version fields"):
+    withStore { store =>
+      val module = generated("Provenance.scala")
+      val key = compilationKey(module)
+      assertEquals(store.store(key, artifact(module)), Right(()))
+      val path = store.entryPath(key).resolve("manifest")
+      val valid = Files.readString(path)
+      val codegenLine = valid.linesIterator.find(_.startsWith("source.codegen.version=")).get
+      Vector(
+        valid.replace("source.provenance=dsl", "source.provenance=unknown"),
+        valid.replace("source.provenance=dsl\n", ""),
+        valid.replace(codegenLine + "\n", ""),
+        valid.replace(codegenLine, "source.codegen.version=0"),
+        valid.replace(codegenLine, "source.codegen.version=not-an-integer"),
+        valid.replace("source.provenance=dsl", "source.provenance=raw"),
+        valid + "source.provenance=dsl\n"
+      ).foreach { invalidManifest =>
+        Files.writeString(path, invalidManifest)
+        assert(store.load(key, module).left.exists(_.isInstanceOf[NvrtcArtifactStoreInvalidEntry]))
+      }
+    }
+
+  test("manifest provenance and codegen version must match the current input"):
+    withStore { store =>
+      val input = rawInput(params(value[Int]("count")))
+      val key = NvrtcCompilationKey.derive(input, target, version, programName)
+      assertEquals(store.store(key, artifact(input)), Right(()))
+      val path = store.entryPath(key).resolve("manifest")
+      Files.writeString(path, Files.readString(path).replace(
+        "source.provenance=raw", "source.provenance=dsl\nsource.codegen.version=19"
+      ))
+      assert(store.load(key, input).left.exists(_.message.contains("source provenance")))
+
+      val module = generated("Version.scala")
+      val generatedKey = compilationKey(module)
+      assertEquals(store.store(generatedKey, artifact(module)), Right(()))
+      val wrongVersion = NvrtcCompilationInput.generated(module, codegenVersion = 19)
+      assert(store.load(generatedKey, wrongVersion).left.exists(_.message.contains("source provenance")))
     }
 
   test("rejects an artifact whose PTX bytes no longer match the manifest"):
@@ -127,14 +214,30 @@ class NvrtcArtifactStoreSuite extends FunSuite:
       val manifest = store.entryPath(key).resolve("manifest")
       Files.writeString(
         manifest,
-        Files.readString(manifest).replace("schema=1", "schema=2")
+        Files.readString(manifest).replace("schema=2", "schema=99")
       )
 
       store.load(key, module) match
         case Left(error: NvrtcArtifactStoreUnsupportedSchema) =>
           assertEquals(error.key, key)
-          assertEquals(error.foundVersion, 2)
+          assertEquals(error.foundVersion, 99)
         case other => fail(s"expected an unsupported-schema failure, found $other")
+    }
+
+  test("schema 1 entries require recompilation"):
+    withStore { store =>
+      val module = generated("Legacy.scala")
+      val key = compilationKey(module)
+      assertEquals(store.store(key, artifact(module)), Right(()))
+      val path = store.entryPath(key).resolve("manifest")
+      val legacy = Files.readString(path).linesIterator
+        .filterNot(_.startsWith("source."))
+        .map(_.replace("schema=2", "schema=1")).mkString("", "\n", "\n")
+      Files.writeString(path, legacy)
+      Files.move(store.entryPath(key).resolve("source.cu"), store.entryPath(key).resolve("generated.cu"))
+      store.load(key, module) match
+        case Left(error: NvrtcArtifactStoreUnsupportedSchema) => assertEquals(error.foundVersion, 1)
+        case other => fail(s"expected a legacy-schema failure, found $other")
     }
 
   test("rejects invalid compilation metadata before rebuilding an artifact"):
@@ -278,8 +381,11 @@ class NvrtcArtifactStoreSuite extends FunSuite:
     )
 
   private def artifact(module: GeneratedCudaModule): NvrtcArtifact =
+    artifact(NvrtcCompilationInput.generated(module))
+
+  private def artifact(input: NvrtcCompilationInput): NvrtcArtifact =
     NvrtcArtifact(
-      input = NvrtcCompilationInput.generated(module),
+      input = input,
       ptx = IArray.unsafeFromArray(
         ".version 8.0\n.entry persistentKernel() {}\n"
           .getBytes(StandardCharsets.UTF_8)
@@ -287,9 +393,18 @@ class NvrtcArtifactStoreSuite extends FunSuite:
       compileLog = "persistent_kernel.cu(1): warning: persisted artifact",
       nvrtcVersion = version,
       target = target,
-      compilerOptions = NvrtcCompileOptions.resolve(module.compilerOptions, target),
+      compilerOptions = NvrtcCompileOptions.resolve(input.compilerOptions, target),
       programName = programName
     )
+
+  private def rawInput[Args <: Tuple](
+      signature: KernelSignature[Args],
+      source: String = "extern \"C\" __global__ void rawKernel(int count) {}\n",
+      entryPoint: String = "rawKernel",
+      requirements: KernelLaunchRequirements = KernelLaunchRequirements(),
+      options: CompilerOptions = CompilerOptions()
+  ): NvrtcCompilationInput.Raw[Args] =
+    NvrtcCompilationInput.raw(RawCuda.kernel(entryPoint, signature, source, options, requirements))
 
   private def generatedModule(
       input: NvrtcCompilationInput
