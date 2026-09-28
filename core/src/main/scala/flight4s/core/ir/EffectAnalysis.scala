@@ -34,6 +34,7 @@ private[core] object EffectAnalysis:
     case binary: Binary[?] =>
       expression(binary.left) ++ expression(binary.right)
     case shift: UnsignedShift => expression(shift.value) ++ expression(shift.distance)
+    case shift: SignedShift => expression(shift.value) ++ expression(shift.distance)
     case comparison: Compare[?] =>
       expression(comparison.left) ++ expression(comparison.right)
     case conditional: Conditional[?] =>

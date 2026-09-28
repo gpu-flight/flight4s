@@ -118,7 +118,11 @@ so shifting by 32 is the same as shifting by 0. For example:
 val oneBit = literal(UInt.fromBits(1)) << (threadIdx.x & literal(31))
 ```
 
-Signed shifts, complement, and population count remain separate increments.
+Signed `Int` values support the same spellings and count masking: `<<` wraps
+the 32-bit result, `>>` sign-extends, and `>>>` zero-fills while returning `Int`.
+For example, `(word >>> bit) & literal(1)` extracts a bit and composes in
+`map`/`filter`/`foldLeft`. Generated CUDA avoids undefined signed C++ shifts.
+Complement and population-count intrinsics remain separate increments.
 
 For a strict scalar recurrence, use a named `foldLeft` inside a kernel body:
 

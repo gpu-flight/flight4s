@@ -51,6 +51,17 @@ final case class UnsignedShift(
 ) extends Expr[UInt]:
   override val valueType: CudaType[UInt] = flight4s.core.types.U32
 
+enum SignedShiftOperator:
+  case Left, ArithmeticRight, LogicalRight
+
+final case class SignedShift(
+    operator: SignedShiftOperator,
+    value: Expr[Int],
+    distance: Expr[Int],
+    span: SourceSpan = SourceSpan.Unknown
+) extends Expr[Int]:
+  override val valueType: CudaType[Int] = I32
+
 final case class Compare[T](
     operator: ComparisonOperator,
     left: Expr[T],

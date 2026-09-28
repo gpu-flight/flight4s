@@ -162,6 +162,7 @@ private[core] object IrNormalizer:
     case binary: Binary[?] =>
       normalizeBinary(binary, scope).asInstanceOf[Expr[T]]
     case shift: UnsignedShift => normalizeUnsignedShift(shift, scope).asInstanceOf[Expr[T]]
+    case shift: SignedShift => normalizeSignedShift(shift, scope).asInstanceOf[Expr[T]]
     case comparison: Compare[?] =>
       normalizeComparison(comparison, scope).asInstanceOf[Expr[T]]
     case conditional: Conditional[?] =>
@@ -270,6 +271,20 @@ private[core] object IrNormalizer:
       Literal(UInt.fromBits(result), U32, shift.span)
     folded.getOrElse(shift.copy(value = value, distance = distance))
 
+  private def normalizeSignedShift(shift: SignedShift, scope: ConstantScope): Expr[Int] =
+    val value = expression(shift.value, scope)
+    val distance = expression(shift.distance, scope)
+    val folded = for
+      bits <- integerLiteralValue(value)
+      count <- integerLiteralValue(distance)
+    yield
+      val result = shift.operator match
+        case SignedShiftOperator.Left => bits << (count & 31)
+        case SignedShiftOperator.ArithmeticRight => bits >> (count & 31)
+        case SignedShiftOperator.LogicalRight => bits >>> (count & 31)
+      Literal(result, I32, shift.span)
+    folded.getOrElse(shift.copy(value = value, distance = distance))
+
   private def unsignedLiteralBits(expression: Expr[?]): Option[Int] = expression match
     case literal: Literal[?] if literal.valueType == U32 => literal.value match
       case value: UInt => Some(value.toIntBits)
@@ -357,6 +372,7 @@ private[core] object IrNormalizer:
       case literal: Literal[?] => literal.copy(span = span).asInstanceOf[Expr[T]]
       case binary: Binary[?] => binary.copy(span = span).asInstanceOf[Expr[T]]
       case shift: UnsignedShift => shift.copy(span = span).asInstanceOf[Expr[T]]
+      case shift: SignedShift => shift.copy(span = span).asInstanceOf[Expr[T]]
       case comparison: Compare[?] => comparison.copy(span = span).asInstanceOf[Expr[T]]
       case conditional: Conditional[?] => conditional.copy(span = span).asInstanceOf[Expr[T]]
       case math: UnaryMath[?] => math.copy(span = span).asInstanceOf[Expr[T]]

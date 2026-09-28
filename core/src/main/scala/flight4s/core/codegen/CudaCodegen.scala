@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 18
+  val ArtifactVersion: Int = 19
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -368,6 +368,8 @@ object CudaCodegen:
             distance <- emitExpression(shift.distance)
           yield s"($value ${shift.operator.cudaToken} ($distance & 31))"
 
+        case shift: SignedShift => emitSignedShift(shift)
+
         case comparison: Compare[?] =>
           for
             left <- emitExpression(comparison.left)
@@ -416,6 +418,25 @@ object CudaCodegen:
 
         case load: Load[?, ?, ?] =>
           emitPlace(load.from)
+
+    private def emitSignedShift(shift: SignedShift): Either[CodegenError, String] =
+      for
+        value <- emitExpression(shift.value)
+        distance <- emitExpression(shift.distance)
+      yield
+        val bits = freshNames.value()
+        val count = freshNames.value()
+        val result = freshNames.value()
+        val shifted = shift.operator match
+          case SignedShiftOperator.Left => s"($bits << $count)"
+          case SignedShiftOperator.LogicalRight => s"($bits >> $count)"
+          case SignedShiftOperator.ArithmeticRight =>
+            s"(($bits & 0x80000000u) != 0u ? ~(~$bits >> $count) : ($bits >> $count))"
+        // Convert back only after bounding each signed cast to 0..Int.MaxValue.
+        s"([&]() { const unsigned int $bits = static_cast<unsigned int>($value); " +
+          s"const unsigned int $count = static_cast<unsigned int>($distance) & 31u; " +
+          s"const unsigned int $result = $shifted; " +
+          s"return $result <= 0x7fffffffu ? static_cast<int>($result) : (-1 - static_cast<int>(~$result)); }())"
 
     private def emitPlace(
         place: Place[?, ?, ?]
@@ -685,6 +706,7 @@ object CudaCodegen:
       case binary: Binary[?] =>
         collectTypes(binary.left) ++ collectTypes(binary.right)
       case shift: UnsignedShift => collectTypes(shift.value) ++ collectTypes(shift.distance)
+      case shift: SignedShift => collectTypes(shift.value) ++ collectTypes(shift.distance)
       case comparison: Compare[?] =>
         collectTypes(comparison.left) ++ collectTypes(comparison.right)
       case conditional: Conditional[?] =>
@@ -764,6 +786,7 @@ object CudaCodegen:
       case binary: Binary[?] =>
         collectIdentifiers(binary.left) ++ collectIdentifiers(binary.right)
       case shift: UnsignedShift => collectIdentifiers(shift.value) ++ collectIdentifiers(shift.distance)
+      case shift: SignedShift => collectIdentifiers(shift.value) ++ collectIdentifiers(shift.distance)
       case comparison: Compare[?] =>
         collectIdentifiers(comparison.left) ++
           collectIdentifiers(comparison.right)
