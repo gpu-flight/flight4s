@@ -605,6 +605,26 @@ object KernelValidator:
             comparison.right.span
           )
 
+      case conditional: Conditional[?] =>
+        validateExpression(conditional.condition, parameters, s"$location.condition", scope) ++
+          validateExpression(conditional.whenTrue, parameters, s"$location.whenTrue", scope) ++
+          validateExpression(conditional.whenFalse, parameters, s"$location.whenFalse", scope) ++
+          requireSameType(
+            conditional.condition.valueType, Bool,
+            "conditional expression condition must have CUDA bool type",
+            s"$location.condition", conditional.condition.span
+          ) ++
+          requireSameType(
+            conditional.whenTrue.valueType, conditional.valueType,
+            "true value type does not match conditional result type",
+            s"$location.whenTrue", conditional.whenTrue.span
+          ) ++
+          requireSameType(
+            conditional.whenFalse.valueType, conditional.valueType,
+            "false value type does not match conditional result type",
+            s"$location.whenFalse", conditional.whenFalse.span
+          )
+
       case intrinsic: Intrinsic[?] =>
         intrinsicTypes.get(intrinsic.name) match
           case None =>

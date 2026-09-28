@@ -38,6 +38,12 @@ object CudaDsl:
   def literal[T](value: T)(using valueType: CudaType[T]): Expr[T] =
     Literal(value, valueType)
 
+  def choose[T](condition: Expr[Boolean])(whenTrue: Expr[T])(whenFalse: Expr[T])(using
+      valueType: CudaType[T],
+      position: DslSourcePosition
+  ): Expr[T] =
+    Conditional(condition, whenTrue, whenFalse, valueType, position.span)
+
   def input[T](name: String)(using valueType: CudaType[T]): BufferParam[T, ReadOnly] =
     BufferParam(name, valueType)
 

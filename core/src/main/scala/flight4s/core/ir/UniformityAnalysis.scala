@@ -82,6 +82,10 @@ private[core] object UniformityAnalysis:
       expression(binary.left, scope).join(expression(binary.right, scope))
     case comparison: Compare[?] =>
       expression(comparison.left, scope).join(expression(comparison.right, scope))
+    case conditional: Conditional[?] =>
+      expression(conditional.condition, scope)
+        .join(expression(conditional.whenTrue, scope))
+        .join(expression(conditional.whenFalse, scope))
     case intrinsic: Intrinsic[?] =>
       intrinsicUniformities.getOrElse(intrinsic.name, Uniformity.Unknown)
     case conversion: Convert[?, ?] => expression(conversion.value, scope)

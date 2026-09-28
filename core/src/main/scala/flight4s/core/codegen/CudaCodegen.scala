@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 7
+  val ArtifactVersion: Int = 8
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -329,6 +329,13 @@ object CudaCodegen:
             right <- emitExpression(comparison.right)
           yield s"($left ${comparison.operator.cudaToken} $right)"
 
+        case conditional: Conditional[?] =>
+          for
+            condition <- emitExpression(conditional.condition)
+            whenTrue <- emitExpression(conditional.whenTrue)
+            whenFalse <- emitExpression(conditional.whenFalse)
+          yield s"($condition ? $whenTrue : $whenFalse)"
+
         case intrinsic: Intrinsic[?] =>
           Right(intrinsic.name)
 
@@ -604,6 +611,9 @@ object CudaCodegen:
         collectTypes(binary.left) ++ collectTypes(binary.right)
       case comparison: Compare[?] =>
         collectTypes(comparison.left) ++ collectTypes(comparison.right)
+      case conditional: Conditional[?] =>
+        collectTypes(conditional.condition) ++
+          collectTypes(conditional.whenTrue) ++ collectTypes(conditional.whenFalse)
       case conversion: Convert[?, ?] =>
         collectTypes(conversion.value)
       case accumulation: ToAccumulator[?, ?] =>
@@ -670,6 +680,9 @@ object CudaCodegen:
       case comparison: Compare[?] =>
         collectIdentifiers(comparison.left) ++
           collectIdentifiers(comparison.right)
+      case conditional: Conditional[?] =>
+        collectIdentifiers(conditional.condition) ++
+          collectIdentifiers(conditional.whenTrue) ++ collectIdentifiers(conditional.whenFalse)
       case conversion: Convert[?, ?] =>
         collectIdentifiers(conversion.value)
       case accumulation: ToAccumulator[?, ?] =>

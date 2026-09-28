@@ -15,6 +15,59 @@ class CudaResourcesJniSuite extends FunSuite:
   private val nativeLibraryConfigured =
     sys.props.contains("flight4s.cuda.native.path")
 
+  test("conditional maps and guarded division match CPU results on the GPU"):
+    assume(nativeLibraryConfigured, "set flight4s.cuda.native.path to run JNI tests")
+    val rows = 259
+    val columns = 7
+    val values = Array.tabulate(rows * columns)(i => ((i % 11) - 5).toFloat)
+    val divisors = Array.tabulate(rows)(i => (i % 7) - 3)
+    val definition = kernel("conditionalMaps", params(
+      input[Float]("source"), input[Int]("divisors"), output[Float]("sums"),
+      output[Int]("quotients"), value[Int]("rows")
+    )) { bindings =>
+      val (source, divisors, sums, quotients, rowCount) = bindings
+      val row = local("row", blockIdx.x * blockDim.x + threadIdx.x)
+      when(row.read < rowCount) {
+        sums(row.read) := gpuRange("column", literal(0), literal(columns))
+          .map(column => source(row.read * literal(columns) + column).read)
+          .map(x => choose(x > literal(0.0f))(x)(literal(0.0f)))
+          .sum(literal(0.0f))
+        val divisor = local("divisor", divisors(row.read).read)
+        val quotient = literal(12) / divisor.read
+        quotients(row.read) := choose(divisor.read !== literal(0))(
+          quotient + quotient
+        )(literal(99))
+      }
+    }
+    val generated = CudaCodegen.generate(definition).fold(error => fail(error.message), identity)
+    val generatedModule = GeneratedCudaModule(
+      generated.cudaSource, generated.sourceMap, generated.compilerOptions, Vector(generated)
+    )
+    val context = openContext()
+    try
+      val artifact = NvrtcCompiler.compile(generatedModule, context.computeCapability, "conditional_maps.cu")
+        .fold(failure => fail(failure.message + "\n" + failure.compileLog), identity)
+      val module = context.load(artifact).fold(failure => fail(failure.message), identity)
+      val function = module.function(generated).fold(failure => fail(failure.message), identity)
+      val source = context.allocate[Float](values.length).toOption.get
+      val divisorBuffer = context.allocate[Int](rows).toOption.get
+      val sums = context.allocate[Float](rows).toOption.get
+      val quotients = context.allocate[Int](rows).toOption.get
+      assertEquals(source.copyFrom(values), Right(()))
+      assertEquals(divisorBuffer.copyFrom(divisors), Right(()))
+      assertEquals(sums.copyFrom(Array.fill(rows)(-1.0f)), Right(()))
+      assertEquals(quotients.copyFrom(Array.fill(rows)(-1)), Right(()))
+      assertEquals(function.launch(
+        definition.bind((source, divisorBuffer, sums, quotients, rows)),
+        LaunchConfig(Grid.x((rows + 127) / 128), LaunchBlock.x(128))
+      ), Right(()))
+      assertEquals(context.synchronize(), Right(()))
+      val expectedSums = values.grouped(columns).map(_.filter(_ > 0.0f).sum).toVector
+      val expectedQuotients = divisors.map(d => if d == 0 then 99 else (12 / d) * 2).toVector
+      assertEquals(sums.copyToArray().toOption.get.toVector, expectedSums)
+      assertEquals(quotients.copyToArray().toOption.get.toVector, expectedQuotients)
+    finally context.close()
+
   test("repeated scoped helpers preserve ordered GPU stores and outer-local updates"):
     assume(nativeLibraryConfigured, "set flight4s.cuda.native.path to run JNI tests")
     val count = 257

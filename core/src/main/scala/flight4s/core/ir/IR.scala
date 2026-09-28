@@ -45,6 +45,14 @@ final case class Compare[T](
 ) extends Expr[Boolean]:
   override val valueType: CudaType[Boolean] = flight4s.core.types.Bool
 
+final case class Conditional[T](
+    condition: Expr[Boolean],
+    whenTrue: Expr[T],
+    whenFalse: Expr[T],
+    valueType: CudaType[T],
+    span: SourceSpan = SourceSpan.Unknown
+) extends Expr[T]
+
 final case class Intrinsic[T](
     name: String,
     valueType: CudaType[T],

@@ -148,6 +148,8 @@ private[core] object IrNormalizer:
       normalizeBinary(binary, scope).asInstanceOf[Expr[T]]
     case comparison: Compare[?] =>
       normalizeComparison(comparison, scope).asInstanceOf[Expr[T]]
+    case conditional: Conditional[?] =>
+      normalizeConditional(conditional, scope).asInstanceOf[Expr[T]]
     case intrinsic: Intrinsic[?] => intrinsic.asInstanceOf[Expr[T]]
     case conversion: Convert[?, ?] =>
       conversion
@@ -171,6 +173,20 @@ private[core] object IrNormalizer:
     case load: Load[?, ?, ?] =>
       normalizeLoad(load, scope).asInstanceOf[Expr[T]]
     case parameter: ScalarParam[?] => parameter.asInstanceOf[Expr[T]]
+
+  private def normalizeConditional[T](
+      conditional: Conditional[T],
+      scope: ConstantScope
+  ): Expr[T] =
+    val condition = expression(conditional.condition, scope)
+    booleanLiteralValue(condition) match
+      case Some(true) => withSpan(expression(conditional.whenTrue, scope), conditional.span)
+      case Some(false) => withSpan(expression(conditional.whenFalse, scope), conditional.span)
+      case None => conditional.copy(
+        condition = condition,
+        whenTrue = expression(conditional.whenTrue, scope),
+        whenFalse = expression(conditional.whenFalse, scope)
+      )
 
   private def normalizeStore[T, Space <: AddressSpace](
       store: Store[T, Space],
@@ -286,6 +302,7 @@ private[core] object IrNormalizer:
       case literal: Literal[?] => literal.copy(span = span).asInstanceOf[Expr[T]]
       case binary: Binary[?] => binary.copy(span = span).asInstanceOf[Expr[T]]
       case comparison: Compare[?] => comparison.copy(span = span).asInstanceOf[Expr[T]]
+      case conditional: Conditional[?] => conditional.copy(span = span).asInstanceOf[Expr[T]]
       case intrinsic: Intrinsic[?] => intrinsic.copy(span = span).asInstanceOf[Expr[T]]
       case conversion: Convert[?, ?] => conversion.copy(span = span).asInstanceOf[Expr[T]]
       case accumulation: ToAccumulator[?, ?] =>
