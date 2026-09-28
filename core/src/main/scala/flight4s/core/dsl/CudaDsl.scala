@@ -586,6 +586,11 @@ object CudaDsl:
     def y: Expr[Int] = Intrinsic("blockDim.y", I32)
     def z: Expr[Int] = Intrinsic("blockDim.z", I32)
 
+  object gridDim:
+    def x: Expr[Int] = Intrinsic("gridDim.x", I32)
+    def y: Expr[Int] = Intrinsic("gridDim.y", I32)
+    def z: Expr[Int] = Intrinsic("gridDim.z", I32)
+
   extension (value: Expr[Int])
     @targetName("signedShiftLeft")
     def <<(distance: Expr[Int])(using position: DslSourcePosition): Expr[Int] =

@@ -49,13 +49,26 @@ expression builders without allocating an intermediate device collection.
 type, and reduction policy. `foreach` lowers to the existing GPU loop for
 explicit stores and other statements.
 
-Indexing intrinsics `threadIdx`, `blockIdx`, and `blockDim` expose `Expr[Int]`
+Indexing intrinsics `threadIdx`, `blockIdx`, `blockDim`, and `gridDim` expose `Expr[Int]`
 on all three axes. Generated CUDA explicitly casts each built-in field to `int`,
 so negative comparisons, division, and remainder keep signed semantics even
 though CUDA's underlying fields are unsigned. For an eight-thread block,
 `literal(-7) / blockDim.x` is `0` and its remainder is `-7`. This does not add
 overflow checks or promise JVM wraparound for general arithmetic; keep index
 calculations within the signed 32-bit range.
+
+`gridDim` reads the current launch's grid dimensions. For a multidimensional
+grid, construct a linear block index without passing duplicate shape arguments:
+
+```scala
+val linearBlock = blockIdx.x + gridDim.x * (blockIdx.y + gridDim.y * blockIdx.z)
+val blockCount = gridDim.x * gridDim.y * gridDim.z
+```
+
+These are staged device expressions, not host values. Grid dimensions are
+uniform across a launch but remain dynamic between launches, even for kernels
+with a required block shape. Using them does not automatically distribute a
+functional range across threads or enable dynamic `.by` steps.
 
 Explicit statement loops also accept a positive static stride:
 
@@ -504,8 +517,9 @@ affected caches if external headers change at the same path.
   generated/raw provenance, resolved options, target, compiler version,
   generated-source codegen version, program name, and kernel ABI/launch metadata.
   Encoding v3 includes optional exact block dimensions. Previous encoding-v2
-  entries become cache misses. Codegen v25 specializes required block dimensions
-  on top of v24's signed indexing repair; the store remains schema v2.
+  entries become cache misses. Codegen v26 supports signed grid dimensions,
+  following v25's block specialization and v24's signed indexing repair;
+  the store remains schema v2.
 - **Memory:** `NvrtcCompilationCache` is a caller-owned bounded in-memory LRU
   of successful PTX compilations. Cache hits rebind PTX metadata to the current
   typed compilation input.

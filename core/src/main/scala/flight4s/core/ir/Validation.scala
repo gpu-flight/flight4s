@@ -112,7 +112,10 @@ object KernelValidator:
     "blockIdx.z" -> I32,
     "blockDim.x" -> I32,
     "blockDim.y" -> I32,
-    "blockDim.z" -> I32
+    "blockDim.z" -> I32,
+    "gridDim.x" -> I32,
+    "gridDim.y" -> I32,
+    "gridDim.z" -> I32
   )
 
   def validate(kernel: Kernel[?]): ValidationResult =
