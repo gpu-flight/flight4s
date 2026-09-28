@@ -269,6 +269,14 @@ object CudaDsl:
     builder.append(LocalDeclaration(variable, initial, position.span))
     variable
 
+  /** Evaluates once at this statement position and exposes only the stored value. */
+  def let[T](name: String, initial: Expr[T])(using
+      valueType: CudaType[T],
+      builder: BlockBuilder,
+      position: DslSourcePosition
+  ): Expr[T] =
+    Load(local(name, initial), position.span)
+
   def localArray[T](
       name: String,
       elementCount: Int

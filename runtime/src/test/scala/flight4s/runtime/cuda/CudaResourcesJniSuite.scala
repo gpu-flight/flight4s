@@ -15,6 +15,55 @@ class CudaResourcesJniSuite extends FunSuite:
   private val nativeLibraryConfigured =
     sys.props.contains("flight4s.cuda.native.path")
 
+  test("let snapshots retain device values and reductions across later source mutation"):
+    assume(nativeLibraryConfigured, "set flight4s.cuda.native.path to run JNI tests")
+    val rows = 259
+    val columns = 7
+    val values = Array.tabulate(rows * columns)(i => i % 13 - 4)
+    val definition = kernel("letSnapshots", params(
+      inOut[Int]("source"), output[Int]("snapshots"), output[Int]("sums")
+    )) { bindings =>
+      val (source, snapshots, sums) = bindings
+      val row = let("row", blockIdx.x * blockDim.x + threadIdx.x)
+      when(row < literal(rows)) {
+        val first = let("first", source(row * literal(columns)).read)
+        val sum = let("sum", gpuRange("column", literal(0), literal(columns))
+          .map(column => source(row * literal(columns) + column).read).sum(literal(0)))
+        gpuRange("clearColumn", literal(0), literal(columns)).foreach { column =>
+          source(row * literal(columns) + column) := literal(0)
+        }
+        snapshots(row) := first + first
+        sums(row) := sum + sum
+      }
+    }
+    val generated = CudaCodegen.generate(definition).fold(error => fail(error.message), identity)
+    val generatedModule = GeneratedCudaModule(
+      generated.cudaSource, generated.sourceMap, generated.compilerOptions, Vector(generated)
+    )
+    val context = openContext()
+    try
+      val artifact = NvrtcCompiler.compile(generatedModule, context.computeCapability, "let_snapshots.cu")
+        .fold(failure => fail(failure.message + "\n" + failure.compileLog), identity)
+      val module = context.load(artifact).fold(failure => fail(failure.message), identity)
+      val function = module.function(generated).fold(failure => fail(failure.message), identity)
+      val source = context.allocate[Int](values.length).toOption.get
+      val snapshots = context.allocate[Int](rows).toOption.get
+      val sums = context.allocate[Int](rows).toOption.get
+      assertEquals(source.copyFrom(values), Right(()))
+      assertEquals(snapshots.copyFrom(Array.fill(rows)(-1)), Right(()))
+      assertEquals(sums.copyFrom(Array.fill(rows)(-1)), Right(()))
+      assertEquals(function.launch(
+        definition.bind((source, snapshots, sums)),
+        LaunchConfig(Grid.x(3), LaunchBlock.x(128))
+      ), Right(()))
+      assertEquals(context.synchronize(), Right(()))
+      assertEquals(snapshots.copyToArray().toOption.get.toVector,
+        Vector.tabulate(rows)(row => values(row * columns) * 2))
+      assertEquals(sums.copyToArray().toOption.get.toVector,
+        Vector.tabulate(rows)(row => values.slice(row * columns, (row + 1) * columns).sum * 2))
+      assertEquals(source.copyToArray().toOption.get.toVector, Vector.fill(values.length)(0))
+    finally context.close()
+
   test("strict folds retain order scalar state and results after source mutation"):
     assume(nativeLibraryConfigured, "set flight4s.cuda.native.path to run JNI tests")
     val rows = 17

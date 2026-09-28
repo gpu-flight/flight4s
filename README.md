@@ -54,7 +54,18 @@ reduction, fold-step, or `choose`-arm callbacks raise a source-located
 `DslError(StatementInsideExpression)` instead of escaping into an outer block.
 This staging check does not prohibit ordinary JVM mutation or I/O.
 Reusing an `Expr` does not snapshot or memoize a
-load; use `local` when a device value must be stored before later mutations.
+load. Use `let` for a named, read-only device snapshot and `local` for mutable
+device state:
+
+```scala
+val previous = let("previous", data(index).read)
+data(index) := literal(0.0f)
+result(index) := previous // Reads the saved value, not the updated buffer.
+```
+
+This snippet belongs inside a kernel body with the named parameters declared.
+`let` stages a local declaration at that position; it is not an expression-only
+combinator and cannot be hidden inside a `map` callback or `choose` arm.
 Automatic grid distribution and parallel reductions are not implied by this API.
 
 Reusable statement helpers can use `scoped { ... }` to isolate temporary locals
@@ -101,6 +112,7 @@ provides:
 - lexical `scoped` bodies for reusable higher-order Scala statement helpers;
 - typed value-producing conditionals with guarded CUDA expression evaluation;
 - strict named scalar `foldLeft` terminals for ordered per-thread recurrences;
+- named `let` snapshots returning read-only expressions for once-evaluated values;
 - distinct module constants, rank-aware kernel shared arrays, and lexical local
   arrays;
 - module and kernel validation for memory ownership, scope, access, and static
