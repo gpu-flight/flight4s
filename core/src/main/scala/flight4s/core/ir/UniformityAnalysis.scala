@@ -120,6 +120,9 @@ private[core] object UniformityAnalysis:
             scope.withLocal(local.name, expression(store.value, scope))
           case _ => scope
 
+      case atomic: AtomicFetchAdd[?, ?] =>
+        scope.withLocal(atomic.local.name, Uniformity.Varying)
+
       case accumulation: Accumulate[?] =>
         val current =
           scope.locals.getOrElse(accumulation.target.name, Uniformity.Unknown)
@@ -193,4 +196,5 @@ private[core] object UniformityAnalysis:
         branch.elseBlock.toVector.flatMap(modifiedLocalNames).toSet
     case scoped: ScopedBlock => modifiedLocalNames(scoped.body)
     case loop: ForLoop => modifiedLocalNames(loop.body)
-    case _: LocalDeclaration[?] | _: LocalArrayDeclaration[?] | _: AtomicAdd[?, ?] | _: Barrier => Set.empty
+    case _: LocalDeclaration[?] | _: LocalArrayDeclaration[?] |
+        _: AtomicAdd[?, ?] | _: AtomicFetchAdd[?, ?] | _: Barrier => Set.empty

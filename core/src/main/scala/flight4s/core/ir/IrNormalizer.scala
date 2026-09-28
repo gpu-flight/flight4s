@@ -88,6 +88,9 @@ private[core] object IrNormalizer:
     case atomic: AtomicAdd[?, ?] =>
       (Some(normalizeAtomic(atomic, scope)), scope)
 
+    case atomic: AtomicFetchAdd[?, ?] =>
+      (Some(normalizeAtomicFetch(atomic, scope)), scope.without(atomic.local.name))
+
     case accumulation: Accumulate[?] =>
       val normalized = accumulation.copy(value = expression(accumulation.value, scope))
       (Some(normalized), scope.without(accumulation.target.name))
@@ -192,6 +195,15 @@ private[core] object IrNormalizer:
         whenTrue = expression(conditional.whenTrue, scope),
         whenFalse = expression(conditional.whenFalse, scope)
       )
+
+  private def normalizeAtomicFetch[T, Space <: AddressSpace](
+      atomic: AtomicFetchAdd[T, Space],
+      scope: ConstantScope
+  ): AtomicFetchAdd[T, Space] =
+    atomic.copy(
+      target = place(atomic.target, scope),
+      value = expression(atomic.value, scope)
+    )
 
   private def normalizeAtomic[T, Space <: AddressSpace](
       atomic: AtomicAdd[T, Space],

@@ -81,6 +81,7 @@ private[core] object BarrierDivergenceAnalysis:
       case _: LocalArrayDeclaration[?] => Vector.empty
       case _: Store[?, ?] => Vector.empty
       case _: AtomicAdd[?, ?] => Vector.empty
+      case _: AtomicFetchAdd[?, ?] => Vector.empty
       case _: Accumulate[?] => Vector.empty
 
   private def isKnownDivergent(

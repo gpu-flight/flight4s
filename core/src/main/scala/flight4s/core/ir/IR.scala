@@ -231,6 +231,14 @@ final case class AtomicAdd[T, Space <: AddressSpace](
     span: SourceSpan = SourceSpan.Unknown
 ) extends ExecutableStmt
 
+final case class AtomicFetchAdd[T, Space <: AddressSpace](
+    local: LocalVariable[T],
+    target: Place[T, Space, ReadWrite],
+    value: Expr[T],
+    addition: AtomicAddType[T],
+    span: SourceSpan = SourceSpan.Unknown
+) extends ScopedDeclaration
+
 final case class Accumulate[T](
     target: LocalVariable[T],
     value: Expr[T],

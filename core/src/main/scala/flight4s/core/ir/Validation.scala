@@ -381,6 +381,22 @@ object KernelValidator:
 
           (errors ++ declarationErrors, nextScope)
 
+        case ((errors, scope), (atomic: AtomicFetchAdd[?, ?], index)) =>
+          val statementLocation = s"$location.statements[$index]"
+          val nameErrors = validateLocalName(atomic.local, parameters, scope, statementLocation)
+          val declarationErrors = nameErrors ++
+            validateAtomicAdd(atomic.target, atomic.value, atomic.addition, atomic.span,
+              parameters, statementLocation, scope) ++
+            requireSameType(atomic.local.valueType, atomic.target.valueType,
+              "atomic result type does not match the target type", statementLocation,
+              atomic.span, ValidationCode.LocalTypeMismatch)
+          val nextScope =
+            if nameErrors.isEmpty then scope.copy(
+              locals = scope.locals.updated(atomic.local.name, atomic.local.valueType)
+            )
+            else scope
+          (errors ++ declarationErrors, nextScope)
+
         case ((errors, scope), (declaration: LocalArrayDeclaration[?], index)) =>
           val statementLocation = s"$location.statements[$index]"
           val declarationValidation =
@@ -442,21 +458,8 @@ object KernelValidator:
           )
 
       case atomic: AtomicAdd[?, ?] =>
-        val spaceErrors = atomic.target match
-          case _: BufferElement[?, ?] | _: SharedElement[?] => Vector.empty
-          case _ => Vector(ValidationError(
-            ValidationCode.InvalidAtomicAddressSpace,
-            "atomicAdd requires a global or shared memory target",
-            s"$location.target",
-            atomic.span
-          ))
-        spaceErrors ++
-          validatePlace(atomic.target, parameters, s"$location.target", isWrite = true, scope = scope) ++
-          validateExpression(atomic.value, parameters, s"$location.value", scope) ++
-          requireSameType(atomic.target.valueType, atomic.value.valueType,
-            "atomicAdd value type does not match the target type", s"$location.value", atomic.span) ++
-          requireSameType(atomic.addition, atomic.target.valueType,
-            "atomicAdd capability does not match the target type", location, atomic.span)
+        validateAtomicAdd(atomic.target, atomic.value, atomic.addition, atomic.span,
+          parameters, location, scope)
 
       case accumulation: Accumulate[?] =>
         validatePlace(
@@ -537,6 +540,31 @@ object KernelValidator:
 
       case _: Barrier =>
         Vector.empty
+
+  private def validateAtomicAdd(
+      target: Place[?, ?, ?],
+      value: Expr[?],
+      addition: CudaType[?],
+      span: SourceSpan,
+      parameters: Map[String, KernelParam],
+      location: String,
+      scope: ValidationScope
+  ): Vector[ValidationError] =
+    val spaceErrors = target match
+      case _: BufferElement[?, ?] | _: SharedElement[?] => Vector.empty
+      case _ => Vector(ValidationError(
+        ValidationCode.InvalidAtomicAddressSpace,
+        "atomicAdd requires a global or shared memory target",
+        s"$location.target",
+        span
+      ))
+    spaceErrors ++
+      validatePlace(target, parameters, s"$location.target", isWrite = true, scope = scope) ++
+      validateExpression(value, parameters, s"$location.value", scope) ++
+      requireSameType(target.valueType, value.valueType,
+        "atomicAdd value type does not match the target type", s"$location.value", span) ++
+      requireSameType(addition, target.valueType,
+        "atomicAdd capability does not match the target type", location, span)
 
   private def validateExpression(
       expression: Expr[?],
