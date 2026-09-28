@@ -10,6 +10,7 @@ sealed trait AdditiveType[T] extends CudaType[T]
 sealed trait MultiplicativeType[T] extends CudaType[T]
 sealed trait DivisibleType[T] extends CudaType[T]
 sealed trait RemainderType[T] extends CudaType[T]
+sealed trait BitwiseType[T] extends CudaType[T]
 sealed trait OrderedType[T] extends CudaType[T]
 sealed trait EqualityComparableType[T] extends CudaType[T]
 sealed trait FloatingMathType[T] extends CudaType[T]
@@ -74,6 +75,7 @@ case object I32
       MultiplicativeType[Int],
       DivisibleType[Int],
       RemainderType[Int],
+      BitwiseType[Int],
       OrderedType[Int],
       EqualityComparableType[Int]:
   override val cudaName: String = "int"
@@ -87,6 +89,7 @@ case object U32
       MultiplicativeType[UInt],
       DivisibleType[UInt],
       RemainderType[UInt],
+      BitwiseType[UInt],
       OrderedType[UInt],
       EqualityComparableType[UInt]:
   override val cudaName: String = "unsigned int"
@@ -190,6 +193,10 @@ object DivisibleType:
 object RemainderType:
   given intType: RemainderType[Int] = I32
   given uintType: RemainderType[UInt] = U32
+
+object BitwiseType:
+  given intType: BitwiseType[Int] = I32
+  given uintType: BitwiseType[UInt] = U32
 
 object OrderedType:
   given intType: OrderedType[Int] = I32

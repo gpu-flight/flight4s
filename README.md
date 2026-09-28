@@ -98,6 +98,20 @@ guard. Parenthesize `!==` comparisons in compound conditions because Scala
 gives that operator assignment-level precedence. Use DSL `===` / `!==` for
 device comparison, not host `==` / `!=`.
 
+Signed `Int` and unsigned `UInt` expressions support Scala-style bitwise `&`,
+`|`, and `^`. Both operands must have the same type; unlike Boolean `&&`/`||`,
+these operators evaluate both operands. They compose in expression callbacks:
+
+```scala
+val maskedTotal = gpuRange("i", literal(0), literal(32))
+  .map(i => i & literal(7))
+  .filter(i => (i ^ literal(1)) > literal(0))
+  .foldLeft("maskedTotal", literal(0))(_ + _)
+```
+
+Use parentheses around bitwise expressions when combining them with comparisons.
+Shifts, complement, and population-count operations are not implemented yet.
+
 For a strict scalar recurrence, use a named `foldLeft` inside a kernel body:
 
 ```scala

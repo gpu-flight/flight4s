@@ -9,6 +9,9 @@ enum BinaryOperator(val cudaToken: String):
   case Multiply extends BinaryOperator("*")
   case Divide extends BinaryOperator("/")
   case Remainder extends BinaryOperator("%")
+  case BitAnd extends BinaryOperator("&")
+  case BitOr extends BinaryOperator("|")
+  case BitXor extends BinaryOperator("^")
 
 enum ComparisonOperator(val cudaToken: String):
   case LessThan extends ComparisonOperator("<")
