@@ -131,6 +131,9 @@ It returns `Expr[Int]` in 0..32 and emits CUDA's `__popc` intrinsic. For
 example, `bits.popCount(selectedMask)` counts the selected lanes in a ballot
 result; the count itself is a per-thread expression, not a collective call.
 
+Generated kernels currently compile as CUDA C++20. The explicit unsigned
+intermediates used for signed shifts also avoid older C++17 shift pitfalls.
+
 For a strict scalar recurrence, use a named `foldLeft` inside a kernel body:
 
 ```scala
