@@ -38,7 +38,7 @@ object BlockRowSoftmax:
         probabilities(index) := exp(logits(index).read - maximum) / denominator
       }
     }
-  }
+  }.requiringBlock(LaunchBlock.x(ThreadsPerBlock))
 
   val generated = CudaCodegen.generate(definition)
     .fold(error => throw IllegalStateException(error.message), identity)

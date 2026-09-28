@@ -1,7 +1,7 @@
 package flight4s.core.ir
 
 import flight4s.core.abi.*
-import flight4s.core.launch.LaunchConfig
+import flight4s.core.launch.{Block as LaunchBlock, LaunchConfig}
 
 trait DeviceBuffer[T]:
   private[flight4s] def deviceAddress: DeviceAddress
@@ -125,7 +125,8 @@ final case class KernelIR[Args <: Tuple](
     name: String,
     signature: KernelSignature[Args],
     body: Block,
-    sharedMemory: Vector[SharedArray[?, ?]] = Vector.empty
+    sharedMemory: Vector[SharedArray[?, ?]] = Vector.empty,
+    requiredBlock: Option[LaunchBlock] = None
 ):
   def params: Vector[KernelParam] = signature.parameters
 
@@ -135,6 +136,10 @@ final case class Kernel[Args <: Tuple](ir: KernelIR[Args]):
   def params: Vector[KernelParam] = ir.params
   def body: Block = ir.body
   def sharedMemory: Vector[SharedArray[?, ?]] = ir.sharedMemory
+  def requiredBlock: Option[LaunchBlock] = ir.requiredBlock
+
+  def requiringBlock(block: LaunchBlock): Kernel[Args] =
+    copy(ir = ir.copy(requiredBlock = Some(block)))
 
   def bind(arguments: Args): KernelInvocation[Args] =
     KernelInvocation(this, arguments)

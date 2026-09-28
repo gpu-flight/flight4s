@@ -19,7 +19,7 @@ final case class NvrtcCompilationKey private (hex: String):
   override def toString: String = hex
 
 object NvrtcCompilationKey:
-  private val EncodingVersion = 2
+  private val EncodingVersion = 3
 
   def derive(
       generated: GeneratedCudaModule,
@@ -84,6 +84,11 @@ object NvrtcCompilationKey:
         requirement =>
           encoder.integer(requirement.elementSizeBytes)
           encoder.integer(requirement.elementAlignmentBytes)
+      }
+      encoder.optional(kernel.launchRequirements.requiredBlock) { block =>
+        encoder.integer(block.x)
+        encoder.integer(block.y)
+        encoder.integer(block.z)
       }
     }
 

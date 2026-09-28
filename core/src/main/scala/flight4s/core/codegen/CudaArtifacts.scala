@@ -1,6 +1,7 @@
 package flight4s.core.codegen
 
 import flight4s.core.ir.{KernelSignature, SourceSpan, ValidationError}
+import flight4s.core.launch.{Block as LaunchBlock}
 
 enum CudaCppStandard(val nvrtcOption: String):
   case Cpp20 extends CudaCppStandard("--std=c++20")
@@ -44,7 +45,8 @@ final case class DynamicSharedMemoryRequirement(
   require(elementAlignmentBytes > 0, "element alignment must be positive")
 
 final case class KernelLaunchRequirements(
-    dynamicSharedMemory: Option[DynamicSharedMemoryRequirement] = None
+    dynamicSharedMemory: Option[DynamicSharedMemoryRequirement] = None,
+    requiredBlock: Option[LaunchBlock] = None
 )
 
 final case class GeneratedKernel[Args <: Tuple](

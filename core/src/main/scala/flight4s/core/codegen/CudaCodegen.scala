@@ -149,7 +149,8 @@ object CudaCodegen:
                   elementSizeBytes = valueType.sizeBytes,
                   elementAlignmentBytes = valueType.alignmentBytes
                 )
-            }
+            },
+          requiredBlock = kernel.requiredBlock
         )
       )
 

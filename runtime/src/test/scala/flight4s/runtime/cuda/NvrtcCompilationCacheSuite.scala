@@ -18,8 +18,9 @@ import flight4s.core.codegen.{
   SourceMapEntry
 }
 import flight4s.core.compiler.*
-import flight4s.core.dsl.CudaDsl.params
+import flight4s.core.dsl.CudaDsl.{kernel, module, params}
 import flight4s.core.ir.SourceSpan
+import flight4s.core.launch.{Block as LaunchBlock}
 import flight4s.core.unsafe.raw.RawCuda
 
 class NvrtcCompilationCacheSuite extends FunSuite:
@@ -42,6 +43,26 @@ class NvrtcCompilationCacheSuite extends FunSuite:
     assertEquals(generatedModule(cachedArtifact.input), remapped)
     assertEquals(cachedArtifact.input.sourceMap, remapped.sourceMap)
     assertEquals(ptxText(cachedArtifact), ptxText(initialArtifact))
+
+  test("generated and raw cache hits retain exact block constraints without merging distinct shapes"):
+    val backend = RecordingBackend()
+    val cache = NvrtcCompilationCache(6, backend)
+    val signature = params()
+    val base = CudaCodegen.generateModule(module(kernels = Vector(kernel("cachedShape", signature)(_ => ())))).toOption.get
+    val inputs = Vector(None, Some(LaunchBlock.x(128)), Some(LaunchBlock.xy(64, 2))).flatMap { shape =>
+      val requirements = KernelLaunchRequirements(requiredBlock = shape)
+      val generated = base.copy(kernels = base.kernels.map(kernel => kernel.copy(launchRequirements = requirements)))
+      Vector(NvrtcCompilationInput.generated(generated), NvrtcCompilationInput.raw(
+        RawCuda.kernel("cachedShape", signature, base.cudaSource, base.compilerOptions, requirements)))
+    }
+    inputs.foreach(input => compiled(cache, input))
+    inputs.foreach { input =>
+      val cached = compiled(cache, input)
+      assert(cached.input eq input)
+      assertEquals(cached.input.kernels.head.launchRequirements, input.kernels.head.launchRequirements)
+    }
+    assertEquals(backend.compileCount, 6)
+    assertEquals(cache.entryCount, 6)
 
   test("compiler-relevant input changes miss the cache"):
     val backend = RecordingBackend()

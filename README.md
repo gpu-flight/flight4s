@@ -402,7 +402,8 @@ provides:
 - source-compatible default-stream launch and same-context explicit-stream
   launch with automatic in-flight resource retention;
 - explicit context synchronization through `CudaContext.synchronize()`;
-- launch-time kernel provenance and dynamic shared-memory validation;
+- launch-time kernel provenance, optional exact block-shape contracts, and
+  dynamic shared-memory validation;
 - context-scoped `cuLaunchKernelEx` with structured CUDA Driver failures;
 - structured CUDA Driver failures with PTX JIT information and error logs;
 - CUDA declaration emission for constants, global parameters, static and
@@ -416,6 +417,22 @@ provides:
   an optional `nvcc` compilation test.
 
 ### Execution and resource lifetimes
+
+Cooperative kernels can declare their required block geometry:
+
+```scala
+import flight4s.core.launch.{Block as LaunchBlock}
+val definition = kernel("cooperative") { /* staged kernel body */ }
+  .requiringBlock(LaunchBlock.x(128))
+```
+
+Typed launch rejects a different `(x, y, z)` with `BlockShapeMismatch` before
+argument packing or native submission, including shapes with the same thread
+count. The immutable requirement follows the definition through generated
+artifacts and caches. Raw CUDA can declare the same contract through
+`KernelLaunchRequirements(requiredBlock = Some(...))`; its author remains
+responsible for matching that declaration to the handwritten source. This is
+not automatic shape inference, a device-limit check, or a CUDA launch bound.
 
 - **Launches:** Typed launches are asynchronous on CUDA's default stream or an
   owned explicit stream. `CudaContext.synchronize()` waits for all context
@@ -471,6 +488,9 @@ affected caches if external headers change at the same path.
 - **Identity:** A versioned canonical SHA-256 covers CUDA source and its
   generated/raw provenance, resolved options, target, compiler version,
   generated-source codegen version, program name, and kernel ABI/launch metadata.
+  Encoding v3 includes optional exact block dimensions. Previous encoding-v2
+  entries become cache misses; CUDA codegen version 23 and store schema v2
+  are unchanged by this metadata-only addition.
 - **Memory:** `NvrtcCompilationCache` is a caller-owned bounded in-memory LRU
   of successful PTX compilations. Cache hits rebind PTX metadata to the current
   typed compilation input.
