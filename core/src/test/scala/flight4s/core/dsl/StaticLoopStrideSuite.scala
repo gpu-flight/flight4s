@@ -81,6 +81,13 @@ class StaticLoopStrideSuite extends FunSuite:
     assert(generated.cudaSource.contains("for (long long flight4s_value_1 = 0; flight4s_value_1 < 8; flight4s_value_1 += 3LL)"))
     assert(generated.cudaSource.contains("const int i = static_cast<int>(flight4s_value_1);"))
     assert(generated.cudaSource.contains("for (long long flight4s_value_2 = 0; flight4s_value_2 < 4; flight4s_value_2 += 2LL)"))
+    assertEquals(generated.cudaSource,
+      "extern \"C\" __global__ void wide(int* out, int flight4s_value_0) {\n" +
+      "  for (long long flight4s_value_1 = 0; flight4s_value_1 < 8; flight4s_value_1 += 3LL) {\n" +
+      "    const int i = static_cast<int>(flight4s_value_1);\n" +
+      "    for (long long flight4s_value_2 = 0; flight4s_value_2 < 4; flight4s_value_2 += 2LL) {\n" +
+      "      const int j = static_cast<int>(flight4s_value_2);\n" +
+      "      out[(i + j)] = i;\n    }\n  }\n}\n")
     generated.cudaSource.linesIterator.zipWithIndex.filter { (line, _) =>
       line.contains("for (") || line.contains("const int")
     }.foreach { (_, index) =>

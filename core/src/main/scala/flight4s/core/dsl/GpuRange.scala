@@ -4,12 +4,16 @@ import flight4s.core.dsl.CudaDsl.*
 import flight4s.core.ir.*
 import flight4s.core.types.*
 
-/** A symbolic half-open, unit-stride range executed serially by each CUDA thread. */
+/** A symbolic half-open range executed serially by each CUDA thread. */
 final class GpuRange private[dsl] (
     val indexName: String,
     val from: Expr[Int],
-    val until: Expr[Int]
+    val until: Expr[Int],
+    val step: Int = 1
 ) extends GpuTraversal[Int]:
+  def by(step: Int): GpuRange =
+    new GpuRange(indexName, from, until, step)
+
   def map[T](valueAt: Expr[Int] => Expr[T]): MappedGpuRange[T] =
     new MappedGpuRange(this, valueAt)
 
@@ -36,7 +40,7 @@ final class GpuRange private[dsl] (
   def foreach(
       body: Expr[Int] => (BlockBuilder ?=> Unit)
   )(using builder: BlockBuilder, position: DslSourcePosition): Unit =
-    gpuFor(indexName, from, until)(body)
+    gpuFor(indexName, from, until, step)(body)
 
 /** Composed expression builders, not a materialized JVM or GPU collection.
   * Callbacks run once per terminal during staging and should only build expressions.
@@ -76,7 +80,7 @@ final class MappedGpuRange[T] private[dsl] (
       addition: AdditiveType[A],
       position: DslSourcePosition
   ): Expr[A] =
-    reduceSum(range.indexName, range.from, range.until, initial, policy)(valueAt)
+    reduceSum(range.indexName, range.from, range.until, initial, policy, range.step)(valueAt)
 
   def foreach(
       body: Expr[T] => (BlockBuilder ?=> Unit)

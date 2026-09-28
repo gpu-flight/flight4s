@@ -80,6 +80,17 @@ sbt -Dflight4s.cuda.native.path=/absolute/path/to/flight4s_cuda \
 Without this property, portable Scala test runs skip the JNI-dependent tests.
 Native library packaging and platform classifiers remain future work.
 
+Run all Scala and native-enabled tests with the same property:
+
+```shell
+sbt -Dflight4s.cuda.native.path=/absolute/path/to/flight4s_cuda test
+```
+
+The half-precision range test additionally reads `CUDA_PATH` as the toolkit
+root and passes its `include` directory explicitly to NVRTC. That directory
+must contain `cuda_fp16.h`. This is test/application configuration, not implicit
+header discovery in the runtime compiler.
+
 ## C++ Language Standard
 
 The native runtime and generated CUDA C++ target C++20. Generated artifacts
