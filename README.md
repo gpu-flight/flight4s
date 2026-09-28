@@ -593,7 +593,7 @@ Each caller receives its own provenance-aware `CudaModule` wrapper, while the
 shared native module unloads only after the final wrapper and its in-flight work
 release. Idle modules are not retained after the final close.
 
-## Runnable Example
+## Runnable Examples
 
 The [row softmax example](examples/src/main/scala/flight4s/examples/RowSoftmax.scala)
 contains the complete Scala kernel and `main`, including NVRTC compilation,
@@ -619,6 +619,17 @@ The [block-cooperative softmax](examples/src/main/scala/flight4s/examples/BlockR
 uses one 128-thread block per row, strided functional ranges, and explicit
 shared-memory reduction trees. It has a complete `main` and GPU numerical and
 sanitizer coverage; it is not yet a performance-tuned inference operator.
+
+The [row statistics example](examples/src/main/scala/flight4s/examples/RowStatistics.scala)
+uses a pure Scala update function and `(count, mean, M2)` tuple fold to compute
+Double means and population variances from Float rows. Values are widened before
+arithmetic. It includes a complete `main`, high-precision CPU-reference tests,
+and source inspection:
+
+```shell
+sbt "examples/runMain flight4s.examples.RowStatistics --cuda-source"
+sbt -Dflight4s.cuda.native.path=<absolute-library-path> "examples/runMain flight4s.examples.RowStatistics"
+```
 
 ## Build
 
