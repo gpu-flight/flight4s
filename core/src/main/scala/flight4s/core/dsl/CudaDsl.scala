@@ -509,6 +509,10 @@ object CudaDsl:
   ): Unit =
     builder.append(Barrier(position.span))
 
+  object bits:
+    def popCount[T](value: Expr[T])(using wordType: BitwiseType[T], position: DslSourcePosition): Expr[Int] =
+      PopulationCount(value, wordType, position.span)
+
   object warp:
     def sync(mask: Expr[UInt])(using builder: BlockBuilder, position: DslSourcePosition): Unit =
       builder.append(WarpBarrier(mask, position.span))

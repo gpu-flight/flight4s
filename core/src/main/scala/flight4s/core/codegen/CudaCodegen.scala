@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 19
+  val ArtifactVersion: Int = 20
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -370,6 +370,9 @@ object CudaCodegen:
 
         case shift: SignedShift => emitSignedShift(shift)
 
+        case count: PopulationCount[?] =>
+          emitExpression(count.value).map(value => s"::__popc(static_cast<unsigned int>($value))")
+
         case comparison: Compare[?] =>
           for
             left <- emitExpression(comparison.left)
@@ -707,6 +710,7 @@ object CudaCodegen:
         collectTypes(binary.left) ++ collectTypes(binary.right)
       case shift: UnsignedShift => collectTypes(shift.value) ++ collectTypes(shift.distance)
       case shift: SignedShift => collectTypes(shift.value) ++ collectTypes(shift.distance)
+      case count: PopulationCount[?] => collectTypes(count.value)
       case comparison: Compare[?] =>
         collectTypes(comparison.left) ++ collectTypes(comparison.right)
       case conditional: Conditional[?] =>
@@ -787,6 +791,7 @@ object CudaCodegen:
         collectIdentifiers(binary.left) ++ collectIdentifiers(binary.right)
       case shift: UnsignedShift => collectIdentifiers(shift.value) ++ collectIdentifiers(shift.distance)
       case shift: SignedShift => collectIdentifiers(shift.value) ++ collectIdentifiers(shift.distance)
+      case count: PopulationCount[?] => collectIdentifiers(count.value)
       case comparison: Compare[?] =>
         collectIdentifiers(comparison.left) ++
           collectIdentifiers(comparison.right)

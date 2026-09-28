@@ -746,6 +746,11 @@ object KernelValidator:
           requireSameType(shift.distance.valueType, I32,
             "signed shift distance must have CUDA int type", s"$location.distance", shift.distance.span)
 
+      case count: PopulationCount[?] =>
+        validateExpression(count.value, parameters, s"$location.value", scope) ++
+          requireSameType(count.value.valueType, count.wordType,
+            "population-count operand type does not match its word type", s"$location.value", count.value.span)
+
       case comparison: Compare[?] =>
         validateExpression(
           comparison.left,

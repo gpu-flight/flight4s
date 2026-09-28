@@ -169,6 +169,7 @@ private[core] object LocalCommonSubexpressionElimination:
       case shift: SignedShift =>
         shift.copy(value = this.expression(shift.value), distance = this.expression(shift.distance))
           .asInstanceOf[Expr[T]]
+      case count: PopulationCount[?] => count.copy(value = this.expression(count.value)).asInstanceOf[Expr[T]]
       case comparison: Compare[?] =>
         comparison
           .copy(
@@ -260,6 +261,7 @@ private[core] object LocalCommonSubexpressionElimination:
       case shift: SignedShift =>
         collectCounts(shift.value, counts)
         collectCounts(shift.distance, counts)
+      case count: PopulationCount[?] => collectCounts(count.value, counts)
       case comparison: Compare[?] =>
         collectCounts(comparison.left, counts)
         collectCounts(comparison.right, counts)
@@ -300,7 +302,7 @@ private[core] object LocalCommonSubexpressionElimination:
             left <- integerKey(binary.left)
             right <- integerKey(binary.right)
           yield IntegerExpressionKey.Binary(binary.operator, left, right)
-        case _: SignedShift | _: UnsignedShift | _: Compare[?] | _: Conditional[?] | _: UnaryMath[?] | _: Convert[?, ?] | _: ToAccumulator[?, ?] |
+        case _: PopulationCount[?] | _: SignedShift | _: UnsignedShift | _: Compare[?] | _: Conditional[?] | _: UnaryMath[?] | _: Convert[?, ?] | _: ToAccumulator[?, ?] |
             _: ReduceSum[?, ?] | _: Load[?, ?, ?] => None
 
   private def collectNames(kernel: KernelIR[?]): Set[String] =
@@ -344,6 +346,7 @@ private[core] object LocalCommonSubexpressionElimination:
     case binary: Binary[?] => collectNames(binary.left) ++ collectNames(binary.right)
     case shift: UnsignedShift => collectNames(shift.value) ++ collectNames(shift.distance)
     case shift: SignedShift => collectNames(shift.value) ++ collectNames(shift.distance)
+    case count: PopulationCount[?] => collectNames(count.value)
     case comparison: Compare[?] =>
       collectNames(comparison.left) ++ collectNames(comparison.right)
     case conditional: Conditional[?] =>

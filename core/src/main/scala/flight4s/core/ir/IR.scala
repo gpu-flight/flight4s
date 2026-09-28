@@ -1,7 +1,7 @@
 package flight4s.core.ir
 
 import flight4s.core.abi.ScalarAbi
-import flight4s.core.types.{AccumulatorType, AdditiveType, AtomicAddType, CudaType, FloatingMathType, I32, UInt, WarpShuffleType}
+import flight4s.core.types.{AccumulatorType, AdditiveType, AtomicAddType, BitwiseType, CudaType, FloatingMathType, I32, UInt, WarpShuffleType}
 
 enum BinaryOperator(val cudaToken: String):
   case Add extends BinaryOperator("+")
@@ -58,6 +58,13 @@ final case class SignedShift(
     operator: SignedShiftOperator,
     value: Expr[Int],
     distance: Expr[Int],
+    span: SourceSpan = SourceSpan.Unknown
+) extends Expr[Int]:
+  override val valueType: CudaType[Int] = I32
+
+final case class PopulationCount[T](
+    value: Expr[T],
+    wordType: BitwiseType[T],
     span: SourceSpan = SourceSpan.Unknown
 ) extends Expr[Int]:
   override val valueType: CudaType[Int] = I32
