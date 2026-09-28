@@ -1,36 +1,22 @@
 package flight4s.core.dsl
 
 import flight4s.core.dsl.CudaDsl.*
-import flight4s.core.ir.{Expr, SourceSpan}
+import flight4s.core.ir.Expr
 
 /** Common serial traversal contract for library-built staged ranges. */
-abstract class GpuTraversal[T] private[dsl] ():
-  def foreach(body: Expr[T] => (BlockBuilder ?=> Unit))(using BlockBuilder, DslSourcePosition): Unit
+abstract class GpuTraversal[T] private[dsl] () extends GpuValueTraversal[Expr[T]]:
+  final def map[Values <: NonEmptyTuple](transform: Expr[T] => Values)(using
+      TupleFoldState[Values]
+  ): GpuTupleTraversal[Values] =
+    new GpuTupleTraversal(body => foreach(value => body(ExpressionStaging.expression(transform(value)))))
 
-  /** Named case-class fields advance simultaneously, just like tuple components. */
-  final def foldLeft[State <: Product](stateName: String, initial: State)(
-      step: (State, Expr[T]) => State
-  )(using state: ProductFoldState[State], builder: BlockBuilder, position: DslSourcePosition): State =
-    val locals = state.declare(stateName, initial)
-    foreach { value =>
-      val next = ExpressionStaging.expression(step(locals.read(SourceSpan.Unknown), value))
-      val snapshots = state.snapshot(stateName, next)
-      locals.assign(snapshots)
-    }
-    locals.read(position.span)
-
-  /** Tuple components advance simultaneously from the previous iteration. */
-  final def foldLeft[State <: NonEmptyTuple](stateName: String, initial: State)(
-      step: (State, Expr[T]) => State
-  )(using state: TupleFoldState[State], builder: BlockBuilder, position: DslSourcePosition): State =
-    val locals = state.declare(stateName, initial, 0)
-    foreach { value =>
-      val next = ExpressionStaging.expression(step(locals.read(SourceSpan.Unknown), value))
-      // Snapshot every next component before changing any old component.
-      val snapshots = state.snapshot(stateName, next, 0)
-      locals.assign(snapshots)
-    }
-    locals.read(position.span)
+  final def flatMap[Values <: NonEmptyTuple](expand: Expr[T] => GpuTupleTraversal[Values])(using
+      TupleFoldState[Values]
+  ): GpuTupleTraversal[Values] =
+    new GpuTupleTraversal(body => foreach { value =>
+      val inner = ExpressionStaging.expression(expand(value))
+      inner.foreach(body)
+    })
 
   final def flatMap[U](expand: Expr[T] => GpuTraversal[U]): FlatMappedGpuRange[U] =
     new FlatMappedGpuRange(body =>

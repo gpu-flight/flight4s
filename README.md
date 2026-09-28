@@ -228,8 +228,8 @@ on CUDA). Every component must remain an `Expr` of its original scalar type;
 empty tuples, host-valued components, and changing tuple shapes are rejected.
 All next values are snapshotted before stores, inside the accepted element's
 guards. This is per-thread recurrence semantics, not atomicity between threads.
-Large state can increase register/local-memory pressure. Tuple-valued traversal
-elements and parallel folds remain separate work.
+Large state can increase register/local-memory pressure. Parallel folds remain
+separate work.
 
 For named state fields, derive `ProductFoldState` on a nonempty case class:
 
@@ -251,6 +251,25 @@ struct, allocation, or ABI change. Keep constructors and callbacks pure; hidden
 DSL statements in steps or reconstructed constructors are rejected. Ordinary
 JVM effects are not prohibited. Generic classes can supply an explicit
 `ProductFoldState.derived` instance with the necessary `CudaType` evidence.
+
+Traversal elements can also be flat tuples of scalar expressions:
+
+```scala
+val indexed = gpuRange("i", literal(0), n)
+  .map(i => (i, data(i).read))
+  .filter { case (_, x) => x > literal(0.0f) }
+indexed.foreach { case (i, x) => result(i) := x * literal(2.0f) }
+```
+
+Tuple `map`, guards, `flatMap`, `foreach`, and scalar/tuple/case-class folds
+compose without intermediate device collections. Scala `for` generators can
+yield tuples or destructure them in later generators. Every field must be a
+scalar `Expr`; empty tuples, nested fields, and host values are rejected.
+`Tuple1` and tuples above 22 elements are supported. Tuple fields still contain
+expression trees, not snapshots: use `let` in a statement body when a load must
+be preserved across stores. Mapping a tuple back to a scalar gives a general
+serial traversal with `foldLeft`; expression-only `sum` remains limited to the
+original unfiltered mapped range.
 
 Ranges also support staged guards, including Scala `for` syntax:
 
