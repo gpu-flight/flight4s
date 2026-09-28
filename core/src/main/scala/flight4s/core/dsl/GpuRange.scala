@@ -18,7 +18,7 @@ final class GpuRange private[dsl] (
       step: (Expr[A], Expr[Int]) => Expr[A]
   )(using valueType: CudaType[A], builder: BlockBuilder, position: DslSourcePosition): Expr[A] =
     val accumulator = local(accumulatorName, initial)
-    foreach { index => accumulator := step(accumulator.read, index) }
+    foreach { index => accumulator := ExpressionStaging.expression(step(accumulator.read, index)) }
     Load(accumulator, position.span)
 
   def foreach(
@@ -55,4 +55,4 @@ final class MappedGpuRange[T] private[dsl] (
   def foreach(
       body: Expr[T] => (BlockBuilder ?=> Unit)
   )(using builder: BlockBuilder, position: DslSourcePosition): Unit =
-    range.foreach(index => body(valueAt(index)))
+    range.foreach(index => body(ExpressionStaging.expression(valueAt(index))))
