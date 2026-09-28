@@ -78,9 +78,9 @@ private[core] object IrNormalizer:
 
     case declaration: LocalArrayDeclaration[?] => (Some(declaration), scope)
 
-    case shuffle: WarpShuffle[?] =>
+    case shuffle: WarpShuffle[?, ?] =>
       (Some(shuffle.copy(mask = expression(shuffle.mask, scope), value = expression(shuffle.value, scope),
-        sourceLane = expression(shuffle.sourceLane, scope))), scope.without(shuffle.local.name))
+        selector = expression(shuffle.selector, scope))), scope.without(shuffle.local.name))
 
     case vote: WarpVote[?] =>
       (Some(vote.copy(mask = expression(vote.mask, scope), predicate = expression(vote.predicate, scope))),

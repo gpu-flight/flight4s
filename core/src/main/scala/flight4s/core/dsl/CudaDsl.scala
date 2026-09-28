@@ -516,8 +516,29 @@ object CudaDsl:
         sourceLane: Expr[Int],
         width: Int = 32
     )(using shuffleType: WarpShuffleType[T], builder: BlockBuilder, position: DslSourcePosition): Expr[T] =
+      shuffleValue(name, mask, value, WarpShuffleOperator.Direct, sourceLane, width)
+
+    def shuffleUp[T](
+        name: String, mask: Expr[UInt], value: Expr[T], delta: Expr[UInt], width: Int = 32
+    )(using WarpShuffleType[T], BlockBuilder, DslSourcePosition): Expr[T] =
+      shuffleValue(name, mask, value, WarpShuffleOperator.Up, delta, width)
+
+    def shuffleDown[T](
+        name: String, mask: Expr[UInt], value: Expr[T], delta: Expr[UInt], width: Int = 32
+    )(using WarpShuffleType[T], BlockBuilder, DslSourcePosition): Expr[T] =
+      shuffleValue(name, mask, value, WarpShuffleOperator.Down, delta, width)
+
+    def shuffleXor[T](
+        name: String, mask: Expr[UInt], value: Expr[T], laneMask: Expr[Int], width: Int = 32
+    )(using WarpShuffleType[T], BlockBuilder, DslSourcePosition): Expr[T] =
+      shuffleValue(name, mask, value, WarpShuffleOperator.Xor, laneMask, width)
+
+    private def shuffleValue[T, S](
+        name: String, mask: Expr[UInt], value: Expr[T], operator: WarpShuffleOperator[S],
+        selector: Expr[S], width: Int
+    )(using shuffleType: WarpShuffleType[T], builder: BlockBuilder, position: DslSourcePosition): Expr[T] =
       val result = LocalVariable(name, shuffleType, position.span)
-      builder.append(WarpShuffle(result, mask, value, sourceLane, width, shuffleType, position.span))
+      builder.append(WarpShuffle(result, mask, value, operator, selector, width, shuffleType, position.span))
       Load(result, position.span)
 
     def ballot(name: String, mask: Expr[UInt], predicate: Expr[Boolean])(using

@@ -218,11 +218,12 @@ final case class LocalArrayDeclaration[T](
     span: SourceSpan = SourceSpan.Unknown
 ) extends ScopedDeclaration
 
-final case class WarpShuffle[T](
+final case class WarpShuffle[T, S](
     local: LocalVariable[T],
     mask: Expr[UInt],
     value: Expr[T],
-    sourceLane: Expr[Int],
+    operator: WarpShuffleOperator[S],
+    selector: Expr[S],
     width: Int,
     shuffleType: WarpShuffleType[T],
     span: SourceSpan = SourceSpan.Unknown
