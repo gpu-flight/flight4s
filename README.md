@@ -294,8 +294,19 @@ val squared = wide * wide
 
 This emits `static_cast<double>(x)` and preserves finite Float values exactly.
 Widen before computing: converting `x * x` afterward cannot undo Float overflow
-or rounding. Double-to-Float narrowing is not yet supported. NaN classification
+or rounding. NaN classification
 is retained, but NaN payloads are not part of this API's contract.
+
+To return Float output after wider accumulation, narrow explicitly:
+
+```scala
+val result = convert.f64ToF32(doubleResult) // nearest-even
+val downward = convert.f64ToF32(doubleResult, RoundingMode.TowardNegative)
+```
+
+All four rounding modes are supported through CUDA `__double2float_*`
+intrinsics. This can lose precision, underflow, or overflow; it does not clamp
+finite values. No implicit narrowing or JVM evaluation is introduced.
 
 ## Atomic Updates
 

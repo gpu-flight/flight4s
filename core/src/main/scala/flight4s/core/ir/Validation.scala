@@ -1020,7 +1020,7 @@ object KernelValidator:
     val nearest = Set(RoundingMode.NearestEven)
     val noSaturation = Set(SaturationMode.NoSaturation)
     val policy = (from, to) match
-      case (F32, F16) | (F32, BF16) | (I32, F32) | (U32, F32) =>
+      case (F32, F16) | (F32, BF16) | (I32, F32) | (U32, F32) | (F64, F32) =>
         Some((RoundingMode.values.toSet, noSaturation))
       case (F32, FP8E4M3) | (F32, FP8E5M2) =>
         Some((nearest, SaturationMode.values.toSet))

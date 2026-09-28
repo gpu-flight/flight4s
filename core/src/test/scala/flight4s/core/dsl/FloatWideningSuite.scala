@@ -70,7 +70,7 @@ class FloatWideningSuite extends FunSuite:
     assert(source.contains("static_cast<double>(values[i])"))
     assert(source.contains("double state_1"))
 
-  test("widening does not enable implicit promotion or unrelated narrowing"):
+  test("widening does not enable implicit promotion or unrelated conversions"):
     assert(typeCheckErrors("""
       import flight4s.core.dsl.CudaDsl.*
       import flight4s.core.ir.Expr
@@ -84,7 +84,7 @@ class FloatWideningSuite extends FunSuite:
       val wide: Expr[Double] = source
     """).nonEmpty)
     val invalid = kernel("narrow") {
-      local("narrowed", Convert(literal(1.0), F32, RoundingMode.NearestEven, SaturationMode.NoSaturation))
+      local("narrowed", Convert(literal(1.0), I32, RoundingMode.NearestEven, SaturationMode.NoSaturation))
       ()
     }
     assertEquals(KernelValidator.validate(invalid).errors.map(_.code), Vector(ValidationCode.UnsupportedConversion))

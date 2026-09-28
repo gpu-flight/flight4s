@@ -674,6 +674,11 @@ object CudaDsl:
       choose(left)(literal(false))(literal(true))
 
   object convert:
+    def f64ToF32(value: Expr[Double], rounding: RoundingMode = RoundingMode.NearestEven)(using
+        position: DslSourcePosition
+    ): Expr[Float] =
+      Convert(value, F32, rounding, SaturationMode.NoSaturation, position.span)
+
     def f32ToF64(value: Expr[Float])(using position: DslSourcePosition): Expr[Double] =
       Convert(value, F64, RoundingMode.NearestEven, SaturationMode.NoSaturation, position.span)
 
