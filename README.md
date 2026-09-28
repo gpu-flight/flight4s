@@ -285,6 +285,18 @@ explicit rounding mode. `convert.i32ToF64` and `convert.u32ToF64` are exact for
 all 32-bit inputs. These convert numeric values, not raw bits; no implicit
 conversion between already-staged integer and floating expressions is added.
 
+Use `convert.f32ToF64(x)` to widen a Float expression before Double arithmetic:
+
+```scala
+val wide = convert.f32ToF64(x)
+val squared = wide * wide
+```
+
+This emits `static_cast<double>(x)` and preserves finite Float values exactly.
+Widen before computing: converting `x * x` afterward cannot undo Float overflow
+or rounding. Double-to-Float narrowing is not yet supported. NaN classification
+is retained, but NaN payloads are not part of this API's contract.
+
 ## Atomic Updates
 
 Use `atomicAdd` when several threads update the same global or shared element:

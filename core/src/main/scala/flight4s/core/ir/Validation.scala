@@ -1024,7 +1024,7 @@ object KernelValidator:
         Some((RoundingMode.values.toSet, noSaturation))
       case (F32, FP8E4M3) | (F32, FP8E5M2) =>
         Some((nearest, SaturationMode.values.toSet))
-      case (F16, F32) | (BF16, F32) | (FP8E4M3, F32) | (FP8E5M2, F32) | (I32, F64) | (U32, F64) =>
+      case (F16, F32) | (BF16, F32) | (FP8E4M3, F32) | (FP8E5M2, F32) | (I32, F64) | (U32, F64) | (F32, F64) =>
         Some((nearest, noSaturation))
       case _ if from == to => Some((nearest, noSaturation))
       case _ => None

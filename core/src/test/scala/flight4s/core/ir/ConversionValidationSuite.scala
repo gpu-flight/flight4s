@@ -36,7 +36,8 @@ class ConversionValidationSuite extends FunSuite:
         rounding <- RoundingMode.values; saturation <- SaturationMode.values do
       val from = source.valueType
       val integerSource = from == I32 || from == U32
-      val exact = from == target || decodePairs.contains((from, target)) || (integerSource && target == F64)
+      val exact = from == target || decodePairs.contains((from, target)) ||
+        ((integerSource || from == F32) && target == F64)
       val rounded = (from == F32 && (target == F16 || target == BF16)) || (integerSource && target == F32)
       val fp8Narrowing = from == F32 && (target == FP8E4M3 || target == FP8E5M2)
       val expected =
@@ -50,7 +51,7 @@ class ConversionValidationSuite extends FunSuite:
       examined += 1
       if expected then accepted += 1
     assertEquals(examined, 648)
-    assertEquals(accepted, 35)
+    assertEquals(accepted, 36)
 
   test("conversion diagnostics retain code location and source span"):
     val span = SourceSpan("Convert.scala", 5, 2, 5, 70)
