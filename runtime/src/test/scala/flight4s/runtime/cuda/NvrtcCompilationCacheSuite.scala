@@ -4,7 +4,8 @@ import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.{FileVisitResult, Files, Path, SimpleFileVisitor}
-import java.util.concurrent.{CountDownLatch, Executors, TimeUnit}
+import java.util.concurrent.{CountDownLatch, Executors, Future, TimeUnit}
+import java.util.concurrent.atomic.AtomicReference
 
 import munit.FunSuite
 
@@ -121,9 +122,12 @@ class NvrtcCompilationCacheSuite extends FunSuite:
       val first = executor.submit(() => cache.compile(module, target, programName))
       assert(started.await(1, TimeUnit.SECONDS), "first compilation did not start")
 
-      val second = executor.submit(() => cache.compile(module, target, programName))
-      awaitCondition(backend.versionCount == 2)
-      assert(!second.isDone, "second request did not wait for the active compilation")
+      val waiter = AtomicReference[Thread]()
+      val second = executor.submit(() => {
+        waiter.set(Thread.currentThread())
+        cache.compile(module, target, programName)
+      })
+      awaitWaitingRequest(waiter, second, backend)
 
       release.countDown()
       val firstArtifact = first.get(1, TimeUnit.SECONDS) match
@@ -155,8 +159,12 @@ class NvrtcCompilationCacheSuite extends FunSuite:
     try
       val first = executor.submit(() => cache.compile(module, target, programName))
       assert(started.await(1, TimeUnit.SECONDS), "first compilation did not start")
-      val second = executor.submit(() => cache.compile(module, target, programName))
-      awaitCondition(backend.versionCount == 2)
+      val waiter = AtomicReference[Thread]()
+      val second = executor.submit(() => {
+        waiter.set(Thread.currentThread())
+        cache.compile(module, target, programName)
+      })
+      awaitWaitingRequest(waiter, second, backend)
 
       release.countDown()
       assert(first.get(1, TimeUnit.SECONDS).isLeft)
@@ -377,8 +385,12 @@ class NvrtcCompilationCacheSuite extends FunSuite:
       try
         val first = executor.submit(() => cache.compile(module, target, programName))
         assert(started.await(1, TimeUnit.SECONDS), "first compilation did not start")
-        val second = executor.submit(() => cache.compile(module, target, programName))
-        awaitCondition(backend.versionCount == 2)
+        val waiter = AtomicReference[Thread]()
+        val second = executor.submit(() => {
+          waiter.set(Thread.currentThread())
+          cache.compile(module, target, programName)
+        })
+        awaitWaitingRequest(waiter, second, backend)
 
         release.countDown()
         assert(first.get(1, TimeUnit.SECONDS).isRight)
@@ -490,6 +502,18 @@ class NvrtcCompilationCacheSuite extends FunSuite:
       case generated: NvrtcCompilationInput.Generated => generated.module
       case _: NvrtcCompilationInput.Raw[?] =>
         fail("expected a DSL-generated NVRTC compilation input")
+
+  private def awaitWaitingRequest(
+      waiter: AtomicReference[Thread],
+      request: Future[?],
+      backend: RecordingBackend
+  ): Unit =
+    // A version query precedes key derivation and does not prove in-flight registration.
+    // The owner is held on a latch; a second backend call would also park, so count it.
+    awaitCondition(Option(waiter.get()).exists(_.getState == Thread.State.WAITING))
+    assert(!request.isDone, "second request did not wait for the active compilation")
+    assertEquals(backend.versionCount, 2)
+    assertEquals(backend.compileCount, 1)
 
   private def awaitCondition(condition: => Boolean): Unit =
     val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
