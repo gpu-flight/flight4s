@@ -603,6 +603,9 @@ object CudaDsl:
       UnsignedShift(UnsignedShiftOperator.Right, value, distance, position.span)
 
   extension [T](left: Expr[T])
+    def unary_~(using valueType: BitwiseType[T], position: DslSourcePosition): Expr[T] =
+      Binary(BinaryOperator.BitXor, left, Literal(valueType.allBitsSet, valueType, position.span), valueType, position.span)
+
     def +(right: Expr[T])(using valueType: AdditiveType[T]): Expr[T] =
       Binary(BinaryOperator.Add, left, right, valueType)
 

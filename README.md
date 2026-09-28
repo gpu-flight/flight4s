@@ -122,7 +122,10 @@ Signed `Int` values support the same spellings and count masking: `<<` wraps
 the 32-bit result, `>>` sign-extends, and `>>>` zero-fills while returning `Int`.
 For example, `(word >>> bit) & literal(1)` extracts a bit and composes in
 `map`/`filter`/`foldLeft`. Generated CUDA avoids undefined signed C++ shifts.
-Complement and population-count intrinsics remain separate increments.
+Unary `~` complements an `Int` or `UInt` word without changing its type:
+`flags & (~disabled)` clears selected bits. It lowers through existing XOR IR,
+so the generated CUDA may show an XOR with all ones. Population-count intrinsics
+remain a separate increment.
 
 For a strict scalar recurrence, use a named `foldLeft` inside a kernel body:
 
