@@ -85,6 +85,19 @@ Both arms must have the same CUDA type. Both expression trees are constructed
 and validated on the host, but only the selected value is evaluated on the GPU.
 Use `gpuIf` or `when` for conditional statements and stores instead.
 
+Staged Booleans support `&&`, `||`, and `!` with GPU short-circuit evaluation:
+
+```scala
+val safe = (divisor !== literal(0)) && literal(12) / divisor > literal(2)
+when(safe || fallback) { /* GPU statements */ }
+```
+
+Both operands must be `Expr[Boolean]`; use `when`, not a host Scala `if`.
+The right-hand builder still runs once on the JVM under the expression-staging
+guard. Parenthesize `!==` comparisons in compound conditions because Scala
+gives that operator assignment-level precedence. Use DSL `===` / `!==` for
+device comparison, not host `==` / `!=`.
+
 For a strict scalar recurrence, use a named `foldLeft` inside a kernel body:
 
 ```scala
@@ -147,6 +160,7 @@ provides:
 - lazy staged `gpuRange.map` composition with typed `sum` and `foreach` terminals;
 - lexical `scoped` bodies for reusable higher-order Scala statement helpers;
 - typed value-producing conditionals with guarded CUDA expression evaluation;
+- staged Boolean `&&`, `||`, and `!` with short-circuit device evaluation;
 - strict named scalar/pair `foldLeft` terminals for ordered per-thread recurrences;
 - named `let` snapshots returning read-only expressions for once-evaluated values;
 - lazy filtered ranges and Scala `for` guards with ordered conditional execution;

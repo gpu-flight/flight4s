@@ -536,6 +536,16 @@ object CudaDsl:
     def toAccumulator[A](using rule: AccumulatorType[T, A]): Expr[A] =
       ToAccumulator(left, rule)
 
+  extension (left: Expr[Boolean])
+    def &&(right: => Expr[Boolean])(using DslSourcePosition): Expr[Boolean] =
+      choose(left)(right)(literal(false))
+
+    def ||(right: => Expr[Boolean])(using DslSourcePosition): Expr[Boolean] =
+      choose(left)(literal(true))(right)
+
+    def unary_!(using DslSourcePosition): Expr[Boolean] =
+      choose(left)(literal(false))(literal(true))
+
   object convert:
     def f32ToF16(
         value: Expr[Float],
