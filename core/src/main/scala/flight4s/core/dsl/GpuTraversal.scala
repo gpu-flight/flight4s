@@ -1,10 +1,22 @@
 package flight4s.core.dsl
 
 import flight4s.core.dsl.CudaDsl.*
-import flight4s.core.ir.Expr
+import flight4s.core.ir.{Expr, Load}
+import flight4s.core.types.{AccumulatorType, AdditiveType}
 
 /** Common serial traversal contract for library-built staged ranges. */
 abstract class GpuTraversal[T] private[dsl] () extends GpuValueTraversal[Expr[T]]:
+  /** Named ordered accumulation, including guarded/nested traversals and explicit promotion. */
+  final def sum[A](accumulatorName: String, initial: Expr[A])(using
+      rule: AccumulatorType[T, A],
+      addition: AdditiveType[A],
+      builder: BlockBuilder,
+      position: DslSourcePosition
+  ): Expr[A] =
+    val accumulator = local(accumulatorName, initial)
+    foreach(value => accumulator := accumulator.read + value.toAccumulator[A])
+    Load(accumulator, position.span)
+
   final def map[Values <: NonEmptyTuple](transform: Expr[T] => Values)(using
       TupleFoldState[Values]
   ): GpuTupleTraversal[Values] =
