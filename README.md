@@ -58,6 +58,18 @@ between calls. Each body becomes a lexical CUDA block, with the same explicit
 stores and synchronization rules. Outer bindings remain visible; active names
 cannot be shadowed, and scope-local values cannot be used after the scope ends.
 
+`choose(condition)(whenTrue)(whenFalse)` returns a typed expression, so GPU
+conditionals can compose in functions and maps:
+
+```scala
+def positivePart(x: Expr[Float]): Expr[Float] =
+  choose(x > literal(0.0f))(x)(literal(0.0f))
+```
+
+Both arms must have the same CUDA type. Both expression trees are constructed
+and validated on the host, but only the selected value is evaluated on the GPU.
+Use `gpuIf` or `when` for conditional statements and stores instead.
+
 ## Status
 
 Flight4s is pre-alpha and under active design. The current implementation
@@ -67,6 +79,7 @@ provides:
 - typed expressions, places, statements, control flow, and reductions;
 - lazy staged `gpuRange.map` composition with typed `sum` and `foreach` terminals;
 - lexical `scoped` bodies for reusable higher-order Scala statement helpers;
+- typed value-producing conditionals with guarded CUDA expression evaluation;
 - distinct module constants, rank-aware kernel shared arrays, and lexical local
   arrays;
 - module and kernel validation for memory ownership, scope, access, and static

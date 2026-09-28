@@ -168,7 +168,8 @@ private[core] object LocalCommonSubexpressionElimination:
         accumulation
           .copy(value = this.expression(accumulation.value))
           .asInstanceOf[Expr[T]]
-      case _: ReduceSum[?, ?] => expression
+      // Branch values must not be speculatively evaluated outside their condition.
+      case _: Conditional[?] | _: ReduceSum[?, ?] => expression
       case load: Load[?, ?, ?] =>
         load.copy(from = place(load.from)).asInstanceOf[Expr[T]]
       case _: Literal[?] | _: ScalarParam[?] | _: Intrinsic[?] |
@@ -217,7 +218,7 @@ private[core] object LocalCommonSubexpressionElimination:
         collectCounts(comparison.right, counts)
       case conversion: Convert[?, ?] => collectCounts(conversion.value, counts)
       case accumulation: ToAccumulator[?, ?] => collectCounts(accumulation.value, counts)
-      case _: ReduceSum[?, ?] => ()
+      case _: Conditional[?] | _: ReduceSum[?, ?] => ()
       case load: Load[?, ?, ?] =>
         placeExpressions(load.from).foreach(collectCounts(_, counts))
       case _: Literal[?] | _: ScalarParam[?] | _: Intrinsic[?] |
@@ -251,7 +252,7 @@ private[core] object LocalCommonSubexpressionElimination:
             left <- integerKey(binary.left)
             right <- integerKey(binary.right)
           yield IntegerExpressionKey.Binary(binary.operator, left, right)
-        case _: Compare[?] | _: Convert[?, ?] | _: ToAccumulator[?, ?] |
+        case _: Compare[?] | _: Conditional[?] | _: Convert[?, ?] | _: ToAccumulator[?, ?] |
             _: ReduceSum[?, ?] | _: Load[?, ?, ?] => None
 
   private def collectNames(kernel: KernelIR[?]): Set[String] =
@@ -288,6 +289,9 @@ private[core] object LocalCommonSubexpressionElimination:
     case binary: Binary[?] => collectNames(binary.left) ++ collectNames(binary.right)
     case comparison: Compare[?] =>
       collectNames(comparison.left) ++ collectNames(comparison.right)
+    case conditional: Conditional[?] =>
+      collectNames(conditional.condition) ++
+        collectNames(conditional.whenTrue) ++ collectNames(conditional.whenFalse)
     case intrinsic: Intrinsic[?] => Set(intrinsic.name)
     case conversion: Convert[?, ?] => collectNames(conversion.value)
     case accumulation: ToAccumulator[?, ?] => collectNames(accumulation.value)

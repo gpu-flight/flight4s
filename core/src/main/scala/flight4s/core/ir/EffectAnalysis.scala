@@ -31,6 +31,9 @@ private[core] object EffectAnalysis:
       expression(binary.left) ++ expression(binary.right)
     case comparison: Compare[?] =>
       expression(comparison.left) ++ expression(comparison.right)
+    case conditional: Conditional[?] =>
+      expression(conditional.condition) ++
+        expression(conditional.whenTrue) ++ expression(conditional.whenFalse)
     case _: Intrinsic[?] => EffectSummary.empty
     case conversion: Convert[?, ?] => expression(conversion.value)
     case accumulation: ToAccumulator[?, ?] => expression(accumulation.value)
