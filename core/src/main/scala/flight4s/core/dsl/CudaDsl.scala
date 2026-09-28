@@ -236,6 +236,13 @@ object CudaDsl:
       span = position.span
     )
 
+  def gpuRange(
+      indexName: String,
+      from: Expr[Int],
+      until: Expr[Int]
+  ): GpuRange =
+    new GpuRange(indexName, from, until)
+
   def local[T](
       name: String,
       initial: Expr[T]
