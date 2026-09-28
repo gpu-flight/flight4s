@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 29
+  val ArtifactVersion: Int = 30
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -182,6 +182,13 @@ object CudaCodegen:
       FreshNames(collectIdentifiers(kernel) ++ moduleSymbols)
 
     def emit(): Either[CodegenError, Int] =
+      if usesScopedAtomics(kernel.body) then
+        writer.line("#if !defined(__CUDACC_VER_MAJOR__) || (__CUDACC_VER_MAJOR__ < 12) || (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ < 8)")
+        writer.line("#error Flight4s scoped atomics require CUDA 12.8 or newer")
+        writer.line("#endif")
+        writer.line("#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 600")
+        writer.line("#error Flight4s scoped atomics require compute capability 6.0 or newer")
+        writer.line("#endif")
       val parameters = kernel.params.map(emitParameter).mkString(", ")
       val declarationLine = writer.line(
         s"""extern "C" __global__ void ${kernel.name}($parameters) {"""
@@ -294,6 +301,43 @@ object CudaCodegen:
             target <- emitPlace(atomic.target)
             value <- emitExpression(atomic.value)
           yield writer.line(s"${prefix}::atomicAdd(&$target, $value);", atomic.span)
+
+        case atomic: AtomicResult[?, ?] =>
+          for
+            target <- emitPlace(atomic.target)
+            operands <- sequence(atomic.operands.map(emitExpression))
+          yield
+            val name = atomic.local.name
+            val cudaType = atomic.atomicType.cudaName
+            val order = atomic.order.cudaName
+            val scope = atomic.scope.cudaName
+            atomic.operation match
+              case AtomicOperation.Load =>
+                writer.line(s"$prefix$cudaType $name;", atomic.span)
+                writer.line(s"${prefix}::__nv_atomic_load(&($target), &$name, $order, $scope);", atomic.span)
+              case AtomicOperation.Exchange =>
+                val value = freshNames.value()
+                writer.line(s"$prefix$cudaType $name;", atomic.span)
+                writer.line(s"$prefix{", atomic.span)
+                writer.line(s"$prefix  $cudaType $value = ${operands.head};", atomic.span)
+                writer.line(s"$prefix  ::__nv_atomic_exchange(&($target), &$value, &$name, $order, $scope);", atomic.span)
+                writer.line(s"$prefix}")
+              case AtomicOperation.CompareExchange =>
+                writer.line(s"$prefix$cudaType $name = ${operands.head};", atomic.span)
+                writer.line(s"${prefix}::__nv_atomic_compare_exchange_n(&($target), &$name, ${operands(1)}, false, $order, ${atomic.failureOrder.get.cudaName}, $scope);", atomic.span)
+              case operation =>
+                writer.line(s"$prefix$cudaType $name = ::${operation.cudaName}(&($target), ${operands.head}, $order, $scope);", atomic.span)
+
+        case atomic: AtomicStore[?, ?] =>
+          for
+            target <- emitPlace(atomic.target)
+            operand <- emitExpression(atomic.value)
+          yield
+            val value = freshNames.value()
+            writer.line(s"$prefix{", atomic.span)
+            writer.line(s"$prefix  ${atomic.atomicType.cudaName} $value = $operand;", atomic.span)
+            writer.line(s"$prefix  ::__nv_atomic_store(&($target), &$value, ${atomic.order.cudaName}, ${atomic.scope.cudaName});", atomic.span)
+            writer.line(s"$prefix}")
 
         case accumulation: Accumulate[?] =>
           emitExpression(accumulation.value).map { value =>
@@ -706,6 +750,9 @@ object CudaCodegen:
         collectTypes(atomic.target) ++ collectTypes(atomic.value)
       case atomic: AtomicFetchAdd[?, ?] =>
         atomic.local.valueType +: (collectTypes(atomic.target) ++ collectTypes(atomic.value))
+      case atomic: AtomicResult[?, ?] =>
+        atomic.local.valueType +: (collectTypes(atomic.target) ++ atomic.operands.flatMap(collectTypes))
+      case atomic: AtomicStore[?, ?] => collectTypes(atomic.target) ++ collectTypes(atomic.value)
       case accumulation: Accumulate[?] =>
         accumulation.target.valueType +:
           collectTypes(accumulation.value)
@@ -788,6 +835,9 @@ object CudaCodegen:
         collectIdentifiers(atomic.target) ++ collectIdentifiers(atomic.value)
       case atomic: AtomicFetchAdd[?, ?] =>
         collectIdentifiers(atomic.target) ++ collectIdentifiers(atomic.value) + atomic.local.name
+      case atomic: AtomicResult[?, ?] =>
+        collectIdentifiers(atomic.target) ++ atomic.operands.flatMap(collectIdentifiers) + atomic.local.name
+      case atomic: AtomicStore[?, ?] => collectIdentifiers(atomic.target) ++ collectIdentifiers(atomic.value)
       case accumulation: Accumulate[?] =>
         collectIdentifiers(accumulation.value) + accumulation.target.name
       case branch: IfThen =>
@@ -855,6 +905,14 @@ object CudaCodegen:
         Set(local.name)
       case local: LocalArrayElement[?] =>
         collectIdentifiers(local.index) + local.arrayName
+
+  private def usesScopedAtomics(block: Block): Boolean = block.statements.exists {
+    case _: AtomicResult[?, ?] | _: AtomicStore[?, ?] => true
+    case branch: IfThen => usesScopedAtomics(branch.thenBlock) || branch.elseBlock.exists(usesScopedAtomics)
+    case scoped: ScopedBlock => usesScopedAtomics(scoped.body)
+    case loop: ForLoop => usesScopedAtomics(loop.body)
+    case _ => false
+  }
 
   private def floatLiteral(value: Float): String =
     if java.lang.Float.isFinite(value) then

@@ -25,7 +25,7 @@ class WarpParticipationWarningSuite extends FunSuite:
         warp.shuffle("direct", full, threadIdx.x, literal(0))
         warp.shuffleUp("up", full, threadIdx.x, literal(UInt.fromBits(1)))
         warp.shuffleDown("down", full, threadIdx.x, literal(UInt.fromBits(1)))
-        warp.shuffleXor("xor", full, threadIdx.x, literal(1))
+        warp.shuffleXor("xorResult", full, threadIdx.x, literal(1))
         warp.ballot("ballot", full, literal(true))
         warp.all("all", full, literal(true))
         warp.any("any", full, literal(true))

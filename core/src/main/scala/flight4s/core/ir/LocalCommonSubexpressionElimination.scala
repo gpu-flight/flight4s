@@ -87,6 +87,10 @@ private[core] object LocalCommonSubexpressionElimination:
           rewriteAtomic(atomic, rewriter)
         case atomic: AtomicFetchAdd[?, ?] =>
           rewriteAtomicFetch(atomic, rewriter)
+        case atomic: AtomicResult[?, ?] =>
+          atomic.copy(target = rewriter.place(atomic.target), operands = atomic.operands.map(rewriter.expression))
+        case atomic: AtomicStore[?, ?] =>
+          atomic.copy(target = rewriter.place(atomic.target), value = rewriter.expression(atomic.value))
         case accumulation: Accumulate[?] =>
           accumulation.copy(value = rewriter.expression(accumulation.value))
         case branch: IfThen =>
@@ -235,6 +239,8 @@ private[core] object LocalCommonSubexpressionElimination:
     case store: Store[?, ?] => placeExpressions(store.to) :+ store.value
     case atomic: AtomicAdd[?, ?] => placeExpressions(atomic.target) :+ atomic.value
     case atomic: AtomicFetchAdd[?, ?] => placeExpressions(atomic.target) :+ atomic.value
+    case atomic: AtomicResult[?, ?] => placeExpressions(atomic.target) ++ atomic.operands
+    case atomic: AtomicStore[?, ?] => placeExpressions(atomic.target) :+ atomic.value
     case accumulation: Accumulate[?] => Vector(accumulation.value)
     case branch: IfThen => Vector(branch.condition)
     case _: ScopedBlock => Vector.empty
@@ -332,6 +338,9 @@ private[core] object LocalCommonSubexpressionElimination:
     case atomic: AtomicAdd[?, ?] => collectNames(atomic.target) ++ collectNames(atomic.value)
     case atomic: AtomicFetchAdd[?, ?] =>
       collectNames(atomic.target) ++ collectNames(atomic.value) + atomic.local.name
+    case atomic: AtomicResult[?, ?] =>
+      collectNames(atomic.target) ++ atomic.operands.flatMap(collectNames) + atomic.local.name
+    case atomic: AtomicStore[?, ?] => collectNames(atomic.target) ++ collectNames(atomic.value)
     case accumulation: Accumulate[?] =>
       collectNames(accumulation.value) + accumulation.target.name
     case branch: IfThen =>

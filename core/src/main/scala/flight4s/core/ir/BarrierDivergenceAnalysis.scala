@@ -94,6 +94,7 @@ private[core] object BarrierDivergenceAnalysis:
       case _: Store[?, ?] => Vector.empty
       case _: AtomicAdd[?, ?] => Vector.empty
       case _: AtomicFetchAdd[?, ?] => Vector.empty
+      case _: AtomicResult[?, ?] | _: AtomicStore[?, ?] => Vector.empty
       case vote: WarpVote[?] =>
         warpWarnings(vote.mask, vote.span, statementLocation, warpControlMayDiverge, scope)
       case shuffle: WarpShuffle[?, ?] =>

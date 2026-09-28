@@ -143,6 +143,9 @@ private[core] object UniformityAnalysis:
       case atomic: AtomicFetchAdd[?, ?] =>
         scope.withLocal(atomic.local.name, Uniformity.Varying)
 
+      case atomic: AtomicResult[?, ?] =>
+        scope.withLocal(atomic.local.name, Uniformity.Varying)
+
       case accumulation: Accumulate[?] =>
         val current =
           scope.locals.getOrElse(accumulation.target.name, Uniformity.Unknown)
@@ -176,7 +179,7 @@ private[core] object UniformityAnalysis:
             loopUniformity(loop, scope)
           )
 
-      case _: LocalArrayDeclaration[?] | _: AtomicAdd[?, ?] | _: Barrier | _: WarpBarrier => scope
+      case _: LocalArrayDeclaration[?] | _: AtomicAdd[?, ?] | _: AtomicStore[?, ?] | _: Barrier | _: WarpBarrier => scope
 
   def scopeAfter(block: Block, scope: UniformityScope): UniformityScope =
     block.statements.foldLeft(scope) { (current, statement) =>
