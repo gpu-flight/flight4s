@@ -203,9 +203,23 @@ CUDA uses `::atomicAdd`; the previous value is discarded.
 
 Atomicity does not initialize memory, synchronize a block, or publish unrelated
 memory writes. Shared initialization and consumption still require appropriate
-barriers. Floating-point results can depend on thread execution order. Returning
-the old value, other atomic operations, and explicit memory-order/scope controls
-are not yet included.
+barriers. Floating-point results can depend on thread execution order.
+
+Use a named capture when the old value is needed, for example to allocate a
+unique output slot inside a kernel:
+
+```scala
+val ticket = atomicFetchAdd("ticket", counter(literal(0)), literal(1))
+result(ticket) := input(index).read
+```
+
+The capture executes once and returns an `Expr` reading its local snapshot;
+reusing `ticket` never repeats the update. The name follows normal lexical-scope
+rules, and capture is still forbidden inside expression-only callbacks. Size the
+output for all possible contributions, initialize the counter before launch,
+and synchronize before consuming output. Ticket assignment is not stable input
+order, and incrementing the counter does not publish the later output store.
+Other atomic operations and explicit memory-order/scope controls remain deferred.
 
 ## Status
 

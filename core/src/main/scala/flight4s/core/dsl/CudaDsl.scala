@@ -421,6 +421,20 @@ object CudaDsl:
       kernels.iterator.map(_.ir).toVector
     )
 
+  /** Executes the update once and binds CUDA's returned old value to a device local. */
+  def atomicFetchAdd[T, Space <: Global | Shared](
+      name: String,
+      target: Place[T, Space, ReadWrite],
+      value: Expr[T]
+  )(using
+      addition: AtomicAddType[T],
+      builder: BlockBuilder,
+      position: DslSourcePosition
+  ): Expr[T] =
+    val result = LocalVariable(name, addition, position.span)
+    builder.append(AtomicFetchAdd(result, target, value, addition, position.span))
+    Load(result, position.span)
+
   def atomicAdd[T, Space <: Global | Shared](
       target: Place[T, Space, ReadWrite],
       value: Expr[T]

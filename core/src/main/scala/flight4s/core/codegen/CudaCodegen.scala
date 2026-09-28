@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 11
+  val ArtifactVersion: Int = 12
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -259,6 +259,15 @@ object CudaCodegen:
             target <- emitPlace(store.to)
             value <- emitExpression(store.value)
           yield writer.line(s"$prefix$target = $value;", store.span)
+
+        case atomic: AtomicFetchAdd[?, ?] =>
+          for
+            target <- emitPlace(atomic.target)
+            value <- emitExpression(atomic.value)
+          yield writer.line(
+            s"$prefix${atomic.local.valueType.cudaName} ${atomic.local.name} = ::atomicAdd(&$target, $value);",
+            atomic.span
+          )
 
         case atomic: AtomicAdd[?, ?] =>
           for
@@ -614,6 +623,8 @@ object CudaCodegen:
         collectTypes(store.to) ++ collectTypes(store.value)
       case atomic: AtomicAdd[?, ?] =>
         collectTypes(atomic.target) ++ collectTypes(atomic.value)
+      case atomic: AtomicFetchAdd[?, ?] =>
+        atomic.local.valueType +: (collectTypes(atomic.target) ++ collectTypes(atomic.value))
       case accumulation: Accumulate[?] =>
         accumulation.target.valueType +:
           collectTypes(accumulation.value)
@@ -684,6 +695,8 @@ object CudaCodegen:
         collectIdentifiers(store.to) ++ collectIdentifiers(store.value)
       case atomic: AtomicAdd[?, ?] =>
         collectIdentifiers(atomic.target) ++ collectIdentifiers(atomic.value)
+      case atomic: AtomicFetchAdd[?, ?] =>
+        collectIdentifiers(atomic.target) ++ collectIdentifiers(atomic.value) + atomic.local.name
       case accumulation: Accumulate[?] =>
         collectIdentifiers(accumulation.value) + accumulation.target.name
       case branch: IfThen =>
