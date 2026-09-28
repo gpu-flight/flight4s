@@ -179,7 +179,7 @@ class FlatMapSuite extends FunSuite:
     assertEquals(inner.span, loopSpan)
     assertEquals(inner.body.statements.head.span, filterSpan)
 
-  test("flatMap requires staged traversals and does not imply tuple elements or expression sums"):
+  test("flatMap requires staged traversals and rejects host tuple fields and expression sums"):
     assert(typeCheckErrors("""
       import flight4s.core.dsl.CudaDsl.*
       gpuRange("i", literal(0), literal(4)).flatMap(i => List(i))
@@ -187,7 +187,7 @@ class FlatMapSuite extends FunSuite:
     assert(typeCheckErrors("""
       import flight4s.core.dsl.CudaDsl.*
       val elements = for i <- gpuRange("i", literal(0), literal(4))
-                         j <- gpuRange("j", literal(0), i) yield (i, j)
+                         j <- gpuRange("j", literal(0), i) yield (i, j, 1)
     """).nonEmpty)
     assert(typeCheckErrors("""
       import flight4s.core.dsl.CudaDsl.*
