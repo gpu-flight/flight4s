@@ -195,4 +195,3 @@ private[core] object UniformityAnalysis:
       scope: UniformityScope
   ): Uniformity =
     expression(loop.from, scope).join(expression(loop.until, scope))
-
