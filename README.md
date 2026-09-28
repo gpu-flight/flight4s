@@ -116,6 +116,11 @@ guards and effects run only for accepted elements. No compacted device array
 is allocated. Filtered `sum` and multi-generator `for ... yield` are not yet
 supported; use a named fold or explicit nested statement loops.
 
+Typed device math includes `exp`, `log`, `sqrt`, `rsqrt`, and `tanh` for `Float`
+and `Double` expressions. Low-precision values require explicit promotion, for
+example `exp(halfValue.toAccumulator[Float])`. These emit standard CUDA math
+calls; no JVM constant folding or automatic fast-math option is introduced.
+
 ## Status
 
 Flight4s is pre-alpha and under active design. The current implementation
@@ -129,6 +134,7 @@ provides:
 - strict named scalar `foldLeft` terminals for ordered per-thread recurrences;
 - named `let` snapshots returning read-only expressions for once-evaluated values;
 - lazy filtered ranges and Scala `for` guards with ordered conditional execution;
+- typed Float/Double device math with explicit low-precision promotion;
 - distinct module constants, rank-aware kernel shared arrays, and lexical local
   arrays;
 - module and kernel validation for memory ownership, scope, access, and static

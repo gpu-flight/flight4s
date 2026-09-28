@@ -34,6 +34,7 @@ private[core] object EffectAnalysis:
     case conditional: Conditional[?] =>
       expression(conditional.condition) ++
         expression(conditional.whenTrue) ++ expression(conditional.whenFalse)
+    case math: UnaryMath[?] => expression(math.value)
     case _: Intrinsic[?] => EffectSummary.empty
     case conversion: Convert[?, ?] => expression(conversion.value)
     case accumulation: ToAccumulator[?, ?] => expression(accumulation.value)

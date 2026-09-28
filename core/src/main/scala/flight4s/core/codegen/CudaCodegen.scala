@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 8
+  val ArtifactVersion: Int = 9
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -336,6 +336,12 @@ object CudaCodegen:
             whenFalse <- emitExpression(conditional.whenFalse)
           yield s"($condition ? $whenTrue : $whenFalse)"
 
+        case math: UnaryMath[?] =>
+          val suffix = math.mathType match
+            case F32 => "f"
+            case F64 => ""
+          emitExpression(math.value).map(value => s"::${math.operator.cudaName}$suffix($value)")
+
         case intrinsic: Intrinsic[?] =>
           Right(intrinsic.name)
 
@@ -614,6 +620,7 @@ object CudaCodegen:
       case conditional: Conditional[?] =>
         collectTypes(conditional.condition) ++
           collectTypes(conditional.whenTrue) ++ collectTypes(conditional.whenFalse)
+      case math: UnaryMath[?] => collectTypes(math.value)
       case conversion: Convert[?, ?] =>
         collectTypes(conversion.value)
       case accumulation: ToAccumulator[?, ?] =>
@@ -683,6 +690,7 @@ object CudaCodegen:
       case conditional: Conditional[?] =>
         collectIdentifiers(conditional.condition) ++
           collectIdentifiers(conditional.whenTrue) ++ collectIdentifiers(conditional.whenFalse)
+      case math: UnaryMath[?] => collectIdentifiers(math.value)
       case conversion: Convert[?, ?] =>
         collectIdentifiers(conversion.value)
       case accumulation: ToAccumulator[?, ?] =>

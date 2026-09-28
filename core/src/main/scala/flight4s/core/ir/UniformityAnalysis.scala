@@ -86,6 +86,7 @@ private[core] object UniformityAnalysis:
       expression(conditional.condition, scope)
         .join(expression(conditional.whenTrue, scope))
         .join(expression(conditional.whenFalse, scope))
+    case math: UnaryMath[?] => expression(math.value, scope)
     case intrinsic: Intrinsic[?] =>
       intrinsicUniformities.getOrElse(intrinsic.name, Uniformity.Unknown)
     case conversion: Convert[?, ?] => expression(conversion.value, scope)

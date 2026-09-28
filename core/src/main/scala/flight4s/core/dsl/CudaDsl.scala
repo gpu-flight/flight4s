@@ -52,6 +52,21 @@ object CudaDsl:
       position.span
     )
 
+  def exp[T](value: Expr[T])(using mathType: FloatingMathType[T], position: DslSourcePosition): Expr[T] =
+    UnaryMath(UnaryMathOperator.Exp, value, mathType, position.span)
+
+  def log[T](value: Expr[T])(using mathType: FloatingMathType[T], position: DslSourcePosition): Expr[T] =
+    UnaryMath(UnaryMathOperator.Log, value, mathType, position.span)
+
+  def sqrt[T](value: Expr[T])(using mathType: FloatingMathType[T], position: DslSourcePosition): Expr[T] =
+    UnaryMath(UnaryMathOperator.Sqrt, value, mathType, position.span)
+
+  def rsqrt[T](value: Expr[T])(using mathType: FloatingMathType[T], position: DslSourcePosition): Expr[T] =
+    UnaryMath(UnaryMathOperator.Rsqrt, value, mathType, position.span)
+
+  def tanh[T](value: Expr[T])(using mathType: FloatingMathType[T], position: DslSourcePosition): Expr[T] =
+    UnaryMath(UnaryMathOperator.Tanh, value, mathType, position.span)
+
   def input[T](name: String)(using valueType: CudaType[T]): BufferParam[T, ReadOnly] =
     BufferParam(name, valueType)
 

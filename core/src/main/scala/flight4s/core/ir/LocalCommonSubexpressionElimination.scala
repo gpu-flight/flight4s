@@ -160,6 +160,8 @@ private[core] object LocalCommonSubexpressionElimination:
             right = this.expression(comparison.right)
           )
           .asInstanceOf[Expr[T]]
+      case math: UnaryMath[?] =>
+        math.copy(value = this.expression(math.value)).asInstanceOf[Expr[T]]
       case conversion: Convert[?, ?] =>
         conversion
           .copy(value = this.expression(conversion.value))
@@ -216,6 +218,7 @@ private[core] object LocalCommonSubexpressionElimination:
       case comparison: Compare[?] =>
         collectCounts(comparison.left, counts)
         collectCounts(comparison.right, counts)
+      case math: UnaryMath[?] => collectCounts(math.value, counts)
       case conversion: Convert[?, ?] => collectCounts(conversion.value, counts)
       case accumulation: ToAccumulator[?, ?] => collectCounts(accumulation.value, counts)
       case _: Conditional[?] | _: ReduceSum[?, ?] => ()
@@ -252,7 +255,7 @@ private[core] object LocalCommonSubexpressionElimination:
             left <- integerKey(binary.left)
             right <- integerKey(binary.right)
           yield IntegerExpressionKey.Binary(binary.operator, left, right)
-        case _: Compare[?] | _: Conditional[?] | _: Convert[?, ?] | _: ToAccumulator[?, ?] |
+        case _: Compare[?] | _: Conditional[?] | _: UnaryMath[?] | _: Convert[?, ?] | _: ToAccumulator[?, ?] |
             _: ReduceSum[?, ?] | _: Load[?, ?, ?] => None
 
   private def collectNames(kernel: KernelIR[?]): Set[String] =
@@ -292,6 +295,7 @@ private[core] object LocalCommonSubexpressionElimination:
     case conditional: Conditional[?] =>
       collectNames(conditional.condition) ++
         collectNames(conditional.whenTrue) ++ collectNames(conditional.whenFalse)
+    case math: UnaryMath[?] => collectNames(math.value)
     case intrinsic: Intrinsic[?] => Set(intrinsic.name)
     case conversion: Convert[?, ?] => collectNames(conversion.value)
     case accumulation: ToAccumulator[?, ?] => collectNames(accumulation.value)
