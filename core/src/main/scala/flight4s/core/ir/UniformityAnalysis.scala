@@ -72,7 +72,10 @@ private[core] object UniformityAnalysis:
     "blockIdx.z" -> Uniformity.BlockUniform,
     "blockDim.x" -> Uniformity.GridUniform,
     "blockDim.y" -> Uniformity.GridUniform,
-    "blockDim.z" -> Uniformity.GridUniform
+    "blockDim.z" -> Uniformity.GridUniform,
+    "gridDim.x" -> Uniformity.GridUniform,
+    "gridDim.y" -> Uniformity.GridUniform,
+    "gridDim.z" -> Uniformity.GridUniform
   )
 
   def expression(expr: Expr[?]): Uniformity =
