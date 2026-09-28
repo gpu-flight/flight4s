@@ -84,6 +84,7 @@ private[core] object UniformityAnalysis:
       expression(shift.value, scope).join(expression(shift.distance, scope))
     case shift: SignedShift =>
       expression(shift.value, scope).join(expression(shift.distance, scope))
+    case count: PopulationCount[?] => expression(count.value, scope)
     case comparison: Compare[?] =>
       expression(comparison.left, scope).join(expression(comparison.right, scope))
     case conditional: Conditional[?] =>

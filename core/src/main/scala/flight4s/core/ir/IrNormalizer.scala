@@ -163,6 +163,7 @@ private[core] object IrNormalizer:
       normalizeBinary(binary, scope).asInstanceOf[Expr[T]]
     case shift: UnsignedShift => normalizeUnsignedShift(shift, scope).asInstanceOf[Expr[T]]
     case shift: SignedShift => normalizeSignedShift(shift, scope).asInstanceOf[Expr[T]]
+    case count: PopulationCount[?] => normalizePopulationCount(count, scope).asInstanceOf[Expr[T]]
     case comparison: Compare[?] =>
       normalizeComparison(comparison, scope).asInstanceOf[Expr[T]]
     case conditional: Conditional[?] =>
@@ -285,6 +286,12 @@ private[core] object IrNormalizer:
       Literal(result, I32, shift.span)
     folded.getOrElse(shift.copy(value = value, distance = distance))
 
+  private def normalizePopulationCount[T](count: PopulationCount[T], scope: ConstantScope): Expr[Int] =
+    val value = expression(count.value, scope)
+    integerLiteralValue(value).orElse(unsignedLiteralBits(value))
+      .map(word => Literal(java.lang.Integer.bitCount(word), I32, count.span))
+      .getOrElse(count.copy(value = value))
+
   private def unsignedLiteralBits(expression: Expr[?]): Option[Int] = expression match
     case literal: Literal[?] if literal.valueType == U32 => literal.value match
       case value: UInt => Some(value.toIntBits)
@@ -373,6 +380,7 @@ private[core] object IrNormalizer:
       case binary: Binary[?] => binary.copy(span = span).asInstanceOf[Expr[T]]
       case shift: UnsignedShift => shift.copy(span = span).asInstanceOf[Expr[T]]
       case shift: SignedShift => shift.copy(span = span).asInstanceOf[Expr[T]]
+      case count: PopulationCount[?] => count.copy(span = span).asInstanceOf[Expr[T]]
       case comparison: Compare[?] => comparison.copy(span = span).asInstanceOf[Expr[T]]
       case conditional: Conditional[?] => conditional.copy(span = span).asInstanceOf[Expr[T]]
       case math: UnaryMath[?] => math.copy(span = span).asInstanceOf[Expr[T]]
