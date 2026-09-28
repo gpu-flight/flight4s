@@ -1,6 +1,7 @@
 package flight4s.core.dsl
 
 import scala.collection.mutable.ArrayBuffer
+import scala.annotation.targetName
 
 import flight4s.core.abi.ScalarAbi
 import flight4s.core.ir.*
@@ -577,6 +578,19 @@ object CudaDsl:
     def x: Expr[Int] = Intrinsic("blockDim.x", I32)
     def y: Expr[Int] = Intrinsic("blockDim.y", I32)
     def z: Expr[Int] = Intrinsic("blockDim.z", I32)
+
+  extension (value: Expr[Int])
+    @targetName("signedShiftLeft")
+    def <<(distance: Expr[Int])(using position: DslSourcePosition): Expr[Int] =
+      SignedShift(SignedShiftOperator.Left, value, distance, position.span)
+
+    @targetName("signedShiftRight")
+    def >>(distance: Expr[Int])(using position: DslSourcePosition): Expr[Int] =
+      SignedShift(SignedShiftOperator.ArithmeticRight, value, distance, position.span)
+
+    @targetName("signedLogicalShiftRight")
+    def >>>(distance: Expr[Int])(using position: DslSourcePosition): Expr[Int] =
+      SignedShift(SignedShiftOperator.LogicalRight, value, distance, position.span)
 
   extension (value: Expr[UInt])
     def <<(distance: Expr[Int])(using position: DslSourcePosition): Expr[UInt] =

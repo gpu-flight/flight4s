@@ -12,6 +12,7 @@ import munit.FunSuite
 
 import flight4s.core.codegen.{
   CompilerOptions,
+  CudaCodegen,
   DynamicSharedMemoryRequirement,
   GeneratedCudaModule,
   KernelLaunchRequirements,
@@ -188,7 +189,7 @@ class NvrtcArtifactStoreSuite extends FunSuite:
       val module = generated("Version.scala")
       val generatedKey = compilationKey(module)
       assertEquals(store.store(generatedKey, artifact(module)), Right(()))
-      val wrongVersion = NvrtcCompilationInput.generated(module, codegenVersion = 19)
+      val wrongVersion = NvrtcCompilationInput.generated(module, codegenVersion = CudaCodegen.ArtifactVersion + 1)
       assert(store.load(generatedKey, wrongVersion).left.exists(_.message.contains("source provenance")))
     }
 

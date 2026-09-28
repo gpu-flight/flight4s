@@ -738,6 +738,14 @@ object KernelValidator:
           requireSameType(shift.distance.valueType, I32,
             "unsigned shift distance must have CUDA int type", s"$location.distance", shift.distance.span)
 
+      case shift: SignedShift =>
+        validateExpression(shift.value, parameters, s"$location.value", scope) ++
+          validateExpression(shift.distance, parameters, s"$location.distance", scope) ++
+          requireSameType(shift.value.valueType, I32,
+            "signed shift value must have CUDA int type", s"$location.value", shift.value.span) ++
+          requireSameType(shift.distance.valueType, I32,
+            "signed shift distance must have CUDA int type", s"$location.distance", shift.distance.span)
+
       case comparison: Compare[?] =>
         validateExpression(
           comparison.left,

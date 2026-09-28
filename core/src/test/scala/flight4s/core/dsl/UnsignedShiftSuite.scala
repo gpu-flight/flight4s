@@ -22,10 +22,10 @@ class UnsignedShiftSuite extends FunSuite:
       val logical: Expr[UInt] = word >>> distance
     """), Nil)
 
-  test("shift typing rejects signed values and unsigned floating or Boolean counts"):
+  test("shift typing rejects floating values and unsigned floating or Boolean counts"):
     assert(typeCheckErrors("""
       import flight4s.core.dsl.CudaDsl.*
-      literal(1) << literal(2)
+      literal(1.0f) << literal(2)
     """).nonEmpty)
     assert(typeCheckErrors("""
       import flight4s.core.dsl.CudaDsl.*

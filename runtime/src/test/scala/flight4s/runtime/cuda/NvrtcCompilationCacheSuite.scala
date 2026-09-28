@@ -11,6 +11,7 @@ import munit.FunSuite
 
 import flight4s.core.codegen.{
   CompilerOptions,
+  CudaCodegen,
   GeneratedCudaModule,
   KernelLaunchRequirements,
   SourceMap,
@@ -317,16 +318,17 @@ class NvrtcCompilationCacheSuite extends FunSuite:
       val backend = RecordingBackend()
       val cache = NvrtcCompilationCache.persistent(2, backend, store)
       val initialModule = generated("VersionedInitial.scala")
+      val explicitVersion = CudaCodegen.ArtifactVersion + 1
       val remappedModule = initialModule.copy(
         sourceMap = sourceMap("VersionedRemapped.scala")
       )
       val initial = NvrtcCompilationInput.generated(
         initialModule,
-        codegenVersion = 19
+        codegenVersion = explicitVersion
       )
       val remapped = NvrtcCompilationInput.generated(
         remappedModule,
-        codegenVersion = 19
+        codegenVersion = explicitVersion
       )
 
       compiled(cache, initial)
