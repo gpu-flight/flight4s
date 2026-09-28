@@ -306,6 +306,25 @@ be preserved across stores. Mapping a tuple back to a scalar gives a general
 serial traversal with `foldLeft`; expression-only `sum` remains limited to the
 original unfiltered mapped range.
 
+Traversal elements can use named case-class fields with the same derivation:
+
+```scala
+case class Sample(index: Expr[Int], value: Expr[Float]) derives ProductFoldState
+
+val selected = gpuRange("i", literal(0), n)
+  .map(i => Sample(i, data(i).read))
+  .filter(_.value > literal(0.0f))
+val total = selected.foldLeft("total", literal(0.0f))((sum, sample) => sum + sample.value)
+selected.foreach(sample => result(sample.index) := sample.value * literal(2.0f))
+```
+
+Scalar, tuple, and product pipelines can map or expand into one another. Named
+products support guarded `for` generators and scalar/tuple/product folds. They
+remain flat, nonempty containers of `Expr` fields on the JVM, not CUDA structs
+or stored snapshots. Each terminal emits a separate traversal. Nested product
+fields, including comprehension value bindings that need nested transport,
+remain unsupported; use an explicit flat `map` instead.
+
 Ranges also support staged guards, including Scala `for` syntax:
 
 ```scala
@@ -334,8 +353,9 @@ val total = lowerTriangle.foldLeft("total", literal(0.0f))(_ + _)
 Each thread visits outer indices first, then inner indices in ascending order.
 Maps, guards, further `flatMap`, `foreach`, and scalar/tuple folds can compose.
 The inner factory builds once per terminal on the JVM; its bounds remain device
-expressions. Tuple-valued elements, comprehension value bindings, expression-only
-flattened sums, and automatic parallel distribution are not included.
+expressions. Scalar, tuple, and named-product elements are supported.
+Comprehension value bindings must fit the supported flat expression shape;
+expression-only flattened sums and automatic parallel distribution are not included.
 
 Typed device math includes `exp`, `log`, `sqrt`, `rsqrt`, and `tanh` for `Float`
 and `Double` expressions. Low-precision values require explicit promotion, for

@@ -3,9 +3,20 @@ package flight4s.core.dsl
 import flight4s.core.dsl.CudaDsl.*
 import flight4s.core.ir.SourceSpan
 
-/** Shared ordered fold semantics for scalar-expression and tuple-expression traversals. */
+/** Shared ordered composition for scalar, tuple, and named-product expression traversals. */
 abstract class GpuValueTraversal[Value] private[dsl] ():
   def foreach(body: Value => (BlockBuilder ?=> Unit))(using BlockBuilder, DslSourcePosition): Unit
+
+  final def map[Next <: Product](transform: Value => Next)(using ProductFoldState[Next]): GpuProductTraversal[Next] =
+    new GpuProductTraversal(body => foreach(value => body(ExpressionStaging.expression(transform(value)))))
+
+  final def flatMap[Next <: Product](expand: Value => GpuProductTraversal[Next])(
+      using ProductFoldState[Next]
+  ): GpuProductTraversal[Next] =
+    new GpuProductTraversal(body => foreach { value =>
+      val inner = ExpressionStaging.expression(expand(value))
+      inner.foreach(body)
+    })
 
   /** Named case-class fields advance simultaneously, just like tuple components. */
   final def foldLeft[State <: Product](stateName: String, initial: State)(
