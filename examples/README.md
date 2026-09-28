@@ -75,7 +75,55 @@ Repeat with `--tool synccheck` and `--tool memcheck`. Use the actual launcher an
 native-library paths on your machine. Portable contracts run with
 `sbt "examples/testOnly flight4s.examples.BlockRowSoftmaxSuite"`.
 
-## Run the Serial Example
+## Row Mean and Population Variance
+
+[RowStatistics.scala](src/main/scala/flight4s/examples/RowStatistics.scala)
+demonstrates a three-component functional fold and a reusable pure Scala
+expression function. Each thread processes one row in ascending column order.
+The Welford state is `(count: Expr[Int], mean: Expr[Double], M2: Expr[Double])`;
+Float inputs are explicitly widened before arithmetic, keeping even squared
+Float extrema within Double range. All next components are snapshotted before
+any old component is overwritten. No device tuple allocation is introduced.
+
+`RowStatistics.run(values, rows, columns)` returns `Result(means,
+populationVariances)`, with two Double arrays of length `rows`. Population
+variance divides M2 by N, not N-1. Singleton and constant rows have zero
+variance. Rows must be non-negative, columns positive, and the finite row-major
+input must exactly match the shape. Empty batches return empty arrays without
+opening CUDA. The input array is preserved. Calling the exposed kernel directly
+requires the caller to satisfy these same shape, capacity, and finite-input
+conditions; scalar value relationships are not inferred by launch validation.
+
+```shell
+sbt "examples/runMain flight4s.examples.RowStatistics --cuda-source"
+sbt -Dflight4s.cuda.native.path=<absolute-library-path> "examples/runMain flight4s.examples.RowStatistics"
+sbt "examples/testOnly flight4s.examples.RowStatisticsSuite"
+sbt -Dflight4s.cuda.native.path=<absolute-library-path> "examples/testOnly flight4s.examples.RowStatisticsJniSuite"
+```
+
+The built-in main prints:
+
+```text
+row 0: mean=2.5000000 populationVariance=1.2500000
+row 1: mean=1000001.5000000 populationVariance=1.2500000
+row 2: mean=-7.0000000 populationVariance=0.0000000
+```
+
+The CUDA tests check 814 statistics across 12 launches against independent
+two-pass decimal references and known exact results. Coverage includes large
+offsets, finite Float extrema, subnormals, 4,097-column rows, and partial final
+blocks. Mean tolerance is 1e-12 times the largest absolute input in the row;
+variance tolerance is 1e-9 relative to the reference (both have a minimum
+Double.MIN_VALUE floor). These are tested fixture tolerances, not universal
+error guarantees. Memcheck reported zero errors. Like the other examples,
+each call performs the full compile/allocation/copy lifecycle; Double arithmetic
+and serial rows are deliberate correctness choices, not tuning recommendations.
+
+The recurrence follows the standard [Welford update documented by OpenTOPAS](https://opentopas.readthedocs.io/en/stable/parameters/scoring/statinfo.html),
+with population rather than sample normalization. No sample variance, masking,
+cross-thread combination, streaming host API, or normalization operator is added.
+
+## Run the Serial Softmax Example
 
 From the repository root, inspect generated CUDA without configuring JNI:
 
