@@ -87,6 +87,9 @@ provides:
   owned explicit stream. `CudaContext.synchronize()` waits for all context
   work, while `CudaStream.synchronize()` waits for one explicit stream; launch
   never synchronizes implicitly.
+- **Buffer ownership:** Owned `CudaDeviceBuffer` arguments must belong to the
+  function's context. A mismatch returns `BufferContextMismatch` with a
+  zero-based argument index before address packing or resource retention.
 - **Copies:** Device-buffer copies are whole-buffer and synchronous through
   temporary pageable direct staging. Reusable `CudaPinnedBuffer[T]` storage
   provides a page-locked synchronous path without repeated direct-buffer

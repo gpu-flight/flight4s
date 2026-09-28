@@ -15,6 +15,48 @@ import flight4s.core.unsafe.raw.{RawCuda, RawCudaKernel}
 import flight4s.runtime.cuda.internal.*
 
 class CudaResourcesSuite extends FunSuite:
+  for rawLaunch <- Vector(false, true); explicit <- Vector(false, true) do
+    test(s"foreign owned buffers are rejected: raw=$rawLaunch explicit=$explicit"):
+      val backend = RecordingBackend()
+      val context = openedContext(backend)
+      val foreign = openedContext(backend)
+      try
+        val definition = kernel(
+          "bufferContext", params(value[Int]("count"), input[Int]("a"), output[Int]("b"))
+        ) { _ => () }
+        val generated = generatedFixture(definition)
+        val raw = RawCuda.kernel(
+          definition.name, definition.signature, generated.kernel.cudaSource,
+          CompilerOptions(), KernelLaunchRequirements()
+        )
+        val artifact = if rawLaunch then rawArtifact(raw) else generated.artifact
+        val module = context.load(artifact).toOption.get
+        val function = if rawLaunch then module.function(raw).toOption.get
+          else module.function(generated.kernel).toOption.get
+        val localBuffer = context.allocate[Int](4).toOption.get
+        val foreignBuffer = foreign.allocate[Int](4).toOption.get
+        val args = (4, localBuffer, foreignBuffer)
+        val config = LaunchConfig(Grid.x(1), LaunchBlock.x(1))
+        val result = if explicit then
+          val stream = context.createStream().toOption.get
+          if rawLaunch then function.launch(raw.bind(args), config, stream)
+          else function.launch(definition.bind(args), config, stream)
+        else
+          if rawLaunch then function.launch(raw.bind(args), config)
+          else function.launch(definition.bind(args), config)
+        assert(result.isLeft, "a foreign owned buffer reached native launch")
+        assertEquals(result, Left(CudaLaunchFailure.BufferContextMismatch("bufferContext", 2)))
+        assert(backend.lastLaunch.isEmpty)
+        module.close()
+        localBuffer.close()
+        foreignBuffer.close()
+        assertEquals(backend.events.count(_.startsWith("free:")), 2)
+        assert(backend.events.exists(_.startsWith("unload:")))
+        assert(!backend.events.exists(_.startsWith("synchronize")))
+      finally
+        context.close()
+        foreign.close()
+
   test("raw kernels resolve with typed signatures and function attributes"):
     val backend = RecordingBackend()
     val raw = rawDefinition()
@@ -28,6 +70,34 @@ class CudaResourcesSuite extends FunSuite:
       module.close()
       assert(!function.isValid)
     finally context.close()
+
+  test("buffer context validation precedes address reads and leaves valid retry possible"):
+    val backend = RecordingBackend()
+    val context = openedContext(backend)
+    val foreign = openedContext(backend)
+    try
+      val definition = kernel("retryBuffers", params(input[Int]("a"), output[Int]("b"))) { _ => () }
+      val fixture = generatedFixture(definition)
+      val module = context.load(fixture.artifact).toOption.get
+      val function = module.function(fixture.kernel).toOption.get
+      val closedLocal = context.allocate[Int](4).toOption.get
+      val foreignBuffer = foreign.allocate[Int](4).toOption.get
+      closedLocal.close()
+      foreign.close()
+      val config = LaunchConfig(Grid.x(1), LaunchBlock.x(1))
+      assertEquals(
+        function.launch(definition.bind((closedLocal, foreignBuffer)), config),
+        Left(CudaLaunchFailure.BufferContextMismatch("retryBuffers", 1))
+      )
+      assert(backend.lastLaunch.isEmpty)
+      val valid = context.allocate[Int](4).toOption.get
+      intercept[IllegalStateException](function.launch(definition.bind((closedLocal, valid)), config))
+      assert(backend.lastLaunch.isEmpty)
+      assertEquals(function.launch(definition.bind((valid, valid)), config), Right(()))
+      assertEquals(context.synchronize(), Right(()))
+    finally
+      context.close()
+      foreign.close()
 
   test("raw function resolution rejects a different definition before driver lookup"):
     val backend = RecordingBackend()
