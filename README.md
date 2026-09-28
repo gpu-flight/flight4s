@@ -462,6 +462,30 @@ can also warn. Conversely, no warning does not prove that every calling lane is
 in the mask, that all named lanes reach the call, or that a shuffle source is
 active. Unknown uniformity remains unproven. Generated CUDA is unchanged.
 
+## Block Reductions
+
+Declare reusable scratch at kernel scope, then call it collectively:
+
+```scala
+val reduction = block.reduction[Float]("scratch", LaunchBlock.x(128))
+val total = reduction.sum("total", item)
+val product = reduction.reduceTree("product", item)(_ * _)
+```
+
+Here `LaunchBlock` is `flight4s.core.launch.Block` imported with an alias, and
+`item` is a per-thread expression. Scratch uses one static shared element per
+thread. The block size must be a power of two from 1 through 1,024. Every thread
+must call each reduction in the same order; pad missing inputs with the chosen
+operation's identity instead of guarding only some threads around the call.
+
+The kernel automatically requires the exact declared x/y/z shape. A conflicting
+`.requiringBlock(...)` override fails validation, and typed launches reject a
+different shape. Calls use an ordered adjacent-pair tree, capture the result in
+every thread, and finish with a barrier before scratch may be reused. `sum`
+requires an additive type; custom combines must be statement-free. No implicit
+widening, tuple-state reduction, non-power-of-two tree, cross-block reduction,
+or automatic conversion of `foldLeft` is implied.
+
 ## Status
 
 Flight4s is pre-alpha and under active design. The current implementation

@@ -11,6 +11,7 @@ enum ValidationCode:
   case DuplicateKernelName
   case ModuleSymbolConflict
   case InvalidKernelName
+  case ConflictingBlockRequirement
   case InvalidParameterName
   case DuplicateParameterName
   case InvalidSharedMemoryName
@@ -138,6 +139,12 @@ object KernelValidator:
     val constantNames = constants.fold(Set.empty[String])(_.map(_.name).toSet)
     val parameterErrors = validateParameters(kernel, constantNames)
     val sharedMemoryErrors = validateSharedMemory(kernel, constantNames)
+    val blockRequirementErrors = kernel.blockRequirements.zipWithIndex.collect {
+      case (requirement, index) if !kernel.requiredBlock.contains(requirement.shape) =>
+        ValidationError(ValidationCode.ConflictingBlockRequirement,
+          s"block collective requires ${requirement.shape}, but kernel requiredBlock is ${kernel.requiredBlock}",
+          s"blockRequirements[$index]", requirement.span)
+    }
     val parametersByName = kernel.params.groupBy(_.name).view.mapValues(_.head).toMap
     val bodyErrors = validateBlock(
       kernel.body,
@@ -153,7 +160,7 @@ object KernelValidator:
     )
 
     ValidationResult(
-      parameterErrors ++ sharedMemoryErrors ++ bodyErrors,
+      parameterErrors ++ sharedMemoryErrors ++ blockRequirementErrors ++ bodyErrors,
       BarrierDivergenceAnalysis.warnings(kernel.body)
     )
 

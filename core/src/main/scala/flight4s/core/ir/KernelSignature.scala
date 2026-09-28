@@ -121,12 +121,18 @@ object KernelSignature:
       : KernelSignature[KernelArgumentsOf[Params]] { type Bindings = Params } =
     new Impl(bindings, tuple)
 
+final case class BlockShapeRequirement(
+    shape: LaunchBlock,
+    span: SourceSpan = SourceSpan.Unknown
+)
+
 final case class KernelIR[Args <: Tuple](
     name: String,
     signature: KernelSignature[Args],
     body: Block,
     sharedMemory: Vector[SharedArray[?, ?]] = Vector.empty,
-    requiredBlock: Option[LaunchBlock] = None
+    requiredBlock: Option[LaunchBlock] = None,
+    blockRequirements: Vector[BlockShapeRequirement] = Vector.empty
 ):
   def params: Vector[KernelParam] = signature.parameters
 
