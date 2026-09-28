@@ -438,6 +438,14 @@ point. It does not synchronize another warp or the whole block. When reusing
 scratch memory in a loop, synchronize after writing and again after all readers
 have captured their values, before the next iteration overwrites the scratch.
 
+Validation reports `WarpParticipationMayDiverge` when a shuffle, vote, or warp
+barrier uses known lane-varying control flow or a lane-varying mask. The analysis
+follows local declarations, assignments, branches, and loops. This is a warning,
+not a proof of invalid participation: a correctly guarded partial-mask subgroup
+can also warn. Conversely, no warning does not prove that every calling lane is
+in the mask, that all named lanes reach the call, or that a shuffle source is
+active. Unknown uniformity remains unproven. Generated CUDA is unchanged.
+
 ## Status
 
 Flight4s is pre-alpha and under active design. The current implementation
