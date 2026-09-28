@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 23
+  val ArtifactVersion: Int = 24
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -392,7 +392,8 @@ object CudaCodegen:
           emitExpression(math.value).map(value => s"::${math.operator.cudaName}$suffix($value)")
 
         case intrinsic: Intrinsic[?] =>
-          Right(intrinsic.name)
+          // CUDA index fields are unsigned; preserve the IR's declared type.
+          Right(s"static_cast<${intrinsic.valueType.cudaName}>(${intrinsic.name})")
 
         case conversion: Convert[?, ?] =>
           emitExpression(conversion.value).flatMap { value =>

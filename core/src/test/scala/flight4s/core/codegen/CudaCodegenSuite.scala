@@ -41,7 +41,7 @@ class CudaCodegenSuite extends FunSuite:
     assertEquals(
       generated.cudaSource,
       """extern "C" __global__ void vectorAdd(const float* left, const float* right, float* output, int elementCount) {
-        |  int index = ((blockIdx.x * blockDim.x) + threadIdx.x);
+        |  int index = ((static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x)) + static_cast<int>(threadIdx.x));
         |  if ((index < elementCount)) {
         |    output[index] = (left[index] + right[index]);
         |  }
@@ -107,12 +107,12 @@ class CudaCodegenSuite extends FunSuite:
         |  extern __shared__ __align__(4) float dynamicTile[];
         |
         |  float scratch[2];
-        |  tile[threadIdx.y][threadIdx.x] = coefficients[threadIdx.x];
-        |  cube[blockIdx.z][threadIdx.y][threadIdx.x] = 0x1.0p0f;
-        |  scratch[0] = tile[threadIdx.y][threadIdx.x];
-        |  dynamicTile[threadIdx.x] = scratch[0];
+        |  tile[static_cast<int>(threadIdx.y)][static_cast<int>(threadIdx.x)] = coefficients[static_cast<int>(threadIdx.x)];
+        |  cube[static_cast<int>(blockIdx.z)][static_cast<int>(threadIdx.y)][static_cast<int>(threadIdx.x)] = 0x1.0p0f;
+        |  scratch[0] = tile[static_cast<int>(threadIdx.y)][static_cast<int>(threadIdx.x)];
+        |  dynamicTile[static_cast<int>(threadIdx.x)] = scratch[0];
         |  __syncthreads();
-        |  output[threadIdx.x] = dynamicTile[threadIdx.x];
+        |  output[static_cast<int>(threadIdx.x)] = dynamicTile[static_cast<int>(threadIdx.x)];
         |}
         |""".stripMargin.replace("\r\n", "\n")
     )
@@ -163,41 +163,41 @@ class CudaCodegenSuite extends FunSuite:
       """extern "C" __global__ void blockReduceSum(const float* input, float* output) {
         |  extern __shared__ __align__(4) float scratch[];
         |
-        |  scratch[threadIdx.x] = input[threadIdx.x];
+        |  scratch[static_cast<int>(threadIdx.x)] = input[static_cast<int>(threadIdx.x)];
         |  __syncthreads();
-        |  if ((threadIdx.x < 128)) {
-        |    scratch[threadIdx.x] = (scratch[threadIdx.x] + scratch[(threadIdx.x + 128)]);
+        |  if ((static_cast<int>(threadIdx.x) < 128)) {
+        |    scratch[static_cast<int>(threadIdx.x)] = (scratch[static_cast<int>(threadIdx.x)] + scratch[(static_cast<int>(threadIdx.x) + 128)]);
         |  }
         |  __syncthreads();
-        |  if ((threadIdx.x < 64)) {
-        |    scratch[threadIdx.x] = (scratch[threadIdx.x] + scratch[(threadIdx.x + 64)]);
+        |  if ((static_cast<int>(threadIdx.x) < 64)) {
+        |    scratch[static_cast<int>(threadIdx.x)] = (scratch[static_cast<int>(threadIdx.x)] + scratch[(static_cast<int>(threadIdx.x) + 64)]);
         |  }
         |  __syncthreads();
-        |  if ((threadIdx.x < 32)) {
-        |    scratch[threadIdx.x] = (scratch[threadIdx.x] + scratch[(threadIdx.x + 32)]);
+        |  if ((static_cast<int>(threadIdx.x) < 32)) {
+        |    scratch[static_cast<int>(threadIdx.x)] = (scratch[static_cast<int>(threadIdx.x)] + scratch[(static_cast<int>(threadIdx.x) + 32)]);
         |  }
         |  __syncthreads();
-        |  if ((threadIdx.x < 16)) {
-        |    scratch[threadIdx.x] = (scratch[threadIdx.x] + scratch[(threadIdx.x + 16)]);
+        |  if ((static_cast<int>(threadIdx.x) < 16)) {
+        |    scratch[static_cast<int>(threadIdx.x)] = (scratch[static_cast<int>(threadIdx.x)] + scratch[(static_cast<int>(threadIdx.x) + 16)]);
         |  }
         |  __syncthreads();
-        |  if ((threadIdx.x < 8)) {
-        |    scratch[threadIdx.x] = (scratch[threadIdx.x] + scratch[(threadIdx.x + 8)]);
+        |  if ((static_cast<int>(threadIdx.x) < 8)) {
+        |    scratch[static_cast<int>(threadIdx.x)] = (scratch[static_cast<int>(threadIdx.x)] + scratch[(static_cast<int>(threadIdx.x) + 8)]);
         |  }
         |  __syncthreads();
-        |  if ((threadIdx.x < 4)) {
-        |    scratch[threadIdx.x] = (scratch[threadIdx.x] + scratch[(threadIdx.x + 4)]);
+        |  if ((static_cast<int>(threadIdx.x) < 4)) {
+        |    scratch[static_cast<int>(threadIdx.x)] = (scratch[static_cast<int>(threadIdx.x)] + scratch[(static_cast<int>(threadIdx.x) + 4)]);
         |  }
         |  __syncthreads();
-        |  if ((threadIdx.x < 2)) {
-        |    scratch[threadIdx.x] = (scratch[threadIdx.x] + scratch[(threadIdx.x + 2)]);
+        |  if ((static_cast<int>(threadIdx.x) < 2)) {
+        |    scratch[static_cast<int>(threadIdx.x)] = (scratch[static_cast<int>(threadIdx.x)] + scratch[(static_cast<int>(threadIdx.x) + 2)]);
         |  }
         |  __syncthreads();
-        |  if ((threadIdx.x < 1)) {
-        |    scratch[threadIdx.x] = (scratch[threadIdx.x] + scratch[(threadIdx.x + 1)]);
+        |  if ((static_cast<int>(threadIdx.x) < 1)) {
+        |    scratch[static_cast<int>(threadIdx.x)] = (scratch[static_cast<int>(threadIdx.x)] + scratch[(static_cast<int>(threadIdx.x) + 1)]);
         |  }
         |  __syncthreads();
-        |  if ((threadIdx.x == 0)) {
+        |  if ((static_cast<int>(threadIdx.x) == 0)) {
         |    output[0] = scratch[0];
         |  }
         |}
@@ -500,7 +500,7 @@ class CudaCodegenSuite extends FunSuite:
     assertEquals(
       generated.cudaSource,
       """extern "C" __global__ void simplifyIdentity(int* output) {
-        |  output[threadIdx.x] = threadIdx.x;
+        |  output[static_cast<int>(threadIdx.x)] = static_cast<int>(threadIdx.x);
         |}
         |""".stripMargin.replace("\r\n", "\n")
     )
@@ -599,8 +599,8 @@ class CudaCodegenSuite extends FunSuite:
     assertEquals(
       generated.cudaSource,
       """extern "C" __global__ void reuseExpression(int offset, int* output) {
-        |  int flight4s_cse_0 = (offset + threadIdx.x);
-        |  output[threadIdx.x] = (flight4s_cse_0 * flight4s_cse_0);
+        |  int flight4s_cse_0 = (offset + static_cast<int>(threadIdx.x));
+        |  output[static_cast<int>(threadIdx.x)] = (flight4s_cse_0 * flight4s_cse_0);
         |}
         |""".stripMargin.replace("\r\n", "\n")
     )

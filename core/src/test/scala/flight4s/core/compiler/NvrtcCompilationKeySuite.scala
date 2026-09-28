@@ -28,6 +28,11 @@ class NvrtcCompilationKeySuite extends FunSuite:
     assertEquals(first.toString, first.hex)
     assertEquals(
       first.hex,
+      "2d1359c08ae1c08efad87c0b31b77278803af0f6bb6aafdef0197cbff97e5661"
+    )
+    // The previous codegen emitted uncast unsigned CUDA indexing fields.
+    assertNotEquals(
+      first.hex,
       "8198ba43bd8f1503bb636ed03612dd333e86796418d48467e7cce37629d78717"
     )
     // Encoding v3 must not reuse any of the earlier v2 cache identities.
