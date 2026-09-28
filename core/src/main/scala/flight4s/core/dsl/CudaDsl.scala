@@ -594,6 +594,15 @@ object CudaDsl:
     def %(right: Expr[T])(using valueType: RemainderType[T]): Expr[T] =
       Binary(BinaryOperator.Remainder, left, right, valueType)
 
+    def &(right: Expr[T])(using valueType: BitwiseType[T], position: DslSourcePosition): Expr[T] =
+      Binary(BinaryOperator.BitAnd, left, right, valueType, position.span)
+
+    def |(right: Expr[T])(using valueType: BitwiseType[T], position: DslSourcePosition): Expr[T] =
+      Binary(BinaryOperator.BitOr, left, right, valueType, position.span)
+
+    def ^(right: Expr[T])(using valueType: BitwiseType[T], position: DslSourcePosition): Expr[T] =
+      Binary(BinaryOperator.BitXor, left, right, valueType, position.span)
+
     def <(right: Expr[T])(using valueType: OrderedType[T]): Expr[Boolean] =
       Compare(ComparisonOperator.LessThan, left, right, valueType)
 

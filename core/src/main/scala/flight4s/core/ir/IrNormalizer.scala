@@ -372,6 +372,9 @@ private[core] object IrNormalizer:
           if right == 0 || (left == Int.MinValue && right == -1) =>
         None
       case BinaryOperator.Remainder => Some(left % right)
+      case BinaryOperator.BitAnd => Some(left & right)
+      case BinaryOperator.BitOr => Some(left | right)
+      case BinaryOperator.BitXor => Some(left ^ right)
 
   private def foldIntegerComparison[T](
       comparison: Compare[T],

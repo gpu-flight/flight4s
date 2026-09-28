@@ -50,6 +50,7 @@ enum ValidationCode:
   case SharedMemoryIndexRankMismatch
   case SharedMemoryIndexOutOfBounds
   case ExpressionTypeMismatch
+  case UnsupportedBitwiseType
   case UnsupportedConversion
   case UnsupportedConversionRounding
   case UnsupportedConversionSaturation
@@ -706,6 +707,12 @@ object KernelValidator:
             )
 
       case binary: Binary[?] =>
+        val operatorErrors = binary.operator match
+          case BinaryOperator.BitAnd | BinaryOperator.BitOr | BinaryOperator.BitXor
+              if binary.valueType != I32 && binary.valueType != U32 =>
+            Vector(ValidationError(ValidationCode.UnsupportedBitwiseType,
+              "bitwise operands must have CUDA int or unsigned int type", location, binary.span))
+          case _ => Vector.empty
         validateExpression(binary.left, parameters, s"$location.left", scope) ++
           validateExpression(binary.right, parameters, s"$location.right", scope) ++
           requireSameType(
@@ -721,7 +728,7 @@ object KernelValidator:
             "right operand type does not match binary result type",
             s"$location.right",
             binary.right.span
-          )
+          ) ++ operatorErrors
 
       case comparison: Compare[?] =>
         validateExpression(
