@@ -15,7 +15,7 @@ class ConversionValidationSuite extends FunSuite:
   }
 
   test("unsupported type pairs fail structural validation before code generation"):
-    val invalid = definition(Convert(literal(3), F32, RoundingMode.NearestEven, SaturationMode.NoSaturation))
+    val invalid = definition(Convert(literal(3.0), I32, RoundingMode.NearestEven, SaturationMode.NoSaturation))
     assert(!KernelValidator.validate(invalid).isValid)
 
   test("FP8 conversion cannot silently ignore requested directed rounding"):
@@ -35,12 +35,13 @@ class ConversionValidationSuite extends FunSuite:
     for source <- sources; target <- sources.map(_.valueType)
         rounding <- RoundingMode.values; saturation <- SaturationMode.values do
       val from = source.valueType
-      val exact = from == target || decodePairs.contains((from, target))
-      val halfNarrowing = from == F32 && (target == F16 || target == BF16)
+      val integerSource = from == I32 || from == U32
+      val exact = from == target || decodePairs.contains((from, target)) || (integerSource && target == F64)
+      val rounded = (from == F32 && (target == F16 || target == BF16)) || (integerSource && target == F32)
       val fp8Narrowing = from == F32 && (target == FP8E4M3 || target == FP8E5M2)
       val expected =
         (exact && rounding == RoundingMode.NearestEven && saturation == SaturationMode.NoSaturation) ||
-          (halfNarrowing && saturation == SaturationMode.NoSaturation) ||
+          (rounded && saturation == SaturationMode.NoSaturation) ||
           (fp8Narrowing && rounding == RoundingMode.NearestEven)
       val kernel = definition(Convert(source, target, rounding, saturation))
       val clue = s"${from.cudaName} -> ${target.cudaName}, $rounding, $saturation"
@@ -49,7 +50,7 @@ class ConversionValidationSuite extends FunSuite:
       examined += 1
       if expected then accepted += 1
     assertEquals(examined, 648)
-    assertEquals(accepted, 25)
+    assertEquals(accepted, 35)
 
   test("conversion diagnostics retain code location and source span"):
     val span = SourceSpan("Convert.scala", 5, 2, 5, 70)
@@ -65,7 +66,7 @@ class ConversionValidationSuite extends FunSuite:
     assert(errors.forall(_.message.contains("float")))
 
   test("unsupported type pairs do not cascade into policy errors but child errors remain"):
-    val expression = Convert(input[Int]("missing")(literal(0)).read, F32,
+    val expression = Convert(input[Double]("missing")(literal(0)).read, I32,
       RoundingMode.TowardZero, SaturationMode.SaturateFinite)
     assertEquals(KernelValidator.validate(definition(expression)).errors.map(_.code),
       Vector(ValidationCode.UnknownBuffer, ValidationCode.UnsupportedConversion))

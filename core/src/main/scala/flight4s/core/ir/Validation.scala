@@ -1,6 +1,6 @@
 package flight4s.core.ir
 
-import flight4s.core.types.{BF16, Bool, CudaType, F16, F32, FP8E4M3, FP8E5M2, I32}
+import flight4s.core.types.{BF16, Bool, CudaType, F16, F32, F64, FP8E4M3, FP8E5M2, I32, U32}
 
 enum ValidationCode:
   case InvalidConstantName
@@ -837,11 +837,11 @@ object KernelValidator:
     val nearest = Set(RoundingMode.NearestEven)
     val noSaturation = Set(SaturationMode.NoSaturation)
     val policy = (from, to) match
-      case (F32, F16) | (F32, BF16) =>
+      case (F32, F16) | (F32, BF16) | (I32, F32) | (U32, F32) =>
         Some((RoundingMode.values.toSet, noSaturation))
       case (F32, FP8E4M3) | (F32, FP8E5M2) =>
         Some((nearest, SaturationMode.values.toSet))
-      case (F16, F32) | (BF16, F32) | (FP8E4M3, F32) | (FP8E5M2, F32) =>
+      case (F16, F32) | (BF16, F32) | (FP8E4M3, F32) | (FP8E5M2, F32) | (I32, F64) | (U32, F64) =>
         Some((nearest, noSaturation))
       case _ if from == to => Some((nearest, noSaturation))
       case _ => None

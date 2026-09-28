@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 9
+  val ArtifactVersion: Int = 10
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -428,6 +428,14 @@ object CudaCodegen:
         value: String
     ): Either[CodegenError, String] =
       (conversion.value.valueType, conversion.valueType) match
+        case (I32, F32) =>
+          Right(s"::__int2float_${roundingSuffix(conversion.rounding)}($value)")
+        case (U32, F32) =>
+          Right(s"::__uint2float_${roundingSuffix(conversion.rounding)}($value)")
+        case (I32, F64) =>
+          Right(s"::__int2double_rn($value)")
+        case (U32, F64) =>
+          Right(s"::__uint2double_rn($value)")
         case (F32, F16) =>
           Right(s"${halfConversion(conversion.rounding)}($value)")
         case (F16, F32) =>
@@ -528,6 +536,13 @@ object CudaCodegen:
               literal.span
             )
           )
+
+    private def roundingSuffix(rounding: RoundingMode): String =
+      rounding match
+        case RoundingMode.NearestEven => "rn"
+        case RoundingMode.TowardZero => "rz"
+        case RoundingMode.TowardPositive => "ru"
+        case RoundingMode.TowardNegative => "rd"
 
     private def halfConversion(rounding: RoundingMode): String =
       rounding match
