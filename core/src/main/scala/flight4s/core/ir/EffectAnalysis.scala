@@ -10,17 +10,19 @@ private[core] final case class EffectSummary(
     readSpaces: Set[EffectMemorySpace] = Set.empty,
     writtenSpaces: Set[EffectMemorySpace] = Set.empty,
     hasBarrier: Boolean = false,
-    hasWarpCollective: Boolean = false
+    hasWarpCollective: Boolean = false,
+    hasWarpBarrier: Boolean = false
 ):
   def isPure: Boolean =
-    readSpaces.isEmpty && writtenSpaces.isEmpty && !hasBarrier && !hasWarpCollective
+    readSpaces.isEmpty && writtenSpaces.isEmpty && !hasBarrier && !hasWarpCollective && !hasWarpBarrier
 
   def ++(other: EffectSummary): EffectSummary =
     EffectSummary(
       readSpaces ++ other.readSpaces,
       writtenSpaces ++ other.writtenSpaces,
       hasBarrier || other.hasBarrier,
-      hasWarpCollective || other.hasWarpCollective
+      hasWarpCollective || other.hasWarpCollective,
+      hasWarpBarrier || other.hasWarpBarrier
     )
 
 private[core] object EffectSummary:
@@ -81,6 +83,8 @@ private[core] object EffectAnalysis:
     case loop: ForLoop =>
       expression(loop.from) ++ expression(loop.until) ++ block(loop.body)
     case _: Barrier => EffectSummary(hasBarrier = true)
+    case barrier: WarpBarrier =>
+      expression(barrier.mask) ++ EffectSummary(hasWarpCollective = true, hasWarpBarrier = true)
 
   def block(block: Block): EffectSummary =
     block.statements.foldLeft(EffectSummary.empty) { (summary, next) =>

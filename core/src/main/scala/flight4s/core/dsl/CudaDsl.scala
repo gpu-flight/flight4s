@@ -509,6 +509,9 @@ object CudaDsl:
     builder.append(Barrier(position.span))
 
   object warp:
+    def sync(mask: Expr[UInt])(using builder: BlockBuilder, position: DslSourcePosition): Unit =
+      builder.append(WarpBarrier(mask, position.span))
+
     def shuffle[T](
         name: String,
         mask: Expr[UInt],

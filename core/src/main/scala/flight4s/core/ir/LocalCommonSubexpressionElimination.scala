@@ -75,6 +75,7 @@ private[core] object LocalCommonSubexpressionElimination:
       val rewritten = statement match
         case declaration: LocalDeclaration[?] =>
           declaration.copy(initial = rewriter.expression(declaration.initial))
+        case barrier: WarpBarrier => barrier.copy(mask = rewriter.expression(barrier.mask))
         case vote: WarpVote[?] =>
           vote.copy(mask = rewriter.expression(vote.mask), predicate = rewriter.expression(vote.predicate))
         case shuffle: WarpShuffle[?, ?] =>
@@ -215,6 +216,7 @@ private[core] object LocalCommonSubexpressionElimination:
     )
 
   private def ownExpressions(statement: Stmt): Vector[Expr[?]] = statement match
+    case barrier: WarpBarrier => Vector(barrier.mask)
     case declaration: LocalDeclaration[?] => Vector(declaration.initial)
     case _: LocalArrayDeclaration[?] => Vector.empty
     case vote: WarpVote[?] => Vector(vote.mask, vote.predicate)
@@ -322,6 +324,7 @@ private[core] object LocalCommonSubexpressionElimination:
         collectNames(loop.body) +
         loop.index.name
     case _: Barrier => Set.empty
+    case barrier: WarpBarrier => collectNames(barrier.mask)
 
   private def collectNames(expression: Expr[?]): Set[String] = expression match
     case _: Literal[?] => Set.empty

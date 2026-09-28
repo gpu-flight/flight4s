@@ -146,6 +146,7 @@ private[core] object IrNormalizer:
       )
 
     case barrier: Barrier => (Some(barrier), scope)
+    case barrier: WarpBarrier => (Some(barrier.copy(mask = expression(barrier.mask, scope))), scope)
 
   private def normalizeSelectedBlock(
       block: Block,

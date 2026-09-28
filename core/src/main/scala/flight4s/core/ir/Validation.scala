@@ -567,6 +567,12 @@ object KernelValidator:
       case _: Barrier =>
         Vector.empty
 
+      case barrier: WarpBarrier =>
+        validateNonemptyWarpMask(barrier.mask, location, barrier.span) ++
+          validateExpression(barrier.mask, parameters, s"$location.mask", scope) ++
+          requireSameType(barrier.mask.valueType, U32, "warp synchronization mask must have CUDA unsigned int type",
+            s"$location.mask", barrier.span)
+
   private def validateWarpShuffle(
       shuffle: WarpShuffle[?, ?],
       parameters: Map[String, KernelParam],
