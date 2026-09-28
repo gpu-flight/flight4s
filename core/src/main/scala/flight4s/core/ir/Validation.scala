@@ -37,6 +37,7 @@ enum ValidationCode:
   case ExpectedScalarParameter
   case BufferTypeMismatch
   case WriteToReadOnlyBuffer
+  case InvalidAtomicAddressSpace
   case UnknownConstant
   case ConstantTypeMismatch
   case ConstantIndexOutOfBounds
@@ -439,6 +440,23 @@ object KernelValidator:
             location,
             store.span
           )
+
+      case atomic: AtomicAdd[?, ?] =>
+        val spaceErrors = atomic.target match
+          case _: BufferElement[?, ?] | _: SharedElement[?] => Vector.empty
+          case _ => Vector(ValidationError(
+            ValidationCode.InvalidAtomicAddressSpace,
+            "atomicAdd requires a global or shared memory target",
+            s"$location.target",
+            atomic.span
+          ))
+        spaceErrors ++
+          validatePlace(atomic.target, parameters, s"$location.target", isWrite = true, scope = scope) ++
+          validateExpression(atomic.value, parameters, s"$location.value", scope) ++
+          requireSameType(atomic.target.valueType, atomic.value.valueType,
+            "atomicAdd value type does not match the target type", s"$location.value", atomic.span) ++
+          requireSameType(atomic.addition, atomic.target.valueType,
+            "atomicAdd capability does not match the target type", location, atomic.span)
 
       case accumulation: Accumulate[?] =>
         validatePlace(

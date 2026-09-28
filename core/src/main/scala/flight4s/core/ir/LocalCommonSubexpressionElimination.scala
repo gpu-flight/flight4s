@@ -77,6 +77,8 @@ private[core] object LocalCommonSubexpressionElimination:
           declaration.copy(initial = rewriter.expression(declaration.initial))
         case store: Store[?, ?] =>
           rewriteStore(store, rewriter)
+        case atomic: AtomicAdd[?, ?] =>
+          rewriteAtomic(atomic, rewriter)
         case accumulation: Accumulate[?] =>
           accumulation.copy(value = rewriter.expression(accumulation.value))
         case branch: IfThen =>
@@ -178,6 +180,15 @@ private[core] object LocalCommonSubexpressionElimination:
           _: ReductionIndex | _: LoopIndex =>
         expression
 
+  private def rewriteAtomic[T, Space <: AddressSpace](
+      atomic: AtomicAdd[T, Space],
+      rewriter: ExpressionRewriter
+  ): AtomicAdd[T, Space] =
+    atomic.copy(
+      target = rewriter.place(atomic.target),
+      value = rewriter.expression(atomic.value)
+    )
+
   private def rewriteStore[T, Space <: AddressSpace](
       store: Store[T, Space],
       rewriter: ExpressionRewriter
@@ -191,6 +202,7 @@ private[core] object LocalCommonSubexpressionElimination:
     case declaration: LocalDeclaration[?] => Vector(declaration.initial)
     case _: LocalArrayDeclaration[?] => Vector.empty
     case store: Store[?, ?] => placeExpressions(store.to) :+ store.value
+    case atomic: AtomicAdd[?, ?] => placeExpressions(atomic.target) :+ atomic.value
     case accumulation: Accumulate[?] => Vector(accumulation.value)
     case branch: IfThen => Vector(branch.condition)
     case _: ScopedBlock => Vector.empty
@@ -272,6 +284,7 @@ private[core] object LocalCommonSubexpressionElimination:
       collectNames(declaration.initial) + declaration.local.name
     case declaration: LocalArrayDeclaration[?] => Set(declaration.array.name)
     case store: Store[?, ?] => collectNames(store.to) ++ collectNames(store.value)
+    case atomic: AtomicAdd[?, ?] => collectNames(atomic.target) ++ collectNames(atomic.value)
     case accumulation: Accumulate[?] =>
       collectNames(accumulation.value) + accumulation.target.name
     case branch: IfThen =>

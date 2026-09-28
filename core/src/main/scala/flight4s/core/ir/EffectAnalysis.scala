@@ -56,6 +56,8 @@ private[core] object EffectAnalysis:
       addressEffects(store.to) ++
         expression(store.value) ++
         write(spaceOf(store.to))
+    case atomic: AtomicAdd[?, ?] =>
+      read(atomic.target) ++ expression(atomic.value) ++ write(spaceOf(atomic.target))
     case accumulation: Accumulate[?] =>
       expression(accumulation.value) ++
         read(EffectMemorySpace.Local) ++

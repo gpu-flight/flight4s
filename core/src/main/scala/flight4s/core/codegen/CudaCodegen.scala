@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 10
+  val ArtifactVersion: Int = 11
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -259,6 +259,12 @@ object CudaCodegen:
             target <- emitPlace(store.to)
             value <- emitExpression(store.value)
           yield writer.line(s"$prefix$target = $value;", store.span)
+
+        case atomic: AtomicAdd[?, ?] =>
+          for
+            target <- emitPlace(atomic.target)
+            value <- emitExpression(atomic.value)
+          yield writer.line(s"${prefix}::atomicAdd(&$target, $value);", atomic.span)
 
         case accumulation: Accumulate[?] =>
           emitExpression(accumulation.value).map { value =>
@@ -606,6 +612,8 @@ object CudaCodegen:
         Vector(declaration.array.valueType)
       case store: Store[?, ?] =>
         collectTypes(store.to) ++ collectTypes(store.value)
+      case atomic: AtomicAdd[?, ?] =>
+        collectTypes(atomic.target) ++ collectTypes(atomic.value)
       case accumulation: Accumulate[?] =>
         accumulation.target.valueType +:
           collectTypes(accumulation.value)
@@ -674,6 +682,8 @@ object CudaCodegen:
         Set(declaration.array.name)
       case store: Store[?, ?] =>
         collectIdentifiers(store.to) ++ collectIdentifiers(store.value)
+      case atomic: AtomicAdd[?, ?] =>
+        collectIdentifiers(atomic.target) ++ collectIdentifiers(atomic.value)
       case accumulation: Accumulate[?] =>
         collectIdentifiers(accumulation.value) + accumulation.target.name
       case branch: IfThen =>

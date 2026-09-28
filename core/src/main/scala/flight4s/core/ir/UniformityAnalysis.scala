@@ -153,7 +153,7 @@ private[core] object UniformityAnalysis:
             loopUniformity(loop, scope)
           )
 
-      case _: LocalArrayDeclaration[?] | _: Barrier => scope
+      case _: LocalArrayDeclaration[?] | _: AtomicAdd[?, ?] | _: Barrier => scope
 
   def scopeAfter(block: Block, scope: UniformityScope): UniformityScope =
     block.statements.foldLeft(scope) { (current, statement) =>
@@ -193,4 +193,4 @@ private[core] object UniformityAnalysis:
         branch.elseBlock.toVector.flatMap(modifiedLocalNames).toSet
     case scoped: ScopedBlock => modifiedLocalNames(scoped.body)
     case loop: ForLoop => modifiedLocalNames(loop.body)
-    case _: LocalDeclaration[?] | _: LocalArrayDeclaration[?] | _: Barrier => Set.empty
+    case _: LocalDeclaration[?] | _: LocalArrayDeclaration[?] | _: AtomicAdd[?, ?] | _: Barrier => Set.empty
