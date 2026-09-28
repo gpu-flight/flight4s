@@ -110,8 +110,10 @@ class WarpSynchronizationSuite extends FunSuite:
     }
     val result = KernelValidator.validate(definition)
     assert(result.isValid)
-    assertEquals(result.warnings.map(_.code), Vector(ValidationWarningCode.BarrierMayDiverge))
-    assertEquals(result.warnings.head.location, "body.statements[1].then.statements[0]")
+    assertEquals(result.warnings.map(_.code), Vector(
+      ValidationWarningCode.WarpParticipationMayDiverge, ValidationWarningCode.BarrierMayDiverge))
+    assertEquals(result.warnings.map(_.location), Vector(
+      "body.statements[0].then.statements[0]", "body.statements[1].then.statements[0]"))
     val scope = UniformityScope.empty.withLocal("varying", Uniformity.Varying)
     assertEquals(UniformityAnalysis.scopeAfter(WarpBarrier(full), scope), scope)
 

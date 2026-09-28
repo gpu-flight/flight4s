@@ -63,6 +63,7 @@ enum ValidationCode:
 
 enum ValidationWarningCode:
   case BarrierMayDiverge
+  case WarpParticipationMayDiverge
 
 final case class ValidationError(
     code: ValidationCode,
