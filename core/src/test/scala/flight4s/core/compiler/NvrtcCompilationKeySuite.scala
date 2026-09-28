@@ -27,6 +27,10 @@ class NvrtcCompilationKeySuite extends FunSuite:
     assertEquals(first.toString, first.hex)
     assertEquals(
       first.hex,
+      "a30d5164a26f12b34d08f9ac274d661936bfedd4b380e8f8e05eea447240bd13"
+    )
+    assertEquals(
+      derive(generated, codegenVersion = 9).hex,
       "124cd591c0dd3a6123e8cd3d025f6e9d501577b622d9da75471677280389373d"
     )
     assertEquals(

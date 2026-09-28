@@ -173,6 +173,17 @@ F32-to-FP8 supports nearest-even with either saturation policy. Exact widening
 and identity conversions use nearest-even/no-saturation metadata. Existing
 public conversion helpers select supported policies automatically.
 
+Runtime integer sizes can be converted explicitly for floating-point formulas:
+
+```scala
+val mean = choose(count > literal(0))(total / convert.i32ToF32(count))(literal(0.0f))
+```
+
+`convert.i32ToF32` and `convert.u32ToF32` default to nearest-even and accept an
+explicit rounding mode. `convert.i32ToF64` and `convert.u32ToF64` are exact for
+all 32-bit inputs. These convert numeric values, not raw bits; no implicit
+conversion between already-staged integer and floating expressions is added.
+
 ## Status
 
 Flight4s is pre-alpha and under active design. The current implementation

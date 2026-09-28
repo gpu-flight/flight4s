@@ -547,6 +547,22 @@ object CudaDsl:
       choose(left)(literal(false))(literal(true))
 
   object convert:
+    def i32ToF32(value: Expr[Int], rounding: RoundingMode = RoundingMode.NearestEven)(using
+        position: DslSourcePosition
+    ): Expr[Float] =
+      Convert(value, F32, rounding, SaturationMode.NoSaturation, position.span)
+
+    def u32ToF32(value: Expr[UInt], rounding: RoundingMode = RoundingMode.NearestEven)(using
+        position: DslSourcePosition
+    ): Expr[Float] =
+      Convert(value, F32, rounding, SaturationMode.NoSaturation, position.span)
+
+    def i32ToF64(value: Expr[Int])(using position: DslSourcePosition): Expr[Double] =
+      Convert(value, F64, RoundingMode.NearestEven, SaturationMode.NoSaturation, position.span)
+
+    def u32ToF64(value: Expr[UInt])(using position: DslSourcePosition): Expr[Double] =
+      Convert(value, F64, RoundingMode.NearestEven, SaturationMode.NoSaturation, position.span)
+
     def f32ToF16(
         value: Expr[Float],
         rounding: RoundingMode = RoundingMode.NearestEven
