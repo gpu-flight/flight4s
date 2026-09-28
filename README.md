@@ -228,8 +228,29 @@ on CUDA). Every component must remain an `Expr` of its original scalar type;
 empty tuples, host-valued components, and changing tuple shapes are rejected.
 All next values are snapshotted before stores, inside the accepted element's
 guards. This is per-thread recurrence semantics, not atomicity between threads.
-Large state can increase register/local-memory pressure. Case-class state,
-tuple-valued traversal elements, and parallel folds remain separate work.
+Large state can increase register/local-memory pressure. Tuple-valued traversal
+elements and parallel folds remain separate work.
+
+For named state fields, derive `ProductFoldState` on a nonempty case class:
+
+```scala
+import flight4s.core.dsl.ProductFoldState
+case class Stats(count: Expr[Int], total: Expr[Double]) derives ProductFoldState
+
+val stats = gpuRange("i", literal(0), n)
+  .foldLeft("stats", Stats(literal(0), literal(0.0))) { (s, i) =>
+    s.copy(count = s.count + literal(1), total = s.total + convert.i32ToF64(i))
+  }
+```
+
+All fields must be scalar `Expr` values. Empty, nested, host-valued, and sum-type
+state is rejected. Fields are read-only device expressions; all next fields are
+snapshotted before any update. The case class exists only while staging on the
+JVM: generated CUDA uses the same numbered scalar locals as tuple state, with no
+struct, allocation, or ABI change. Keep constructors and callbacks pure; hidden
+DSL statements in steps or reconstructed constructors are rejected. Ordinary
+JVM effects are not prohibited. Generic classes can supply an explicit
+`ProductFoldState.derived` instance with the necessary `CudaType` evidence.
 
 Ranges also support staged guards, including Scala `for` syntax:
 

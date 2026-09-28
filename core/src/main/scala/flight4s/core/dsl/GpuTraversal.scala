@@ -7,6 +7,18 @@ import flight4s.core.ir.{Expr, SourceSpan}
 abstract class GpuTraversal[T] private[dsl] ():
   def foreach(body: Expr[T] => (BlockBuilder ?=> Unit))(using BlockBuilder, DslSourcePosition): Unit
 
+  /** Named case-class fields advance simultaneously, just like tuple components. */
+  final def foldLeft[State <: Product](stateName: String, initial: State)(
+      step: (State, Expr[T]) => State
+  )(using state: ProductFoldState[State], builder: BlockBuilder, position: DslSourcePosition): State =
+    val locals = state.declare(stateName, initial)
+    foreach { value =>
+      val next = ExpressionStaging.expression(step(locals.read(SourceSpan.Unknown), value))
+      val snapshots = state.snapshot(stateName, next)
+      locals.assign(snapshots)
+    }
+    locals.read(position.span)
+
   /** Tuple components advance simultaneously from the previous iteration. */
   final def foldLeft[State <: NonEmptyTuple](stateName: String, initial: State)(
       step: (State, Expr[T]) => State
