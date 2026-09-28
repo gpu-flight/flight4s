@@ -160,6 +160,59 @@ reference variance. This fixed a test-oracle defect, not a CUDA kernel defect;
 no tolerance was loosened. Serial and cooperative results need not be bitwise
 identical because the grouping order differs. No throughput claim is made.
 
+## Row Layer Normalization
+
+[RowLayerNorm.scala](src/main/scala/flight4s/examples/RowLayerNorm.scala) computes
+`((x - mean) / sqrt(populationVariance + epsilon)) * gain[column] + bias[column]`
+for each row. One thread owns each row: a functional tuple fold computes
+Int/Double/Double count/mean/M2 state, then `gpuRange.foreach` writes
+Float output using explicit nearest-even narrowing. Float inputs, gain, and bias
+are widened before arithmetic. There are no block collectives or hidden kernels.
+
+```scala
+val normalized = RowLayerNorm.run(
+  Array(1.0f, 3.0f),
+  gain = Array(2.0f, -4.0f), bias = Array(0.25f, 1.0f),
+  rows = 1, columns = 2, epsilon = 3.0)
+// Array(-0.75f, -1.0f)
+```
+
+The input must match its row-major shape, rows must be non-negative, and columns
+positive. Gain and bias must each have exactly `columns` finite values. All
+inputs must be finite; epsilon must be finite and strictly positive (default
+1e-5). Even empty batches validate this contract, then return without opening
+CUDA. Input/gain/bias arrays are preserved. Extreme finite gain can overflow
+the final Float output to infinity; this example does not saturate the result.
+Direct use of the exposed kernel requires satisfying the same preconditions.
+
+```shell
+sbt "examples/runMain flight4s.examples.RowLayerNorm --cuda-source"
+sbt -Dflight4s.cuda.native.path=<absolute-library-path> "examples/runMain flight4s.examples.RowLayerNorm"
+sbt "examples/testOnly flight4s.examples.RowLayerNormSuite"
+sbt -Dflight4s.cuda.native.path=<absolute-library-path> "examples/testOnly flight4s.examples.RowLayerNormJniSuite"
+```
+
+The main prints:
+
+```text
+row 0: -1.3416355 -0.3944236 0.5527882 -2.0000000
+row 1: -1.3416355 -0.3944236 0.5527882 -2.0000000
+row 2: 0.0000000 0.5000000 1.0000000 -2.0000000
+```
+
+Six portable tests check host contracts, staging, and source inspection. Three
+CUDA tests cover 17 numerical fixtures twice (34,334 values per pass), known
+exact population/epsilon/affine cases, finite-gain output overflow, default and
+explicit streams, and untouched tail sentinels. The independent decimal
+statistics reference is shared with the statistics examples; normalized outputs
+use a fixture tolerance of 2e-6 * max(1, abs(reference)). Memcheck: zero errors.
+This is an unpublished correctness example, not a tuned inference operator,
+training/autograd implementation, tensor API, or PyTorch bitwise-equivalence
+claim. Every host call compiles, allocates, copies, launches, and cleans up.
+
+References: [Layer Normalization paper](https://arxiv.org/abs/1607.06450) and
+[PyTorch's population-variance formula](https://docs.pytorch.org/docs/2.14/generated/torch.nn.LayerNorm.html).
+
 ## Run the Serial Softmax Example
 
 From the repository root, inspect generated CUDA without configuring JNI:
