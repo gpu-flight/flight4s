@@ -83,6 +83,9 @@ private[core] object UniformityAnalysis:
 
   def expression(expr: Expr[?], scope: UniformityScope): Uniformity = expr match
     case _: Literal[?] => Uniformity.GridUniform
+    case vector: FloatVectorConstruct[?] =>
+      vector.components.foldLeft(Uniformity.GridUniform)((uniformity, component) => uniformity.join(expression(component, scope)))
+    case component: FloatVectorComponent[?] => expression(component.value, scope)
     case binary: Binary[?] =>
       expression(binary.left, scope).join(expression(binary.right, scope))
     case shift: UnsignedShift =>

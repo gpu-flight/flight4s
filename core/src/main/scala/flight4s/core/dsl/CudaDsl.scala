@@ -50,6 +50,39 @@ object CudaDsl:
   def literal[T](value: T)(using valueType: CudaType[T]): Expr[T] =
     Literal(value, valueType)
 
+  def float2(x: Expr[Float], y: Expr[Float])(using position: DslSourcePosition): Expr[Float2] =
+    FloatVectorConstruct(Vector(x, y), F32x2, position.span)
+
+  def float4(x: Expr[Float], y: Expr[Float], z: Expr[Float], w: Expr[Float])(using
+      position: DslSourcePosition
+  ): Expr[Float4] = FloatVectorConstruct(Vector(x, y, z, w), F32x4, position.span)
+
+  extension [T](vector: Expr[T])
+    def x(using vectorType: FloatVectorType[T], position: DslSourcePosition): Expr[Float] =
+      FloatVectorComponent(vector, 0, vectorType, position.span)
+
+    def y(using vectorType: FloatVectorType[T], position: DslSourcePosition): Expr[Float] =
+      FloatVectorComponent(vector, 1, vectorType, position.span)
+
+    def map(f: Expr[Float] => Expr[Float])(using
+        vectorType: FloatVectorType[T], position: DslSourcePosition
+    ): Expr[T] =
+      FloatVectorConstruct(Vector.tabulate(vectorType.componentCount) { index =>
+        ExpressionStaging.expression(f(FloatVectorComponent(vector, index, vectorType, position.span)))
+      }, vectorType, position.span)
+
+    def zipWith(other: Expr[T])(f: (Expr[Float], Expr[Float]) => Expr[Float])(using
+        vectorType: FloatVectorType[T], position: DslSourcePosition
+    ): Expr[T] =
+      FloatVectorConstruct(Vector.tabulate(vectorType.componentCount) { index =>
+        ExpressionStaging.expression(f(FloatVectorComponent(vector, index, vectorType, position.span),
+          FloatVectorComponent(other, index, vectorType, position.span)))
+      }, vectorType, position.span)
+
+  extension (vector: Expr[Float4])
+    def z(using position: DslSourcePosition): Expr[Float] = FloatVectorComponent(vector, 2, F32x4, position.span)
+    def w(using position: DslSourcePosition): Expr[Float] = FloatVectorComponent(vector, 3, F32x4, position.span)
+
   def choose[T](condition: Expr[Boolean])(whenTrue: => Expr[T])(whenFalse: => Expr[T])(using
       valueType: CudaType[T],
       position: DslSourcePosition

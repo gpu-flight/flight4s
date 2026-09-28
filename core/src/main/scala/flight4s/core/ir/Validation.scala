@@ -1,6 +1,6 @@
 package flight4s.core.ir
 
-import flight4s.core.types.{BF16, Bool, CudaType, F16, F32, F64, FP8E4M3, FP8E5M2, I32, U32, UInt}
+import flight4s.core.types.{BF16, Bool, CudaType, F16, F32, F64, FP8E4M3, FP8E5M2, FloatVectorType, I32, U32, UInt}
 
 enum ValidationCode:
   case InvalidConstantName
@@ -52,6 +52,9 @@ enum ValidationCode:
   case SharedMemoryIndexRankMismatch
   case SharedMemoryIndexOutOfBounds
   case ExpressionTypeMismatch
+  case InvalidVectorArity
+  case InvalidVectorComponent
+  case UnsupportedVectorOperation
   case UnsupportedBitwiseType
   case UnsupportedConversion
   case UnsupportedConversionRounding
@@ -104,7 +107,6 @@ object KernelValidator:
       sharedMemory: Map[String, SharedArray[?, ?]] = Map.empty
   )
 
-  private val cudaIdentifier = raw"[A-Za-z_][A-Za-z0-9_]*".r
   private val intrinsicTypes: Map[String, CudaType[?]] = Map(
     "threadIdx.x" -> I32,
     "threadIdx.y" -> I32,
@@ -727,6 +729,9 @@ object KernelValidator:
 
       case binary: Binary[?] =>
         val operatorErrors = binary.operator match
+          case _ if binary.valueType.isInstanceOf[FloatVectorType[?]] =>
+            Vector(ValidationError(ValidationCode.UnsupportedVectorOperation,
+              "CUDA vector arithmetic must be expressed component-wise", location, binary.span))
           case BinaryOperator.BitAnd | BinaryOperator.BitOr | BinaryOperator.BitXor
               if binary.valueType != I32 && binary.valueType != U32 =>
             Vector(ValidationError(ValidationCode.UnsupportedBitwiseType,
@@ -770,8 +775,33 @@ object KernelValidator:
           requireSameType(count.value.valueType, count.wordType,
             "population-count operand type does not match its word type", s"$location.value", count.value.span)
 
+      case vector: FloatVectorConstruct[?] =>
+        val arityErrors =
+          if vector.components.size == vector.vectorType.componentCount then Vector.empty
+          else Vector(ValidationError(ValidationCode.InvalidVectorArity,
+            s"${vector.vectorType.cudaName} requires ${vector.vectorType.componentCount} components", location, vector.span))
+        arityErrors ++ vector.components.zipWithIndex.flatMap { (component, index) =>
+          validateExpression(component, parameters, s"$location.components[$index]", scope) ++
+            requireSameType(component.valueType, F32, "vector components must have CUDA float type",
+              s"$location.components[$index]", component.span)
+        }
+
+      case component: FloatVectorComponent[?] =>
+        val indexErrors =
+          if component.index >= 0 && component.index < component.vectorType.componentCount then Vector.empty
+          else Vector(ValidationError(ValidationCode.InvalidVectorComponent,
+            s"component ${component.index} is outside ${component.vectorType.cudaName}", location, component.span))
+        indexErrors ++ validateExpression(component.value, parameters, s"$location.value", scope) ++
+          requireSameType(component.value.valueType, component.vectorType,
+            "component source type does not match its vector type", s"$location.value", component.span)
+
       case comparison: Compare[?] =>
-        validateExpression(
+        val operatorErrors =
+          if comparison.operandType.isInstanceOf[FloatVectorType[?]] then
+            Vector(ValidationError(ValidationCode.UnsupportedVectorOperation,
+              "CUDA vector comparisons must be expressed component-wise", location, comparison.span))
+          else Vector.empty
+        operatorErrors ++ validateExpression(
           comparison.left,
           parameters,
           s"$location.left",
@@ -1556,4 +1586,4 @@ object KernelValidator:
     else Vector(ValidationError(code, message, location, span))
 
   private def isIdentifier(value: String): Boolean =
-    cudaIdentifier.matches(value)
+    CudaIdentifier.isValid(value)
