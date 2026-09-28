@@ -289,6 +289,11 @@ final case class Barrier(
     span: SourceSpan = SourceSpan.Unknown
 ) extends ExecutableStmt
 
+final case class WarpBarrier(
+    mask: Expr[UInt],
+    span: SourceSpan = SourceSpan.Unknown
+) extends ExecutableStmt
+
 final case class Block(statements: Vector[Stmt])
 
 sealed trait KernelParam:

@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 15
+  val ArtifactVersion: Int = 16
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -341,6 +341,11 @@ object CudaCodegen:
           writer.line(s"${prefix}__syncthreads();", barrier.span)
           Right(())
 
+        case barrier: WarpBarrier =>
+          emitExpression(barrier.mask).map { mask =>
+            writer.line(s"${prefix}::__syncwarp($mask);", barrier.span)
+          }
+
     private def emitExpression(
         expression: Expr[?]
     ): Either[CodegenError, String] =
@@ -663,6 +668,7 @@ object CudaCodegen:
           collectTypes(loop.body)
       case _: Barrier =>
         Vector.empty
+      case barrier: WarpBarrier => collectTypes(barrier.mask)
     }
 
   private def collectTypes(expression: Expr[?]): Vector[CudaType[?]] =
@@ -739,6 +745,7 @@ object CudaCodegen:
           loop.index.name
       case _: Barrier =>
         Set.empty[String]
+      case barrier: WarpBarrier => collectIdentifiers(barrier.mask)
     }.toSet
 
   private def collectIdentifiers(expression: Expr[?]): Set[String] =

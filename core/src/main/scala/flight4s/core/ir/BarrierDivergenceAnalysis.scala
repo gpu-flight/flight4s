@@ -77,6 +77,7 @@ private[core] object BarrierDivergenceAnalysis:
         )
 
       case _: Barrier => Vector.empty
+      case _: WarpBarrier => Vector.empty
       case _: LocalDeclaration[?] => Vector.empty
       case _: LocalArrayDeclaration[?] => Vector.empty
       case _: Store[?, ?] => Vector.empty

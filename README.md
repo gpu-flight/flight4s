@@ -246,7 +246,7 @@ participation contract. Votes can compose in explicit statement loops but cannot
 be hidden in `map` or `choose` callbacks. They are collective effects, not block
 barriers or memory fences.
 
-Direct shuffle captures another participating lane's scalar value:
+Shuffles capture another participating lane's scalar value:
 
 ```scala
 val firstValue = warp.shuffle("firstValue", fullMask, value, literal(0), width = 32)
@@ -259,13 +259,20 @@ Supported values are Int, UInt, Float, and Double. Width is a host integer from
 1, 2, 4, 8, 16, 32; the source lane is a nonnegative `Expr[Int]` relative to that
 width-sized subgroup, with CUDA modulo-width wraparound. The selected lane must
 actually participate in the mask. Width does not make inactive lanes available.
+
 Up/down use an unsigned delta and keep the caller's value when crossing the
 width-sized subgroup boundary. XOR uses a signed lane mask; it can read earlier
 subgroups, but attempts to read later subgroups return the caller's value.
 Directional deltas and lane masks must be in `0..31`; literal violations are
 rejected, while dynamic validity remains the caller's responsibility.
-The result is a once-evaluated read-only snapshot, not a memory fence. Shuffle
-up/down/xor and warp reductions remain separate work.
+Each shuffle result is a once-evaluated read-only snapshot, not a memory fence.
+Higher-level warp reductions remain separate work.
+
+Use the Unit-returning `warp.sync(mask)` to order shared/global memory accesses among participating
+warp lanes. Unlike shuffles and votes, it is a memory-ordering synchronization
+point. It does not synchronize another warp or the whole block. When reusing
+scratch memory in a loop, synchronize after writing and again after all readers
+have captured their values, before the next iteration overwrites the scratch.
 
 ## Status
 
