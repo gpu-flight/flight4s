@@ -35,14 +35,14 @@ object BlockRowStatistics:
     }
   }.requiringBlock(LaunchBlock.x(ThreadsPerBlock))
 
-  private def update(state: (Expr[Int], Expr[Double], Expr[Double]), x: Expr[Double]) =
+  private[examples] def update(state: (Expr[Int], Expr[Double], Expr[Double]), x: Expr[Double]) =
     val (count, mean, m2) = state
     val nextCount = count + literal(1)
     val delta = x - mean
     val nextMean = mean + delta / convert.i32ToF64(nextCount)
     (nextCount, nextMean, m2 + delta * (x - nextMean))
 
-  private def mergePartials(counts: SharedArray[Int, Rank1], means: SharedArray[Double, Rank1],
+  private[examples] def mergePartials(counts: SharedArray[Int, Rank1], means: SharedArray[Double, Rank1],
       m2: SharedArray[Double, Rank1])(using BlockBuilder): Unit =
     barrier()
     Iterator.iterate(ThreadsPerBlock / 2)(_ / 2).takeWhile(_ > 0).foreach { stride =>
