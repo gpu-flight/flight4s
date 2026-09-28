@@ -48,6 +48,21 @@ expression builders without allocating an intermediate device collection.
 type, and reduction policy. `foreach` lowers to the existing GPU loop for
 explicit stores and other statements.
 
+Explicit statement loops also accept a positive static stride:
+
+```scala
+gpuFor("column", literal(0), columns, step = 4) { column =>
+  result(column) := source(column).read
+}
+```
+
+This kernel-body snippet visits `0, 4, 8, ...` below `columns`. The step is a
+host `Int`, not a device expression. Zero and negative steps fail validation.
+Non-unit loops use a private wide counter to avoid overflow on the final
+increment; the callback index remains `Expr[Int]`. The lower bound is evaluated
+once and the upper bound is rechecked, so use `let` to explicitly snapshot a
+mutable endpoint. Functional range `.by` support is the next slice.
+
 Scala callbacks run during IR construction, not on the device. Keep `map`
 callbacks expression-only. DSL statements and shared declarations inside map,
 reduction, fold-step, or `choose`-arm callbacks raise a source-located

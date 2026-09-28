@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 21
+  val ArtifactVersion: Int = 22
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -328,12 +328,25 @@ object CudaCodegen:
           for
             from <- emitExpression(loop.from)
             until <- emitExpression(loop.until)
-            _ = writer.line(
-              s"$prefix" +
-                s"for (int ${loop.index.name} = $from; " +
-                s"${loop.index.name} < $until; ++${loop.index.name}) {",
-              loop.span
-            )
+            _ =
+              if loop.step == 1 then
+                writer.line(
+                  s"${prefix}for (int ${loop.index.name} = $from; " +
+                    s"${loop.index.name} < $until; ++${loop.index.name}) {",
+                  loop.span
+                )
+              else
+                val induction = freshNames.value()
+                // The final positive increment may exceed Int.MaxValue.
+                writer.line(
+                  s"${prefix}for (long long $induction = $from; " +
+                    s"$induction < $until; $induction += ${loop.step}LL) {",
+                  loop.span
+                )
+                writer.line(
+                  s"${indent(indentation + 1)}const int ${loop.index.name} = static_cast<int>($induction);",
+                  loop.index.span
+                )
             _ <- emitBlock(loop.body, indentation + 1)
           yield writer.line(s"$prefix}")
 
