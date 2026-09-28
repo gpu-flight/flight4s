@@ -430,7 +430,23 @@ subgroups, but attempts to read later subgroups return the caller's value.
 Directional deltas and lane masks must be in `0..31`; literal violations are
 rejected, while dynamic validity remains the caller's responsibility.
 Each shuffle result is a once-evaluated read-only snapshot, not a memory fence.
-Higher-level warp reductions remain separate work.
+Explicit tree reductions are also available:
+
+```scala
+val total = warp.reduceSum("total", UInt.fromBits(-1), value, width = 32)
+val product = warp.reduceTree("product", UInt.fromBits(-1), value, width = 8)(_ * _)
+```
+
+These support Int, UInt, Float, and Double. The mask is a **host UInt**, not a
+dynamic expression, and must contain complete aligned width-sized groups.
+The fixed adjacent-pair tree preserves left/right operand order in every lane;
+it is not a sequential `foldLeft`. The combine must be statement-free and use
+only its operands and lane-uniform captured values. All named non-exited lanes
+must reach the same call with the same mask, and every calling lane must be
+named. Static mask checks do not prove this runtime participation contract.
+Width one captures the input without shuffling. Floating sums follow the tree's
+rounding order; signed integer intermediates must not overflow. No memory fence,
+implicit widening, sparse-mask reduction, or automatic parallelization is added.
 
 Use the Unit-returning `warp.sync(mask)` to order shared/global memory accesses among participating
 warp lanes. Unlike shuffles and votes, it is a memory-ordering synchronization
