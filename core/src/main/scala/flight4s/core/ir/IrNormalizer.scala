@@ -183,6 +183,10 @@ private[core] object IrNormalizer:
     case shift: UnsignedShift => normalizeUnsignedShift(shift, scope).asInstanceOf[Expr[T]]
     case shift: SignedShift => normalizeSignedShift(shift, scope).asInstanceOf[Expr[T]]
     case count: PopulationCount[?] => normalizePopulationCount(count, scope).asInstanceOf[Expr[T]]
+    case vector: FloatVectorConstruct[?] =>
+      vector.copy(components = vector.components.map(expression(_, scope))).asInstanceOf[Expr[T]]
+    case component: FloatVectorComponent[?] =>
+      component.copy(value = expression(component.value, scope)).asInstanceOf[Expr[T]]
     case comparison: Compare[?] =>
       normalizeComparison(comparison, scope).asInstanceOf[Expr[T]]
     case conditional: Conditional[?] =>
@@ -401,6 +405,8 @@ private[core] object IrNormalizer:
       case shift: UnsignedShift => shift.copy(span = span).asInstanceOf[Expr[T]]
       case shift: SignedShift => shift.copy(span = span).asInstanceOf[Expr[T]]
       case count: PopulationCount[?] => count.copy(span = span).asInstanceOf[Expr[T]]
+      case vector: FloatVectorConstruct[?] => vector.copy(span = span).asInstanceOf[Expr[T]]
+      case component: FloatVectorComponent[?] => component.copy(span = span).asInstanceOf[Expr[T]]
       case comparison: Compare[?] => comparison.copy(span = span).asInstanceOf[Expr[T]]
       case conditional: Conditional[?] => conditional.copy(span = span).asInstanceOf[Expr[T]]
       case math: UnaryMath[?] => math.copy(span = span).asInstanceOf[Expr[T]]

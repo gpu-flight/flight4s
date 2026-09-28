@@ -31,6 +31,9 @@ private[core] object EffectSummary:
 private[core] object EffectAnalysis:
   def expression(expr: Expr[?]): EffectSummary = expr match
     case _: Literal[?] => EffectSummary.empty
+    case vector: FloatVectorConstruct[?] =>
+      vector.components.foldLeft(EffectSummary.empty)((effects, component) => effects ++ expression(component))
+    case component: FloatVectorComponent[?] => expression(component.value)
     case binary: Binary[?] =>
       expression(binary.left) ++ expression(binary.right)
     case shift: UnsignedShift => expression(shift.value) ++ expression(shift.distance)

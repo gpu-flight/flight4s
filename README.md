@@ -16,6 +16,41 @@ path alongside the Scala DSL.
 
 ## Scala-style CUDA
 
+### Native Vector Values
+
+`Float2` and `Float4` are actual CUDA `float2`/`float4` values, each owned by
+one thread. A typed buffer index selects one whole vector:
+
+```scala
+import flight4s.core.dsl.CudaDsl.*
+import flight4s.core.types.Float4
+
+val scaleVectors = kernel("scaleVectors",
+  params(input[Float4]("source"), output[Float4]("out"), value[Int]("count"))) { p =>
+  val i = let("i", blockIdx.x * blockDim.x + threadIdx.x)
+  when(i < p._3) {
+    val v = let("v", p._1(i).read)
+    val bias = float4(literal(1f), literal(2f), literal(3f), literal(4f))
+    p._2(i) := v.map(_ * literal(2f)).zipWith(bias)(_ + _)
+  }
+}
+```
+
+Use `.x`/`.y` on either type, and `.z`/`.w` on `Float4`. `map` and `zipWith`
+stage component-wise Float expressions; they do not imply SIMD arithmetic or
+memory coalescing. Callbacks are expression-only and run once per component
+during staging. Use `let` to load once; ordinary reused expressions can reload.
+
+Host `Array[Float2]` and `Array[Float4]` copies pack components in x/y/z/w order
+using 8- and 16-byte elements respectively, with matching CUDA alignments.
+This copies JVM values into native storage, not JVM case-class object layouts.
+CUDA compilation needs the toolkit include directory for `vector_types.h`,
+supplied through `CompilerOptions.additionalNvrtcOptions` as `--include-path=...`.
+By-value vector kernel parameters, unchecked scalar-buffer casts, automatic
+vectorization, and packed low-precision arithmetic are not provided by this API.
+
+### Functional Ranges
+
 Compose typed expressions with ordinary Scala functions, then stage loops and
 reductions into the validated CUDA IR:
 

@@ -17,10 +17,16 @@ sealed trait EqualityComparableType[T] extends CudaType[T]
 sealed trait FloatingMathType[T] extends CudaType[T]
 sealed trait AtomicAddType[T] extends CudaType[T]
 sealed trait WarpShuffleType[T] extends CudaType[T]
+sealed trait FloatVectorType[T] extends CudaType[T]:
+  def componentCount: Int
+  override val requiredHeaders: Set[String] = Set("vector_types.h")
 
 sealed trait AccumulatorType[Input, Accumulator]:
   def inputType: CudaType[Input]
   def accumulatorType: CudaType[Accumulator]
+
+final case class Float2(x: Float, y: Float)
+final case class Float4(x: Float, y: Float, z: Float, w: Float)
 
 final case class UInt private (bits: Int) extends AnyVal
 
@@ -146,6 +152,22 @@ case object F64
   override val sizeBytes: Int = 8
   override val alignmentBytes: Int = 8
 
+case object F32x2 extends FloatVectorType[Float2]:
+  override val cudaName: String = "float2"
+  override val componentCount: Int = 2
+  override val sizeBytes: Int = 8
+  override val alignmentBytes: Int = 8
+
+case object F32x4 extends FloatVectorType[Float4]:
+  override val cudaName: String = "float4"
+  override val componentCount: Int = 4
+  override val sizeBytes: Int = 16
+  override val alignmentBytes: Int = 16
+
+object FloatVectorType:
+  given float2Type: FloatVectorType[Float2] = F32x2
+  given float4Type: FloatVectorType[Float4] = F32x4
+
 case object FP8E4M3 extends CudaType[Float8E4M3]:
   override val cudaName: String = "__nv_fp8_e4m3"
   override val sizeBytes: Int = 1
@@ -159,6 +181,8 @@ case object FP8E5M2 extends CudaType[Float8E5M2]:
   override val requiredHeaders: Set[String] = Set("cuda_fp8.h")
 
 object CudaType:
+  given float2Type: CudaType[Float2] = F32x2
+  given float4Type: CudaType[Float4] = F32x4
   given boolType: CudaType[Boolean] = Bool
   given intType: CudaType[Int] = I32
   given uintType: CudaType[UInt] = U32

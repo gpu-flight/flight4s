@@ -119,6 +119,16 @@ object CudaHostCodec:
       _.getDouble()
     )
 
+  given float2Codec: CudaHostCodec[Float2] =
+    FixedWidthCodec(F32x2, new Array[Float2](_),
+      (bytes, value) => { bytes.putFloat(value.x); bytes.putFloat(value.y); () },
+      bytes => Float2(bytes.getFloat(), bytes.getFloat()))
+
+  given float4Codec: CudaHostCodec[Float4] =
+    FixedWidthCodec(F32x4, new Array[Float4](_),
+      (bytes, value) => { bytes.putFloat(value.x); bytes.putFloat(value.y); bytes.putFloat(value.z); bytes.putFloat(value.w); () },
+      bytes => Float4(bytes.getFloat(), bytes.getFloat(), bytes.getFloat(), bytes.getFloat()))
+
   given float8E4M3Codec: CudaHostCodec[Float8E4M3] =
     FixedWidthCodec(
       FP8E4M3,

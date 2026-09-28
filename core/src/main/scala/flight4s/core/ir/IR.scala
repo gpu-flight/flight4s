@@ -1,7 +1,7 @@
 package flight4s.core.ir
 
 import flight4s.core.abi.ScalarAbi
-import flight4s.core.types.{AccumulatorType, AdditiveType, AtomicAddType, BitwiseType, CudaType, FloatingMathType, I32, UInt, WarpShuffleType}
+import flight4s.core.types.{AccumulatorType, AdditiveType, AtomicAddType, BitwiseType, CudaType, F32, FloatingMathType, FloatVectorType, I32, UInt, WarpShuffleType}
 
 enum BinaryOperator(val cudaToken: String):
   case Add extends BinaryOperator("+")
@@ -30,6 +30,21 @@ final case class Literal[T](
     valueType: CudaType[T],
     span: SourceSpan = SourceSpan.Unknown
 ) extends Expr[T]
+
+final case class FloatVectorConstruct[T](
+    components: Vector[Expr[Float]],
+    vectorType: FloatVectorType[T],
+    span: SourceSpan = SourceSpan.Unknown
+) extends Expr[T]:
+  override def valueType: CudaType[T] = vectorType
+
+final case class FloatVectorComponent[T](
+    value: Expr[T],
+    index: Int,
+    vectorType: FloatVectorType[T],
+    span: SourceSpan = SourceSpan.Unknown
+) extends Expr[Float]:
+  override val valueType: CudaType[Float] = F32
 
 final case class Binary[T](
     operator: BinaryOperator,

@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 28
+  val ArtifactVersion: Int = 29
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -372,6 +372,12 @@ object CudaCodegen:
         case count: PopulationCount[?] =>
           emitExpression(count.value).map(value => s"::__popc(static_cast<unsigned int>($value))")
 
+        case vector: FloatVectorConstruct[?] =>
+          sequence(vector.components.map(emitExpression)).map(values => s"${vector.vectorType.cudaName}{${values.mkString(", ")}}")
+
+        case component: FloatVectorComponent[?] =>
+          emitExpression(component.value).map(value => s"($value).${"xyzw"(component.index)}")
+
         case comparison: Compare[?] =>
           for
             left <- emitExpression(comparison.left)
@@ -606,6 +612,10 @@ object CudaCodegen:
           Right(floatLiteral(value))
         case (F64, value: Double) =>
           Right(doubleLiteral(value))
+        case (F32x2, value: Float2) =>
+          Right(s"float2{${floatLiteral(value.x)}, ${floatLiteral(value.y)}}")
+        case (F32x4, value: Float4) =>
+          Right(s"float4{${Vector(value.x, value.y, value.z, value.w).map(floatLiteral).mkString(", ")}}")
         case (FP8E4M3, value: Float8E4M3) =>
           Right(fp8Literal("__nv_fp8_e4m3", value.toByteBits & 0xff))
         case (FP8E5M2, value: Float8E5M2) =>
@@ -724,6 +734,8 @@ object CudaCodegen:
       case shift: UnsignedShift => collectTypes(shift.value) ++ collectTypes(shift.distance)
       case shift: SignedShift => collectTypes(shift.value) ++ collectTypes(shift.distance)
       case count: PopulationCount[?] => collectTypes(count.value)
+      case vector: FloatVectorConstruct[?] => vector.components.flatMap(collectTypes)
+      case component: FloatVectorComponent[?] => collectTypes(component.value)
       case comparison: Compare[?] =>
         collectTypes(comparison.left) ++ collectTypes(comparison.right)
       case conditional: Conditional[?] =>
@@ -805,6 +817,8 @@ object CudaCodegen:
       case shift: UnsignedShift => collectIdentifiers(shift.value) ++ collectIdentifiers(shift.distance)
       case shift: SignedShift => collectIdentifiers(shift.value) ++ collectIdentifiers(shift.distance)
       case count: PopulationCount[?] => collectIdentifiers(count.value)
+      case vector: FloatVectorConstruct[?] => vector.components.flatMap(collectIdentifiers).toSet
+      case component: FloatVectorComponent[?] => collectIdentifiers(component.value)
       case comparison: Compare[?] =>
         collectIdentifiers(comparison.left) ++
           collectIdentifiers(comparison.right)

@@ -170,6 +170,10 @@ private[core] object LocalCommonSubexpressionElimination:
         shift.copy(value = this.expression(shift.value), distance = this.expression(shift.distance))
           .asInstanceOf[Expr[T]]
       case count: PopulationCount[?] => count.copy(value = this.expression(count.value)).asInstanceOf[Expr[T]]
+      case vector: FloatVectorConstruct[?] =>
+        vector.copy(components = vector.components.map(this.expression)).asInstanceOf[Expr[T]]
+      case component: FloatVectorComponent[?] =>
+        component.copy(value = this.expression(component.value)).asInstanceOf[Expr[T]]
       case comparison: Compare[?] =>
         comparison
           .copy(
@@ -262,6 +266,8 @@ private[core] object LocalCommonSubexpressionElimination:
         collectCounts(shift.value, counts)
         collectCounts(shift.distance, counts)
       case count: PopulationCount[?] => collectCounts(count.value, counts)
+      case vector: FloatVectorConstruct[?] => vector.components.foreach(collectCounts(_, counts))
+      case component: FloatVectorComponent[?] => collectCounts(component.value, counts)
       case comparison: Compare[?] =>
         collectCounts(comparison.left, counts)
         collectCounts(comparison.right, counts)
@@ -302,7 +308,8 @@ private[core] object LocalCommonSubexpressionElimination:
             left <- integerKey(binary.left)
             right <- integerKey(binary.right)
           yield IntegerExpressionKey.Binary(binary.operator, left, right)
-        case _: PopulationCount[?] | _: SignedShift | _: UnsignedShift | _: Compare[?] | _: Conditional[?] | _: UnaryMath[?] | _: Convert[?, ?] | _: ToAccumulator[?, ?] |
+        case _: FloatVectorConstruct[?] | _: FloatVectorComponent[?] |
+            _: PopulationCount[?] | _: SignedShift | _: UnsignedShift | _: Compare[?] | _: Conditional[?] | _: UnaryMath[?] | _: Convert[?, ?] | _: ToAccumulator[?, ?] |
             _: ReduceSum[?, ?] | _: Load[?, ?, ?] => None
 
   private def collectNames(kernel: KernelIR[?]): Set[String] =
@@ -347,6 +354,8 @@ private[core] object LocalCommonSubexpressionElimination:
     case shift: UnsignedShift => collectNames(shift.value) ++ collectNames(shift.distance)
     case shift: SignedShift => collectNames(shift.value) ++ collectNames(shift.distance)
     case count: PopulationCount[?] => collectNames(count.value)
+    case vector: FloatVectorConstruct[?] => vector.components.flatMap(collectNames).toSet
+    case component: FloatVectorComponent[?] => collectNames(component.value)
     case comparison: Compare[?] =>
       collectNames(comparison.left) ++ collectNames(comparison.right)
     case conditional: Conditional[?] =>

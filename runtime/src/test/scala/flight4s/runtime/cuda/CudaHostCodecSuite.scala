@@ -90,6 +90,26 @@ class CudaHostCodecSuite extends FunSuite:
     assertEquals(values.getInt(), 11)
     assertEquals(values.getInt(), 22)
 
+  test("vector codecs preserve raw component bits and native-order packed layout"):
+    val bits = Array(0x80000000, 0x7fc01234, 0x7f800000, 0xff800000, 0x00000001, 0x3f800000, 0, 0xbf800000)
+    val floats = bits.map(java.lang.Float.intBitsToFloat)
+    val pairs = floats.grouped(2).map(x => Float2(x(0), x(1))).toArray
+    val quads = floats.grouped(4).map(x => Float4(x(0), x(1), x(2), x(3))).toArray
+    def check[T](values: Array[T], flatten: Array[T] => Array[Float])(using codec: CudaHostCodec[T]): Unit =
+      val bytes = codec.encode(values)
+      assert(bytes.isDirect)
+      assertEquals(bytes.capacity(), 32)
+      assertEquals(bytes.order(), ByteOrder.nativeOrder())
+      for i <- bits.indices do assertEquals(bytes.getInt(i * 4), bits(i))
+      val decoded = flatten(codec.decode(bytes, values.length)).map(java.lang.Float.floatToRawIntBits)
+      assertEquals(decoded.toVector, bits.toVector)
+      val reused = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+      codec.encodeInto(values, reused)
+      for i <- bits.indices do assertEquals(reused.getInt(i * 4), bits(i))
+      assertEquals(codec.decode(codec.encode(values.take(0)), 0).length, 0)
+    check(pairs, (xs: Array[Float2]) => xs.flatMap(x => Array(x.x, x.y)))
+    check(quads, (xs: Array[Float4]) => xs.flatMap(x => Array(x.x, x.y, x.z, x.w)))
+
   private def assertRoundTrip[T](
       values: Array[T]
   )(using codec: CudaHostCodec[T]): Unit =

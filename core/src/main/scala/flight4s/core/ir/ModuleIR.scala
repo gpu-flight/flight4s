@@ -6,14 +6,13 @@ final case class CudaModuleIR(
 )
 
 object ModuleValidator:
-  private val cudaIdentifier = raw"[A-Za-z_][A-Za-z0-9_]*".r
 
   def validate(module: CudaModuleIR): ValidationResult =
     val constantErrors = module.constants.zipWithIndex.flatMap {
       case (constant, index) =>
         val location = s"constants[$index]"
         val nameErrors =
-          if cudaIdentifier.matches(constant.name) then Vector.empty
+          if CudaIdentifier.isValid(constant.name) then Vector.empty
           else
             Vector(
               ValidationError(
