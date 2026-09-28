@@ -13,6 +13,14 @@ final class GpuRange private[dsl] (
   def map[T](valueAt: Expr[Int] => Expr[T]): MappedGpuRange[T] =
     new MappedGpuRange(this, valueAt)
 
+  /** Stages one ordered local update per element and returns its read-only result expression. */
+  def foldLeft[A](accumulatorName: String, initial: Expr[A])(
+      step: (Expr[A], Expr[Int]) => Expr[A]
+  )(using valueType: CudaType[A], builder: BlockBuilder, position: DslSourcePosition): Expr[A] =
+    val accumulator = local(accumulatorName, initial)
+    foreach { index => accumulator := step(accumulator.read, index) }
+    Load(accumulator, position.span)
+
   def foreach(
       body: Expr[Int] => (BlockBuilder ?=> Unit)
   )(using builder: BlockBuilder, position: DslSourcePosition): Unit =
@@ -28,6 +36,11 @@ final class MappedGpuRange[T] private[dsl] (
 ):
   def map[U](transform: Expr[T] => Expr[U]): MappedGpuRange[U] =
     new MappedGpuRange(range, valueAt.andThen(transform))
+
+  def foldLeft[A](accumulatorName: String, initial: Expr[A])(
+      step: (Expr[A], Expr[T]) => Expr[A]
+  )(using valueType: CudaType[A], builder: BlockBuilder, position: DslSourcePosition): Expr[A] =
+    range.foldLeft(accumulatorName, initial)((accumulator, index) => step(accumulator, valueAt(index)))
 
   def sum[A](
       initial: Expr[A],

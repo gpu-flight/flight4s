@@ -15,6 +15,68 @@ class CudaResourcesJniSuite extends FunSuite:
   private val nativeLibraryConfigured =
     sys.props.contains("flight4s.cuda.native.path")
 
+  test("strict folds retain order scalar state and results after source mutation"):
+    assume(nativeLibraryConfigured, "set flight4s.cuda.native.path to run JNI tests")
+    val rows = 17
+    val columns = 7
+    val values = Array.tabulate(rows * columns)(i => i % 9 - 3)
+    val definition = kernel("strictFolds", params(
+      inOut[Int]("source"), output[Int]("recurrences"), output[Int]("maxima"),
+      output[Boolean]("positives"), value[Int]("from"), value[Int]("until")
+    )) { bindings =>
+      val (source, recurrences, maxima, positives, from, until) = bindings
+      val row = local("row", blockIdx.x * blockDim.x + threadIdx.x)
+      when(row.read < literal(rows)) {
+        val elements = gpuRange("column", from, until)
+          .map(column => source(row.read * literal(columns) + column).read)
+        val recurrence = elements.foldLeft("recurrence", literal(5))((acc, x) => acc * literal(2) + x)
+        val maximum = elements.foldLeft("maximum", literal(-99))((acc, x) => choose(x > acc)(x)(acc))
+        val positive = elements.foldLeft("positive", literal(true)) { (acc, x) =>
+          choose(acc)(x > literal(0))(literal(false))
+        }
+        gpuRange("clearColumn", from, until).foreach { column =>
+          source(row.read * literal(columns) + column) := literal(0)
+        }
+        recurrences(row.read) := recurrence
+        maxima(row.read) := maximum
+        positives(row.read) := positive
+      }
+    }
+    val generated = CudaCodegen.generate(definition).fold(error => fail(error.message), identity)
+    val generatedModule = GeneratedCudaModule(
+      generated.cudaSource, generated.sourceMap, generated.compilerOptions, Vector(generated)
+    )
+    val context = openContext()
+    try
+      val artifact = NvrtcCompiler.compile(generatedModule, context.computeCapability, "strict_folds.cu")
+        .fold(failure => fail(failure.message + "\n" + failure.compileLog), identity)
+      val module = context.load(artifact).fold(failure => fail(failure.message), identity)
+      val function = module.function(generated).fold(failure => fail(failure.message), identity)
+      val source = context.allocate[Int](values.length).toOption.get
+      val recurrences = context.allocate[Int](rows).toOption.get
+      val maxima = context.allocate[Int](rows).toOption.get
+      val positives = context.allocate[Boolean](rows).toOption.get
+      for (from, until) <- Vector((0, columns), (1, 5), (3, 3), (5, 2)) do
+        assertEquals(source.copyFrom(values), Right(()))
+        assertEquals(recurrences.copyFrom(Array.fill(rows)(-1)), Right(()))
+        assertEquals(maxima.copyFrom(Array.fill(rows)(-1)), Right(()))
+        assertEquals(positives.copyFrom(Array.fill(rows)(false)), Right(()))
+        assertEquals(function.launch(
+          definition.bind((source, recurrences, maxima, positives, from, until)),
+          LaunchConfig(Grid.x(1), LaunchBlock.x(32))
+        ), Right(()))
+        assertEquals(context.synchronize(), Right(()))
+        val selected = Vector.tabulate(rows)(row => (from until until).map(column => values(row * columns + column)))
+        assertEquals(recurrences.copyToArray().toOption.get.toVector,
+          selected.map(_.foldLeft(5)((acc, x) => acc * 2 + x)))
+        assertEquals(maxima.copyToArray().toOption.get.toVector,
+          selected.map(_.foldLeft(-99)((acc, x) => math.max(acc, x))))
+        assertEquals(positives.copyToArray().toOption.get.toVector, selected.map(_.forall(_ > 0)))
+        assertEquals(source.copyToArray().toOption.get.toVector, values.indices.map { i =>
+          if i % columns >= from && i % columns < until then 0 else values(i)
+        }.toVector)
+    finally context.close()
+
   test("conditional maps and guarded division match CPU results on the GPU"):
     assume(nativeLibraryConfigured, "set flight4s.cuda.native.path to run JNI tests")
     val rows = 259

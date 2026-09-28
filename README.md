@@ -70,6 +70,22 @@ Both arms must have the same CUDA type. Both expression trees are constructed
 and validated on the host, but only the selected value is evaluated on the GPU.
 Use `gpuIf` or `when` for conditional statements and stores instead.
 
+For a strict scalar recurrence, use a named `foldLeft` inside a kernel body:
+
+```scala
+val maximum = gpuRange("i", literal(0), count)
+  .map(i => input(i).read)
+  .foldLeft("maximum", literal(Float.NegativeInfinity)) { (best, x) =>
+    choose(x > best)(x)(best)
+  }
+```
+
+The fold stages an initialized local and a serial loop at its call site. Its
+returned expression reads that result; repeated reads do not repeat the fold.
+State has one CUDA scalar type, empty ranges return the initial value, and no
+parallel reassociation is implied. Floating-point comparison behavior remains
+explicit in the step function.
+
 ## Status
 
 Flight4s is pre-alpha and under active design. The current implementation
@@ -80,6 +96,7 @@ provides:
 - lazy staged `gpuRange.map` composition with typed `sum` and `foreach` terminals;
 - lexical `scoped` bodies for reusable higher-order Scala statement helpers;
 - typed value-producing conditionals with guarded CUDA expression evaluation;
+- strict named scalar `foldLeft` terminals for ordered per-thread recurrences;
 - distinct module constants, rank-aware kernel shared arrays, and lexical local
   arrays;
 - module and kernel validation for memory ownership, scope, access, and static
