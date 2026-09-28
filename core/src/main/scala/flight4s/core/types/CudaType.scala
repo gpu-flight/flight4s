@@ -14,6 +14,7 @@ sealed trait OrderedType[T] extends CudaType[T]
 sealed trait EqualityComparableType[T] extends CudaType[T]
 sealed trait FloatingMathType[T] extends CudaType[T]
 sealed trait AtomicAddType[T] extends CudaType[T]
+sealed trait WarpShuffleType[T] extends CudaType[T]
 
 sealed trait AccumulatorType[Input, Accumulator]:
   def inputType: CudaType[Input]
@@ -69,6 +70,7 @@ case object Bool
 case object I32
     extends AdditiveType[Int],
       AtomicAddType[Int],
+      WarpShuffleType[Int],
       MultiplicativeType[Int],
       DivisibleType[Int],
       RemainderType[Int],
@@ -81,6 +83,7 @@ case object I32
 case object U32
     extends AdditiveType[UInt],
       AtomicAddType[UInt],
+      WarpShuffleType[UInt],
       MultiplicativeType[UInt],
       DivisibleType[UInt],
       RemainderType[UInt],
@@ -115,6 +118,7 @@ case object BF16
 case object F32
     extends AdditiveType[Float],
       AtomicAddType[Float],
+      WarpShuffleType[Float],
       FloatingMathType[Float],
       MultiplicativeType[Float],
       DivisibleType[Float],
@@ -126,6 +130,7 @@ case object F32
 
 case object F64
     extends AdditiveType[Double],
+      WarpShuffleType[Double],
       FloatingMathType[Double],
       MultiplicativeType[Double],
       DivisibleType[Double],
@@ -211,6 +216,12 @@ object AtomicAddType:
   given intType: AtomicAddType[Int] = I32
   given uintType: AtomicAddType[UInt] = U32
   given floatType: AtomicAddType[Float] = F32
+
+object WarpShuffleType:
+  given intType: WarpShuffleType[Int] = I32
+  given uintType: WarpShuffleType[UInt] = U32
+  given floatType: WarpShuffleType[Float] = F32
+  given doubleType: WarpShuffleType[Double] = F64
 
 object AccumulatorType:
   given intAccumulator: AccumulatorType[Int, Int] with
