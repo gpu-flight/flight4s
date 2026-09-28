@@ -133,12 +133,15 @@ private[core] object IrNormalizer:
       normalizeSelectedBlock(scoped.body, scoped.span, scope)
 
     case loop: ForLoop =>
+      // The upper bound is re-evaluated after body writes on every iteration.
+      val conditionScope = EffectAnalysis.modifiedLocalNames(loop.body)
+        .foldLeft(scope)((current, name) => current.without(name))
       val (body, _) = normalizeBlock(loop.body, ConstantScope.empty)
       (
         Some(
           loop.copy(
             from = expression(loop.from, scope),
-            until = expression(loop.until, scope),
+            until = expression(loop.until, conditionScope),
             body = body
           )
         ),

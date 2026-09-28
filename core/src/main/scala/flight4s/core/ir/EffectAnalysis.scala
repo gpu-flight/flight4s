@@ -94,6 +94,24 @@ private[core] object EffectAnalysis:
       summary ++ statement(next)
     }
 
+  def modifiedLocalNames(block: Block): Set[String] =
+    block.statements.flatMap(modifiedLocalNames).toSet
+
+  private def modifiedLocalNames(statement: Stmt): Set[String] = statement match
+    case store: Store[?, ?] =>
+      store.to match
+        case local: LocalVariable[?] => Set(local.name)
+        case _ => Set.empty
+    case accumulation: Accumulate[?] => Set(accumulation.target.name)
+    case branch: IfThen =>
+      modifiedLocalNames(branch.thenBlock) ++
+        branch.elseBlock.toVector.flatMap(modifiedLocalNames).toSet
+    case scoped: ScopedBlock => modifiedLocalNames(scoped.body)
+    case loop: ForLoop => modifiedLocalNames(loop.body)
+    case _: LocalDeclaration[?] | _: LocalArrayDeclaration[?] |
+        _: AtomicAdd[?, ?] | _: AtomicFetchAdd[?, ?] | _: WarpVote[?] | _: WarpShuffle[?, ?] |
+        _: Barrier | _: WarpBarrier => Set.empty
+
   private def read(place: Place[?, ?, ?]): EffectSummary =
     addressEffects(place) ++ EffectSummary(readSpaces = Set(spaceOf(place)))
 
