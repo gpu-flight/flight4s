@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 26
+  val ArtifactVersion: Int = 27
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -506,6 +506,8 @@ object CudaCodegen:
         value: String
     ): Either[CodegenError, String] =
       (conversion.value.valueType, conversion.valueType) match
+        case (F32, F64) =>
+          Right(s"static_cast<double>($value)")
         case (I32, F32) =>
           Right(s"::__int2float_${roundingSuffix(conversion.rounding)}($value)")
         case (U32, F32) =>
