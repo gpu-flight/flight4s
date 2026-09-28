@@ -250,12 +250,20 @@ Direct shuffle captures another participating lane's scalar value:
 
 ```scala
 val firstValue = warp.shuffle("firstValue", fullMask, value, literal(0), width = 32)
+val previous = warp.shuffleUp("previous", fullMask, value, literal(UInt.fromBits(1)))
+val next = warp.shuffleDown("next", fullMask, value, literal(UInt.fromBits(1)))
+val partner = warp.shuffleXor("partner", fullMask, value, literal(1))
 ```
 
 Supported values are Int, UInt, Float, and Double. Width is a host integer from
 1, 2, 4, 8, 16, 32; the source lane is a nonnegative `Expr[Int]` relative to that
 width-sized subgroup, with CUDA modulo-width wraparound. The selected lane must
 actually participate in the mask. Width does not make inactive lanes available.
+Up/down use an unsigned delta and keep the caller's value when crossing the
+width-sized subgroup boundary. XOR uses a signed lane mask; it can read earlier
+subgroups, but attempts to read later subgroups return the caller's value.
+Directional deltas and lane masks must be in `0..31`; literal violations are
+rejected, while dynamic validity remains the caller's responsibility.
 The result is a once-evaluated read-only snapshot, not a memory fence. Shuffle
 up/down/xor and warp reductions remain separate work.
 

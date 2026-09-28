@@ -41,6 +41,7 @@ enum ValidationCode:
   case EmptyWarpMask
   case InvalidWarpWidth
   case NegativeWarpSourceLane
+  case InvalidWarpSelector
   case UnknownConstant
   case ConstantTypeMismatch
   case ConstantIndexOutOfBounds
@@ -384,7 +385,7 @@ object KernelValidator:
 
           (errors ++ declarationErrors, nextScope)
 
-        case ((errors, scope), (shuffle: WarpShuffle[?], index)) =>
+        case ((errors, scope), (shuffle: WarpShuffle[?, ?], index)) =>
           val statementLocation = s"$location.statements[$index]"
           val nameErrors = validateLocalName(shuffle.local, parameters, scope, statementLocation)
           val declarationErrors = nameErrors ++ validateWarpShuffle(shuffle, parameters, statementLocation, scope)
@@ -567,7 +568,7 @@ object KernelValidator:
         Vector.empty
 
   private def validateWarpShuffle(
-      shuffle: WarpShuffle[?],
+      shuffle: WarpShuffle[?, ?],
       parameters: Map[String, KernelParam],
       location: String,
       scope: ValidationScope
@@ -576,21 +577,30 @@ object KernelValidator:
       if Set(1, 2, 4, 8, 16, 32).contains(shuffle.width) then Vector.empty
       else Vector(ValidationError(ValidationCode.InvalidWarpWidth,
         "warp shuffle width must be one of 1, 2, 4, 8, 16, 32", location, shuffle.span))
-    val lane: Expr[?] = shuffle.sourceLane
-    val laneErrors = lane match
-      case Literal(value: Int, _, _) if value < 0 =>
+    val selectorLocation = s"$location.${shuffle.operator.selectorName}"
+    val selector: Expr[?] = shuffle.selector
+    val laneErrors = (shuffle.operator, selector) match
+      case (WarpShuffleOperator.Direct, Literal(value: Int, _, _)) if value < 0 =>
         Vector(ValidationError(ValidationCode.NegativeWarpSourceLane,
-          "warp shuffle source lane must be nonnegative", s"$location.sourceLane", shuffle.span))
+          "warp shuffle source lane must be nonnegative", selectorLocation, shuffle.span))
+      case (WarpShuffleOperator.Xor, Literal(value: Int, _, _)) if value < 0 || value > 31 =>
+        Vector(ValidationError(ValidationCode.InvalidWarpSelector,
+          "warp shuffle lane mask must be in 0..31", selectorLocation, shuffle.span))
+      case (WarpShuffleOperator.Up | WarpShuffleOperator.Down, Literal(value: UInt, _, _))
+          if value.toIntBits < 0 || value.toIntBits > 31 =>
+        Vector(ValidationError(ValidationCode.InvalidWarpSelector,
+          "warp shuffle delta must be in 0..31", selectorLocation, shuffle.span))
       case _ => Vector.empty
     widthErrors ++ laneErrors ++
       validateNonemptyWarpMask(shuffle.mask, location, shuffle.span) ++
       validateExpression(shuffle.mask, parameters, s"$location.mask", scope) ++
       validateExpression(shuffle.value, parameters, s"$location.value", scope) ++
-      validateExpression(shuffle.sourceLane, parameters, s"$location.sourceLane", scope) ++
+      validateExpression(shuffle.selector, parameters, selectorLocation, scope) ++
       requireSameType(shuffle.mask.valueType, U32, "warp shuffle mask must have CUDA unsigned int type",
         s"$location.mask", shuffle.span) ++
-      requireSameType(shuffle.sourceLane.valueType, I32, "warp shuffle source lane must have CUDA int type",
-        s"$location.sourceLane", shuffle.span) ++
+      requireSameType(shuffle.selector.valueType, shuffle.operator.selectorType,
+        s"warp shuffle ${shuffle.operator.selectorName} must have CUDA ${shuffle.operator.selectorType.cudaName} type",
+        selectorLocation, shuffle.span) ++
       requireSameType(shuffle.local.valueType, shuffle.value.valueType,
         "warp shuffle result type does not match the value", location, shuffle.span, ValidationCode.LocalTypeMismatch) ++
       requireSameType(shuffle.shuffleType, shuffle.value.valueType,

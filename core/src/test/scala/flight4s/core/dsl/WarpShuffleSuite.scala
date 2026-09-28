@@ -86,7 +86,7 @@ class WarpShuffleSuite extends FunSuite:
   test("manual shuffle metadata is validated without premature scalar casts"):
     val malformed = WarpShuffle(LocalVariable("result", I32),
       literal(-1).asInstanceOf[Expr[UInt]], literal(1.0f).asInstanceOf[Expr[Int]],
-      literal(0.0f).asInstanceOf[Expr[Int]], 32, I32)
+      WarpShuffleOperator.Direct, literal(0.0f).asInstanceOf[Expr[Int]], 32, I32)
     val definition = kernel("malformed") {}.ir.copy(body = Block(Vector(malformed)))
     assertEquals(KernelValidator.validate(definition).errors.map(_.code), Vector(
       ValidationCode.ExpressionTypeMismatch, ValidationCode.ExpressionTypeMismatch,
@@ -130,7 +130,7 @@ class WarpShuffleSuite extends FunSuite:
     }
     val normalized = IrNormalizer.kernel(definition.ir)
     assertEquals(normalized.body.statements.head,
-      WarpShuffle(LocalVariable("result", I32), full, literal(3), literal(0), 1, I32))
+      WarpShuffle(LocalVariable("result", I32), full, literal(3), WarpShuffleOperator.Direct, literal(0), 1, I32))
     assertEquals(normalized.body.statements.last, definition.ir.body.statements.last)
     assertEquals(IrNormalizer.kernel(normalized), normalized)
     assert(KernelValidator.validate(normalized).isValid)
@@ -153,9 +153,9 @@ class WarpShuffleSuite extends FunSuite:
     val normalized = IrNormalizer.kernel(definition.ir)
     val temporary = normalized.body.statements.head.asInstanceOf[LocalDeclaration[Int]].local
     assertEquals(temporary.name, "flight4s_cse_1")
-    val shuffle = normalized.body.statements.last.asInstanceOf[WarpShuffle[Int]]
+    val shuffle = normalized.body.statements.last.asInstanceOf[WarpShuffle[Int, Int]]
     assertEquals(shuffle.value, temporary.read)
-    assertEquals(shuffle.sourceLane, temporary.read)
+    assertEquals(shuffle.selector, temporary.read)
     assert(KernelValidator.validate(normalized).isValid)
 
   test("shuffle cannot be hidden inside a pure expression callback"):
