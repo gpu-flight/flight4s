@@ -21,7 +21,7 @@ class ConditionalExpressionSuite extends FunSuite:
       out(literal(0)) := choose(threadIdx.x < literal(4))(literal(11))(literal(22))
     }
     val generated = CudaCodegen.generate(definition).fold(error => fail(error.message), identity)
-    assert(generated.cudaSource.contains("out[0] = ((threadIdx.x < 4) ? 11 : 22);"))
+    assert(generated.cudaSource.contains("out[0] = ((static_cast<int>(threadIdx.x) < 4) ? 11 : 22);"))
 
   test("both result arms must have one CUDA type and the condition must be staged Boolean"):
     assert(typeCheckErrors("""

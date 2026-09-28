@@ -49,6 +49,14 @@ expression builders without allocating an intermediate device collection.
 type, and reduction policy. `foreach` lowers to the existing GPU loop for
 explicit stores and other statements.
 
+Indexing intrinsics `threadIdx`, `blockIdx`, and `blockDim` expose `Expr[Int]`
+on all three axes. Generated CUDA explicitly casts each built-in field to `int`,
+so negative comparisons, division, and remainder keep signed semantics even
+though CUDA's underlying fields are unsigned. For an eight-thread block,
+`literal(-7) / blockDim.x` is `0` and its remainder is `-7`. This does not add
+overflow checks or promise JVM wraparound for general arithmetic; keep index
+calculations within the signed 32-bit range.
+
 Explicit statement loops also accept a positive static stride:
 
 ```scala
@@ -489,8 +497,8 @@ affected caches if external headers change at the same path.
   generated/raw provenance, resolved options, target, compiler version,
   generated-source codegen version, program name, and kernel ABI/launch metadata.
   Encoding v3 includes optional exact block dimensions. Previous encoding-v2
-  entries become cache misses; CUDA codegen version 23 and store schema v2
-  are unchanged by this metadata-only addition.
+  entries become cache misses. Codegen v24 separately fixes signed indexing
+  intrinsic emission; the store remains schema v2.
 - **Memory:** `NvrtcCompilationCache` is a caller-owned bounded in-memory LRU
   of successful PTX compilations. Cache hits rebind PTX metadata to the current
   typed compilation input.
