@@ -10,7 +10,7 @@ ThisBuild / scmInfo := Some(
 )
 
 lazy val root = (project in file("."))
-  .aggregate(core, runtime)
+  .aggregate(core, runtime, examples)
   .settings(
     name := "flight4s-root",
     publish / skip := true
@@ -26,5 +26,17 @@ lazy val runtime = (project in file("runtime"))
   .dependsOn(core)
   .settings(
     name := "flight4s-runtime",
+    libraryDependencies += "org.scalameta" %% "munit" % "1.0.0" % Test
+  )
+
+lazy val examples = (project in file("examples"))
+  .dependsOn(runtime)
+  .settings(
+    name := "flight4s-examples",
+    publish / skip := true,
+    // JNI libraries cannot be loaded by separate sbt test/run classloaders in one JVM.
+    fork := true,
+    javaOptions ++= sys.props.get("flight4s.cuda.native.path")
+      .map(path => s"-Dflight4s.cuda.native.path=$path").toSeq,
     libraryDependencies += "org.scalameta" %% "munit" % "1.0.0" % Test
   )

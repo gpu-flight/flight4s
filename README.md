@@ -280,6 +280,28 @@ Each caller receives its own provenance-aware `CudaModule` wrapper, while the
 shared native module unloads only after the final wrapper and its in-flight work
 release. Idle modules are not retained after the final close.
 
+## Runnable Example
+
+The [row softmax example](examples/src/main/scala/flight4s/examples/RowSoftmax.scala)
+contains the complete Scala kernel and `main`, including NVRTC compilation,
+owned buffers, an explicit stream, synchronization, and cleanup.
+
+Inspect generated CUDA without a native library or GPU:
+
+```shell
+sbt "examples/runMain flight4s.examples.RowSoftmax --cuda-source"
+```
+
+Run on CUDA after building the native library below:
+
+```shell
+sbt -Dflight4s.cuda.native.path=<absolute-library-path> "examples/runMain flight4s.examples.RowSoftmax"
+```
+
+It accepts finite row-major Float logits and uses one serial row per thread.
+This is an end-to-end correctness example, not a performance-tuned softmax.
+See [examples/README.md](examples/README.md) for contracts and test commands.
+
 ## Build
 
 Flight4s requires JDK 17 or newer and sbt:
