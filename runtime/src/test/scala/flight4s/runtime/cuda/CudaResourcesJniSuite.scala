@@ -7,13 +7,56 @@ import munit.FunSuite
 import flight4s.core.codegen.*
 import flight4s.core.compiler.NvrtcArtifact
 import flight4s.core.dsl.CudaDsl.*
-import flight4s.core.ir.Kernel
+import flight4s.core.ir.{Expr, Kernel}
 import flight4s.core.launch.{Block as LaunchBlock, Grid, LaunchConfig}
 import flight4s.core.unsafe.raw.RawCuda
 
 class CudaResourcesJniSuite extends FunSuite:
   private val nativeLibraryConfigured =
     sys.props.contains("flight4s.cuda.native.path")
+
+  test("repeated scoped helpers preserve ordered GPU stores and outer-local updates"):
+    assume(nativeLibraryConfigured, "set flight4s.cuda.native.path to run JNI tests")
+    val count = 257
+    val values = Array.tabulate(count)(_.toFloat)
+    val definition = kernel("scopedTransforms",
+      params(inOut[Float]("data"), output[Int]("counts"), value[Int]("n"))) { bindings =>
+      val (data, counts, n) = bindings
+      val index = local("index", blockIdx.x * blockDim.x + threadIdx.x)
+      when(index.read < n) {
+        val updates = local("updates", literal(1))
+        def transform(f: Expr[Float] => Expr[Float])(using BlockBuilder): Unit = scoped {
+          val temporary = local("temporary", data(index.read).read)
+          data(index.read) := f(temporary.read)
+          updates := updates.read + literal(1)
+        }
+        transform(_ * literal(2.0f))
+        transform(_ + literal(3.0f))
+        counts(index.read) := updates.read
+      }
+    }
+    val generated = CudaCodegen.generate(definition).fold(error => fail(error.message), identity)
+    val generatedModule = GeneratedCudaModule(
+      generated.cudaSource, generated.sourceMap, generated.compilerOptions, Vector(generated)
+    )
+    val context = openContext()
+    try
+      val artifact = NvrtcCompiler.compile(generatedModule, context.computeCapability, "scoped_helpers.cu")
+        .fold(failure => fail(failure.message + "\n" + failure.compileLog), identity)
+      val module = context.load(artifact).fold(failure => fail(failure.message), identity)
+      val function = module.function(generated).fold(failure => fail(failure.message), identity)
+      val data = context.allocate[Float](count).toOption.get
+      val counts = context.allocate[Int](count).toOption.get
+      assertEquals(data.copyFrom(values), Right(()))
+      assertEquals(counts.copyFrom(Array.fill(count)(-1)), Right(()))
+      assertEquals(function.launch(
+        definition.bind((data, counts, count)),
+        LaunchConfig(Grid.x((count + 127) / 128), LaunchBlock.x(128))
+      ), Right(()))
+      assertEquals(context.synchronize(), Right(()))
+      assertEquals(data.copyToArray().toOption.get.toVector, values.map(_ * 2.0f + 3.0f).toVector)
+      assertEquals(counts.copyToArray().toOption.get.toVector, Vector.fill(count)(3))
+    finally context.close()
 
   test("staged range composition executes row sums and foreach with empty-range semantics"):
     assume(nativeLibraryConfigured, "set flight4s.cuda.native.path to run JNI tests")

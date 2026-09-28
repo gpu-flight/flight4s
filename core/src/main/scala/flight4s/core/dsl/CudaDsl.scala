@@ -408,6 +408,14 @@ object CudaDsl:
       ForLoop(index, from, until, nested.result(), position.span)
     )
 
+  def scoped(body: BlockBuilder ?=> Unit)(using
+      parent: BlockBuilder,
+      position: DslSourcePosition
+  ): Unit =
+    val nested = parent.nested()
+    body(using nested)
+    parent.append(ScopedBlock(nested.result(), position.span))
+
   def when(condition: Expr[Boolean])(
       body: BlockBuilder ?=> Unit
   )(using parent: BlockBuilder, position: DslSourcePosition): Unit =
