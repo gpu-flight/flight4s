@@ -649,6 +649,12 @@ keeps that serial baseline intact and combines per-thread moments with an
 explicit shared-memory tree. Its exact 128-thread block contract, empty-state
 handling, and barriers are verified by GPU fixtures and CUDA sanitizers.
 
+[RowLayerNorm](examples/src/main/scala/flight4s/examples/RowLayerNorm.scala)
+combines a tuple Welford fold with a second functional traversal for per-column
+gain and bias. Statistics and normalization use Double; the output is explicitly
+narrowed to Float. It includes a complete `main`, positive-epsilon/input
+validation, independent numerical tests, and inspectable generated CUDA.
+
 ## Build
 
 Flight4s requires JDK 17 or newer and sbt:
