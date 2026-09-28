@@ -1,10 +1,12 @@
 package flight4s.core.ir
 
 import flight4s.core.types.{Bool, I32, U32, UInt}
+import flight4s.core.launch.{Block as LaunchBlock}
 
 private[core] object IrNormalizer:
   private final case class ConstantScope(
-      integerLocals: Map[String, Int] = Map.empty
+      integerLocals: Map[String, Int] = Map.empty,
+      requiredBlock: Option[LaunchBlock] = None
   ):
     def bind(local: LocalVariable[?], value: Expr[?]): ConstantScope =
       if local.valueType != I32 then without(local.name)
@@ -19,6 +21,20 @@ private[core] object IrNormalizer:
 
     def without(name: String): ConstantScope =
       copy(integerLocals = integerLocals.removed(name))
+
+    // Control flow invalidates local facts, not the kernel's launch contract.
+    def withoutLocals: ConstantScope = copy(integerLocals = Map.empty)
+
+    def resolve(intrinsic: Intrinsic[?]): Option[Literal[Int]] =
+      if intrinsic.valueType != I32 then None
+      else requiredBlock.flatMap { block =>
+        val dimension = intrinsic.name match
+          case "blockDim.x" => Some(block.x)
+          case "blockDim.y" => Some(block.y)
+          case "blockDim.z" => Some(block.z)
+          case _ => None
+        dimension.map(value => Literal(value, I32, intrinsic.span))
+      }
 
   private object ConstantScope:
     val empty: ConstantScope = ConstantScope()
@@ -50,7 +66,7 @@ private[core] object IrNormalizer:
       reservedNames: Set[String]
   ): KernelIR[Args] =
     val normalized = kernel.copy(
-      body = normalizeBlock(kernel.body, ConstantScope.empty)._1
+      body = normalizeBlock(kernel.body, ConstantScope(requiredBlock = kernel.requiredBlock))._1
     )
     LocalCommonSubexpressionElimination.kernel(normalized, reservedNames)
 
@@ -126,7 +142,7 @@ private[core] object IrNormalizer:
                 elseBlock = elseBlock
               )
             ),
-            ConstantScope.empty
+            scope.withoutLocals
           )
 
     case scoped: ScopedBlock =>
@@ -136,7 +152,7 @@ private[core] object IrNormalizer:
       // The upper bound is re-evaluated after body writes on every iteration.
       val conditionScope = EffectAnalysis.modifiedLocalNames(loop.body)
         .foldLeft(scope)((current, name) => current.without(name))
-      val (body, _) = normalizeBlock(loop.body, ConstantScope.empty)
+      val (body, _) = normalizeBlock(loop.body, scope.withoutLocals)
       (
         Some(
           loop.copy(
@@ -145,7 +161,7 @@ private[core] object IrNormalizer:
             body = body
           )
         ),
-        ConstantScope.empty
+        scope.withoutLocals
       )
 
     case barrier: Barrier => (Some(barrier), scope)
@@ -158,7 +174,7 @@ private[core] object IrNormalizer:
   ): (Option[Stmt], ConstantScope) =
     val (body, _) = normalizeBlock(block, scope)
     if body.statements.isEmpty then (None, scope)
-    else (Some(ScopedBlock(body, span)), ConstantScope.empty)
+    else (Some(ScopedBlock(body, span)), scope.withoutLocals)
 
   private def expression[T](expr: Expr[T], scope: ConstantScope): Expr[T] = expr match
     case literal: Literal[?] => literal.asInstanceOf[Expr[T]]
@@ -173,7 +189,8 @@ private[core] object IrNormalizer:
       normalizeConditional(conditional, scope).asInstanceOf[Expr[T]]
     case math: UnaryMath[?] =>
       math.copy(value = expression(math.value, scope)).asInstanceOf[Expr[T]]
-    case intrinsic: Intrinsic[?] => intrinsic.asInstanceOf[Expr[T]]
+    case intrinsic: Intrinsic[?] =>
+      scope.resolve(intrinsic).getOrElse(intrinsic).asInstanceOf[Expr[T]]
     case conversion: Convert[?, ?] =>
       conversion
         .copy(value = expression(conversion.value, scope))
