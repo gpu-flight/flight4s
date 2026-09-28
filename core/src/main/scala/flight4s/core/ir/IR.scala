@@ -315,7 +315,8 @@ final case class ForLoop(
     from: Expr[Int],
     until: Expr[Int],
     body: Block,
-    span: SourceSpan = SourceSpan.Unknown
+    span: SourceSpan = SourceSpan.Unknown,
+    step: Int = 1
 ) extends ExecutableStmt
 
 final case class Barrier(

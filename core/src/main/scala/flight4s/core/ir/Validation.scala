@@ -29,6 +29,7 @@ enum ValidationCode:
   case LocalArrayIndexOutOfBounds
   case LocalTypeMismatch
   case InvalidLoopIndexName
+  case InvalidLoopStep
   case LoopIndexConflictsWithBinding
   case UnboundLoopIndex
   case UnknownBuffer
@@ -542,6 +543,10 @@ object KernelValidator:
       case loop: ForLoop =>
         val nameErrors =
           validateLoopIndexName(loop.index, parameters, scope, s"$location.index")
+        val stepErrors =
+          if loop.step > 0 then Vector.empty
+          else Vector(ValidationError(ValidationCode.InvalidLoopStep,
+            "loop step must be a positive static integer", s"$location.step", loop.span))
         val rangeErrors =
           validateExpression(loop.from, parameters, s"$location.from", scope) ++
             validateExpression(loop.until, parameters, s"$location.until", scope) ++
@@ -562,7 +567,7 @@ object KernelValidator:
         val bodyScope =
           scope.copy(loopIndexes = scope.loopIndexes + loop.index.name)
 
-        nameErrors ++ rangeErrors ++
+        nameErrors ++ rangeErrors ++ stepErrors ++
           validateBlock(loop.body, parameters, s"$location.body", bodyScope)
 
       case _: Barrier =>

@@ -459,7 +459,8 @@ object CudaDsl:
   def gpuFor(
       indexName: String,
       from: Expr[Int],
-      until: Expr[Int]
+      until: Expr[Int],
+      step: Int = 1
   )(
       body: Expr[Int] => (BlockBuilder ?=> Unit)
   )(using parent: BlockBuilder, position: DslSourcePosition): Unit =
@@ -467,7 +468,7 @@ object CudaDsl:
     val nested = parent.nested()
     body(index)(using nested)
     parent.append(
-      ForLoop(index, from, until, nested.result(), position.span)
+      ForLoop(index, from, until, nested.result(), position.span, step)
     )
 
   def scoped(body: BlockBuilder ?=> Unit)(using
