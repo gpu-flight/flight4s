@@ -101,6 +101,21 @@ State has one CUDA scalar type, empty ranges return the initial value, and no
 parallel reassociation is implied. Floating-point comparison behavior remains
 explicit in the step function.
 
+Ranges also support staged guards, including Scala `for` syntax:
+
+```scala
+for
+  i <- gpuRange("i", literal(0), count)
+  if input(i).read !== literal(0)
+do output(i) := literal(12) / input(i).read
+```
+
+Inside a kernel, this generates a serial loop with a CUDA `if`. `filter` and
+`withFilter` can be chained with maps, `foreach`, and strict `foldLeft`; later
+guards and effects run only for accepted elements. No compacted device array
+is allocated. Filtered `sum` and multi-generator `for ... yield` are not yet
+supported; use a named fold or explicit nested statement loops.
+
 ## Status
 
 Flight4s is pre-alpha and under active design. The current implementation
@@ -113,6 +128,7 @@ provides:
 - typed value-producing conditionals with guarded CUDA expression evaluation;
 - strict named scalar `foldLeft` terminals for ordered per-thread recurrences;
 - named `let` snapshots returning read-only expressions for once-evaluated values;
+- lazy filtered ranges and Scala `for` guards with ordered conditional execution;
 - distinct module constants, rank-aware kernel shared arrays, and lexical local
   arrays;
 - module and kernel validation for memory ownership, scope, access, and static
