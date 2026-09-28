@@ -421,6 +421,16 @@ object CudaDsl:
       kernels.iterator.map(_.ir).toVector
     )
 
+  def atomicAdd[T, Space <: Global | Shared](
+      target: Place[T, Space, ReadWrite],
+      value: Expr[T]
+  )(using
+      addition: AtomicAddType[T],
+      builder: BlockBuilder,
+      position: DslSourcePosition
+  ): Unit =
+    builder.append(AtomicAdd(target, value, addition, position.span))
+
   def accumulate[T](
       target: LocalVariable[T],
       value: Expr[T]

@@ -184,6 +184,29 @@ explicit rounding mode. `convert.i32ToF64` and `convert.u32ToF64` are exact for
 all 32-bit inputs. These convert numeric values, not raw bits; no implicit
 conversion between already-staged integer and floating expressions is added.
 
+## Atomic Updates
+
+Use `atomicAdd` when several threads update the same global or shared element:
+
+```scala
+val histogram = kernel("histogram", params(inOut[Int]("counts"), value[Int]("n"))) { bindings =>
+  val (counts, n) = bindings
+  val i = let("i", blockIdx.x * blockDim.x + threadIdx.x)
+  when(i < n) { atomicAdd(counts(i % literal(16)), literal(1)) }
+}
+```
+
+Initialize the 16 counters before launch. `atomicAdd` supports `Int`, `UInt`, and
+`Float` in read-write global buffers and shared arrays. It returns `Unit`, so it
+can appear in a `foreach` body but not an expression-only callback. Generated
+CUDA uses `::atomicAdd`; the previous value is discarded.
+
+Atomicity does not initialize memory, synchronize a block, or publish unrelated
+memory writes. Shared initialization and consumption still require appropriate
+barriers. Floating-point results can depend on thread execution order. Returning
+the old value, other atomic operations, and explicit memory-order/scope controls
+are not yet included.
+
 ## Status
 
 Flight4s is pre-alpha and under active design. The current implementation
@@ -200,6 +223,7 @@ provides:
 - lazy filtered ranges and Scala `for` guards with ordered conditional execution;
 - staged `flatMap` and multi-generator `for ... yield` for dependent nested loops;
 - typed Float/Double device math with explicit low-precision promotion;
+- typed Int/UInt/Float atomic addition in global and shared memory;
 - distinct module constants, rank-aware kernel shared arrays, and lexical local
   arrays;
 - module and kernel validation for memory ownership, scope, access, and static

@@ -1,7 +1,7 @@
 package flight4s.core.ir
 
 import flight4s.core.abi.ScalarAbi
-import flight4s.core.types.{AccumulatorType, AdditiveType, CudaType, FloatingMathType, I32}
+import flight4s.core.types.{AccumulatorType, AdditiveType, AtomicAddType, CudaType, FloatingMathType, I32}
 
 enum BinaryOperator(val cudaToken: String):
   case Add extends BinaryOperator("+")
@@ -221,6 +221,13 @@ final case class LocalArrayDeclaration[T](
 final case class Store[T, Space <: AddressSpace](
     to: Place[T, Space, ReadWrite],
     value: Expr[T],
+    span: SourceSpan = SourceSpan.Unknown
+) extends ExecutableStmt
+
+final case class AtomicAdd[T, Space <: AddressSpace](
+    target: Place[T, Space, ReadWrite],
+    value: Expr[T],
+    addition: AtomicAddType[T],
     span: SourceSpan = SourceSpan.Unknown
 ) extends ExecutableStmt
 
