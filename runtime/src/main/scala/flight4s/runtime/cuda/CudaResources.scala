@@ -99,6 +99,14 @@ object CudaLaunchFailure:
     override val message: String =
       s"CUDA stream does not belong to the context for kernel $kernelName"
 
+  final case class BufferContextMismatch(
+      kernelName: String,
+      argumentIndex: Int
+  ) extends CudaLaunchFailure:
+    override val message: String =
+      s"CUDA device buffer at argument $argumentIndex does not belong to " +
+        s"the context for kernel $kernelName"
+
   final case class Driver(
       failure: CudaDriverFailure
   ) extends CudaLaunchFailure:
@@ -1480,46 +1488,36 @@ final class CudaFunction[Args <: Tuple] private[cuda] (
   ): Either[CudaLaunchFailure, Unit] =
     module.context.synchronizedLifecycle {
       module.requireOpen()
-      validateInvocation(invocation).flatMap { _ =>
-        validateDynamicSharedMemory(config).flatMap { _ =>
-          validateStream(stream).flatMap { streamHandle =>
-            val arguments = invocation match
-              case value: KernelInvocation[Args] => value.arguments
-              case value: RawCudaInvocation[Args] => value.arguments
-            val request = NativeLaunchRequest.materialize(
-              config,
-              NativeArgumentStorage.materialize(signature.pack(arguments))
-            )
-            val status = stream match
-              case Some(value) =>
-                value.submitTracked(
-                  launchResources(arguments)
-                ) { trackedStreamHandle =>
-                  module.submit(
-                    handle,
-                    trackedStreamHandle,
-                    request
-                  )
-                }
-              case None =>
-                module.context.submitDefaultTracked(
-                  launchResources(arguments)
-                ) {
-                  module.submit(handle, streamHandle, request)
-                }
-            if status.succeeded then Right(())
-            else
-              Left(
-                CudaLaunchFailure.Driver(
-                  CudaDriverFailure.fromStatus(
-                    s"CUDA kernel launch for $name",
-                    status
-                  )
-                )
+      val arguments = invocation match
+        case value: KernelInvocation[Args] => value.arguments
+        case value: RawCudaInvocation[Args] => value.arguments
+      for
+        _ <- validateInvocation(invocation)
+        _ <- validateDynamicSharedMemory(config)
+        streamHandle <- validateStream(stream)
+        _ <- validateBuffers(arguments)
+        request = NativeLaunchRequest.materialize(
+          config,
+          NativeArgumentStorage.materialize(signature.pack(arguments))
+        )
+        status = stream match
+          case Some(value) =>
+            value.submitTracked(launchResources(arguments)) { trackedStreamHandle =>
+              module.submit(handle, trackedStreamHandle, request)
+            }
+          case None =>
+            module.context.submitDefaultTracked(launchResources(arguments)) {
+              module.submit(handle, streamHandle, request)
+            }
+        _ <-
+          if status.succeeded then Right(())
+          else
+            Left(
+              CudaLaunchFailure.Driver(
+                CudaDriverFailure.fromStatus(s"CUDA kernel launch for $name", status)
               )
-          }
-        }
-      }
+            )
+      yield ()
     }
 
   private[flight4s] def nativeHandle: Long =
@@ -1597,6 +1595,13 @@ final class CudaFunction[Args <: Tuple] private[cuda] (
       case resource: CudaInFlightResource => resource
     }.toVector
     module +: buffers
+
+  private def validateBuffers(arguments: Args): Either[CudaLaunchFailure, Unit] =
+    arguments.productIterator.zipWithIndex.collectFirst {
+      case (buffer: CudaDeviceBuffer[?], index)
+          if !(buffer.context eq module.context) =>
+        CudaLaunchFailure.BufferContextMismatch(name, index)
+    }.toLeft(())
 
 object CudaDriverFailure:
   private[cuda] def fromStatus(
