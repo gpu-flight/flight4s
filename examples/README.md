@@ -27,7 +27,55 @@ copies around an explicit-stream kernel launch. It intentionally exposes the
 full lifecycle; it does not demonstrate reusable operator plans or overlap.
 The core runtime still supports asynchronous launches and pinned transfers.
 
-## Run
+## Block-Cooperative Row Softmax
+
+[BlockRowSoftmax.scala](src/main/scala/flight4s/examples/BlockRowSoftmax.scala)
+keeps the serial example above intact and assigns one 128-thread block to each
+row. `gpuRange(...).by(128)` gives each thread its strided columns. Scala
+expression functions, folds, and sums build the per-thread work; explicit
+shared-memory stores and block barriers combine those partial results.
+
+- A Float scratch array uses 512 bytes per block and is reused between phases.
+- Threads without columns contribute negative infinity to max and zero to sum.
+- Two seven-stage trees combine the block maximum and denominator.
+- Every barrier is outside lane-varying branches. An extra barrier protects
+  scratch reuse after all threads snapshot the maximum.
+- The fixed tree changes addition order from the serial example. Numerical
+  tolerance, not bitwise equality with serial softmax, is the contract.
+
+`BlockRowSoftmax.run(values, rows, columns, deviceOrdinal = 0)` uses the same
+finite-input and shape validation and preserves the input array. It launches
+exactly `(128, 1, 1)` threads per block. **Direct users of its exposed definition
+must use that shape too**; generic launch metadata does not yet express this
+algorithm-specific constraint. This is a correctness example, not a benchmark
+or a tuned replacement for cuDNN.
+
+```shell
+sbt "examples/runMain flight4s.examples.BlockRowSoftmax --cuda-source"
+sbt -Dflight4s.cuda.native.path=<absolute-library-path> "examples/runMain flight4s.examples.BlockRowSoftmax"
+```
+
+The native test covers 13 fixtures and 74,191 probabilities per pass, repeats
+every fixture, and compares against Double reference results (absolute error
+at most 2e-6; row-sum error at most 2e-5). Widths range from 1 to 4,097, including
+warp/block boundaries, tails, large offsets, equal logits, and Float extrema.
+Racecheck, synccheck, and memcheck all reported zero issues on the tested GPU.
+These observations are not a proof for every input, toolkit, or device.
+
+For the installed Windows tooling, run the GPU fixture under Compute Sanitizer
+by wrapping the Java sbt launcher so child JVMs are tracked:
+
+```powershell
+compute-sanitizer --tool racecheck --target-processes all --error-exitcode 1 `
+  java "-Dflight4s.cuda.native.path=$native" -jar <sbt-launch.jar> `
+  "examples/testOnly flight4s.examples.BlockRowSoftmaxJniSuite"
+```
+
+Repeat with `--tool synccheck` and `--tool memcheck`. Use the actual launcher and
+native-library paths on your machine. Portable contracts run with
+`sbt "examples/testOnly flight4s.examples.BlockRowSoftmaxSuite"`.
+
+## Run the Serial Example
 
 From the repository root, inspect generated CUDA without configuring JNI:
 

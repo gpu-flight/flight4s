@@ -537,6 +537,11 @@ It accepts finite row-major Float logits and uses one serial row per thread.
 This is an end-to-end correctness example, not a performance-tuned softmax.
 See [examples/README.md](examples/README.md) for contracts and test commands.
 
+The [block-cooperative softmax](examples/src/main/scala/flight4s/examples/BlockRowSoftmax.scala)
+uses one 128-thread block per row, strided functional ranges, and explicit
+shared-memory reduction trees. It has a complete `main` and GPU numerical and
+sanitizer coverage; it is not yet a performance-tuned inference operator.
+
 ## Build
 
 Flight4s requires JDK 17 or newer and sbt:
