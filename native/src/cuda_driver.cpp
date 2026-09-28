@@ -613,9 +613,12 @@ CudaDriverStatus CudaDriver::copy_host_to_device(
   if (current.push_result() != CUDA_SUCCESS) {
     return make_driver_status(current.push_result());
   }
-  return finish_context_operation(
-      cuMemcpyHtoD(destination_address, source, native_size),
-      current);
+  auto result = cuMemcpyHtoD(destination_address, source, native_size);
+  if (result == CUDA_SUCCESS) {
+    // Pageable HtoD may return after staging, before DMA reaches the device.
+    result = cuStreamSynchronize(CU_STREAM_LEGACY);
+  }
+  return finish_context_operation(result, current);
 }
 
 CudaDriverStatus CudaDriver::copy_host_to_device_async(

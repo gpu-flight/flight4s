@@ -1,4 +1,5 @@
 #include "flight4s/cuda/cuda_driver.hpp"
+#include "flight4s/cuda/current_context_scope.hpp"
 
 #include <cuda.h>
 
@@ -116,6 +117,35 @@ int main(int argument_count, char** arguments) {
     if (!completed_query.complete) {
       throw std::runtime_error(
           "synchronized event did not report completion");
+    }
+
+    {
+      const std::vector<std::int32_t> pageable_source(8 * 1024 * 1024, 37);
+      const auto byte_count = pageable_source.size() * sizeof(std::int32_t);
+      const auto allocation = driver.allocate_device_memory(context, byte_count);
+      require_success(allocation.status, "allocate pageable upload target");
+      memory = allocation.address;
+      flight4s::cuda::CurrentContextScope current(context);
+      require_success(flight4s::cuda::make_driver_status(current.push_result()),
+                      "enter upload test context");
+      for (int iteration = 0; iteration < 32; ++iteration) {
+        require_success(driver.copy_host_to_device(
+                            context, memory, 0, pageable_source.data(), byte_count),
+                        "synchronous pageable upload");
+        // A successful synchronous upload must be ready for any subsequent stream.
+        require_success(flight4s::cuda::make_driver_status(cuStreamQuery(CU_STREAM_LEGACY)),
+                        "pageable upload completed before return");
+      }
+      std::vector<std::int32_t> copied(pageable_source.size());
+      require_success(driver.copy_device_to_host(context, copied.data(), memory, 0, byte_count),
+                      "read pageable upload target");
+      if (copied != pageable_source) {
+        throw std::runtime_error("pageable upload changed values");
+      }
+      require_success(flight4s::cuda::make_driver_status(current.close()),
+                      "restore upload test context");
+      require_success(driver.free_device_memory(context, memory), "free pageable upload target");
+      memory = 0;
     }
 
     const std::array<std::int32_t, 4> host_source{

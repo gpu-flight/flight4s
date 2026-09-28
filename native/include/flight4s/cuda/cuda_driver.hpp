@@ -163,6 +163,7 @@ class CudaDriver final {
       CUcontext context,
       CUdeviceptr address) const;
 
+  // Success means the upload is complete, including for pageable host memory.
   [[nodiscard]] CudaDriverStatus copy_host_to_device(
       CUcontext context,
       CUdeviceptr destination,

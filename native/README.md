@@ -27,6 +27,17 @@ context synchronization; default-stream launches complete through context
 synchronization. Closing a stream or context drains the tracked work owned by
 that completion boundary before native destruction.
 
+Synchronous host-to-device copies guarantee completion on return for pageable
+as well as pinned memory. CUDA's `cuMemcpyHtoD` alone may return after pageable
+data reaches internal staging but before DMA reaches the device. The native
+wrapper therefore waits on `CU_STREAM_LEGACY` after a successful copy and
+propagates any wait failure. It does not call `cuCtxSynchronize`; explicitly
+asynchronous pinned copies retain their existing stream-ordered behavior.
+The legacy stream has CUDA's normal dependencies on blocking streams, but does
+not impose an ordering dependency on unrelated nonblocking streams.
+
+Reference: [NVIDIA copy synchronization behavior](https://docs.nvidia.com/cuda/cuda-driver-api/api-sync-behavior.html).
+
 ## Requirements
 
 - CMake 3.24 or newer
@@ -59,6 +70,13 @@ ownership, validate event completion and stream waits, round-trip bytes through
 synchronous copies, and execute ordinary and clustered launches through
 `cuLaunchKernelEx` while verifying context restoration. They require a CUDA
 device with compute capability 9.0 or newer.
+
+The driver test also repeats 32 MiB pageable uploads and queries legacy-stream
+completion immediately after each return. This regression failed with
+`CUDA_ERROR_NOT_READY` before the explicit completion wait. A JNI test,
+`CudaSynchronousUploadJniSuite`, consumes changing uploads immediately from a
+nonblocking stream across five sizes and checks 2,916,648 values plus tail
+sentinels. No extra context synchronization is inserted between copy and launch.
 
 ```shell
 cmake -S native -B native/build \

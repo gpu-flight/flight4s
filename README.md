@@ -499,7 +499,9 @@ essential: bypassing it can violate the assumptions of specialized code.
   function's context. A mismatch returns `BufferContextMismatch` with a
   zero-based argument index before address packing or resource retention.
 - **Copies:** Device-buffer copies are whole-buffer and synchronous through
-  temporary pageable direct staging. Reusable `CudaPinnedBuffer[T]` storage
+  temporary pageable direct staging. A successful upload completes device DMA
+  before returning, so a subsequent nonblocking-stream launch can consume it.
+  Reusable `CudaPinnedBuffer[T]` storage
   provides a page-locked synchronous path without repeated direct-buffer
   allocation; its same-context device-buffer transfers also support explicit-stream
   `cuMemcpyHtoDAsync` and `cuMemcpyDtoHAsync` operations.
