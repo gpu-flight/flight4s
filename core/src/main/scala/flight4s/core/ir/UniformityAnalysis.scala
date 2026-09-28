@@ -61,6 +61,8 @@ private[core] object UniformityScope:
   val empty: UniformityScope = UniformityScope()
 
 private[core] object UniformityAnalysis:
+  import EffectAnalysis.modifiedLocalNames
+
   private val intrinsicUniformities: Map[String, Uniformity] = Map(
     "threadIdx.x" -> Uniformity.Varying,
     "threadIdx.y" -> Uniformity.Varying,
@@ -194,20 +196,3 @@ private[core] object UniformityAnalysis:
   ): Uniformity =
     expression(loop.from, scope).join(expression(loop.until, scope))
 
-  private def modifiedLocalNames(block: Block): Set[String] =
-    block.statements.flatMap(modifiedLocalNames).toSet
-
-  private def modifiedLocalNames(statement: Stmt): Set[String] = statement match
-    case store: Store[?, ?] =>
-      store.to match
-        case local: LocalVariable[?] => Set(local.name)
-        case _ => Set.empty
-    case accumulation: Accumulate[?] => Set(accumulation.target.name)
-    case branch: IfThen =>
-      modifiedLocalNames(branch.thenBlock) ++
-        branch.elseBlock.toVector.flatMap(modifiedLocalNames).toSet
-    case scoped: ScopedBlock => modifiedLocalNames(scoped.body)
-    case loop: ForLoop => modifiedLocalNames(loop.body)
-    case _: LocalDeclaration[?] | _: LocalArrayDeclaration[?] |
-        _: AtomicAdd[?, ?] | _: AtomicFetchAdd[?, ?] | _: WarpVote[?] | _: WarpShuffle[?, ?] |
-        _: Barrier | _: WarpBarrier => Set.empty
