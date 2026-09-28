@@ -53,6 +53,11 @@ callbacks expression-only. Reusing an `Expr` does not snapshot or memoize a
 load; use `local` when a device value must be stored before later mutations.
 Automatic grid distribution and parallel reductions are not implied by this API.
 
+Reusable statement helpers can use `scoped { ... }` to isolate temporary locals
+between calls. Each body becomes a lexical CUDA block, with the same explicit
+stores and synchronization rules. Outer bindings remain visible; active names
+cannot be shadowed, and scope-local values cannot be used after the scope ends.
+
 ## Status
 
 Flight4s is pre-alpha and under active design. The current implementation
@@ -61,6 +66,7 @@ provides:
 - CUDA scalar type witnesses, including F16, BF16, and FP8 formats;
 - typed expressions, places, statements, control flow, and reductions;
 - lazy staged `gpuRange.map` composition with typed `sum` and `foreach` terminals;
+- lexical `scoped` bodies for reusable higher-order Scala statement helpers;
 - distinct module constants, rank-aware kernel shared arrays, and lexical local
   arrays;
 - module and kernel validation for memory ownership, scope, access, and static
