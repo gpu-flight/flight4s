@@ -6,6 +6,7 @@ enum DslErrorCode:
   case SharedMemoryDeclarationOutsideKernelBody
   case StatementInsideExpression
   case InvalidWarpReductionGroup
+  case InvalidBlockReductionShape
 
 final case class DslError(
     code: DslErrorCode,

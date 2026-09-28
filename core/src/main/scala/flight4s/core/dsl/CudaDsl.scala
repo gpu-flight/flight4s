@@ -5,11 +5,13 @@ import scala.annotation.targetName
 
 import flight4s.core.abi.ScalarAbi
 import flight4s.core.ir.*
+import flight4s.core.launch.{Block as LaunchBlock}
 import flight4s.core.types.*
 
 object CudaDsl:
   final class BlockBuilder private[dsl] (
-      private val sharedDeclarations: Option[ArrayBuffer[SharedArray[?, ?]]]
+      private val sharedDeclarations: Option[ArrayBuffer[SharedArray[?, ?]]],
+      private val collectiveBlocks: ArrayBuffer[BlockShapeRequirement] = ArrayBuffer.empty
   ):
     private val statements = ArrayBuffer.empty[Stmt]
 
@@ -30,7 +32,14 @@ object CudaDsl:
           )
 
     private[dsl] def nested(): BlockBuilder =
-      BlockBuilder(None)
+      BlockBuilder(None, collectiveBlocks)
+
+    private[dsl] def requireBlock(shape: LaunchBlock, span: SourceSpan): Unit =
+      ExpressionStaging.requireStatementsAllowed(span)
+      collectiveBlocks += BlockShapeRequirement(shape, span)
+
+    private[dsl] def blockRequirements: Vector[BlockShapeRequirement] =
+      collectiveBlocks.toVector.distinct
 
     private[dsl] def result(): Block =
       Block(statements.toVector)
@@ -230,7 +239,9 @@ object CudaDsl:
         name,
         signature,
         builder.result(),
-        builder.sharedMemory
+        builder.sharedMemory,
+        requiredBlock = builder.blockRequirements.headOption.map(_.shape),
+        blockRequirements = builder.blockRequirements
       )
     )
 
@@ -515,6 +526,16 @@ object CudaDsl:
   object bits:
     def popCount[T](value: Expr[T])(using wordType: BitwiseType[T], position: DslSourcePosition): Expr[Int] =
       PopulationCount(value, wordType, position.span)
+
+  object block:
+    def reduction[T](name: String, shape: LaunchBlock)(using
+        valueType: CudaType[T], builder: BlockBuilder, position: DslSourcePosition
+    ): BlockReduction[T] =
+      val count = BigInt(shape.x) * shape.y * shape.z
+      if count > 1024 || (count & (count - 1)) != 0 then
+        throw DslError(DslErrorCode.InvalidBlockReductionShape,
+          "block reduction requires a power-of-two thread count from 1 through 1024", position.span)
+      new BlockReduction(sharedArray[T](name, count.toInt), shape, count.toInt, valueType)
 
   object warp:
     def reduceSum[T](name: String, mask: UInt, value: Expr[T], width: Int = 32)(using
