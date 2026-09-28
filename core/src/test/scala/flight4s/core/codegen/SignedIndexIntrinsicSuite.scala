@@ -32,4 +32,4 @@ class SignedIndexIntrinsicSuite extends FunSuite:
         |  out[1] = (-7 / static_cast<int>(blockDim.x));
         |  out[2] = (-7 % static_cast<int>(blockDim.x));
         |}
-        |""".stripMargin)
+        |""".stripMargin.replace("\r\n", "\n"))

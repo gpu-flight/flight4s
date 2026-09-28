@@ -442,6 +442,13 @@ artifacts and caches. Raw CUDA can declare the same contract through
 responsible for matching that declaration to the handwritten source. This is
 not automatic shape inference, a device-limit check, or a CUDA launch bound.
 
+For DSL kernels, the normalizer also specializes `blockDim.x/y/z` from this
+contract before CUDA generation. With the shape above, `blockDim.x * literal(2)`
+becomes `256`, and comparisons against those known dimensions can select a
+branch. Thread indices stay dynamic. Kernels without a required shape and
+handwritten raw CUDA are not specialized. The typed launch check remains
+essential: bypassing it can violate the assumptions of specialized code.
+
 - **Launches:** Typed launches are asynchronous on CUDA's default stream or an
   owned explicit stream. `CudaContext.synchronize()` waits for all context
   work, while `CudaStream.synchronize()` waits for one explicit stream; launch
@@ -497,8 +504,8 @@ affected caches if external headers change at the same path.
   generated/raw provenance, resolved options, target, compiler version,
   generated-source codegen version, program name, and kernel ABI/launch metadata.
   Encoding v3 includes optional exact block dimensions. Previous encoding-v2
-  entries become cache misses. Codegen v24 separately fixes signed indexing
-  intrinsic emission; the store remains schema v2.
+  entries become cache misses. Codegen v25 specializes required block dimensions
+  on top of v24's signed indexing repair; the store remains schema v2.
 - **Memory:** `NvrtcCompilationCache` is a caller-owned bounded in-memory LRU
   of successful PTX compilations. Cache hits rebind PTX metadata to the current
   typed compilation input.

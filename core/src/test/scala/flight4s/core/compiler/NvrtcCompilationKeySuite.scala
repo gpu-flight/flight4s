@@ -28,6 +28,10 @@ class NvrtcCompilationKeySuite extends FunSuite:
     assertEquals(first.toString, first.hex)
     assertEquals(
       first.hex,
+      "9e1bfbdbfe9584e6e362405632bf2bd47476b6724d74f8e22793d9ecd187d732"
+    )
+    assertEquals(
+      derive(generated, codegenVersion = 24).hex,
       "2d1359c08ae1c08efad87c0b31b77278803af0f6bb6aafdef0197cbff97e5661"
     )
     // The previous codegen emitted uncast unsigned CUDA indexing fields.
