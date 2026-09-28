@@ -75,6 +75,8 @@ private[core] object LocalCommonSubexpressionElimination:
       val rewritten = statement match
         case declaration: LocalDeclaration[?] =>
           declaration.copy(initial = rewriter.expression(declaration.initial))
+        case vote: WarpVote[?] =>
+          vote.copy(mask = rewriter.expression(vote.mask), predicate = rewriter.expression(vote.predicate))
         case store: Store[?, ?] =>
           rewriteStore(store, rewriter)
         case atomic: AtomicAdd[?, ?] =>
@@ -212,6 +214,7 @@ private[core] object LocalCommonSubexpressionElimination:
   private def ownExpressions(statement: Stmt): Vector[Expr[?]] = statement match
     case declaration: LocalDeclaration[?] => Vector(declaration.initial)
     case _: LocalArrayDeclaration[?] => Vector.empty
+    case vote: WarpVote[?] => Vector(vote.mask, vote.predicate)
     case store: Store[?, ?] => placeExpressions(store.to) :+ store.value
     case atomic: AtomicAdd[?, ?] => placeExpressions(atomic.target) :+ atomic.value
     case atomic: AtomicFetchAdd[?, ?] => placeExpressions(atomic.target) :+ atomic.value
@@ -295,6 +298,7 @@ private[core] object LocalCommonSubexpressionElimination:
     case declaration: LocalDeclaration[?] =>
       collectNames(declaration.initial) + declaration.local.name
     case declaration: LocalArrayDeclaration[?] => Set(declaration.array.name)
+    case vote: WarpVote[?] => collectNames(vote.mask) ++ collectNames(vote.predicate) + vote.local.name
     case store: Store[?, ?] => collectNames(store.to) ++ collectNames(store.value)
     case atomic: AtomicAdd[?, ?] => collectNames(atomic.target) ++ collectNames(atomic.value)
     case atomic: AtomicFetchAdd[?, ?] =>

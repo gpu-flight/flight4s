@@ -508,6 +508,26 @@ object CudaDsl:
   ): Unit =
     builder.append(Barrier(position.span))
 
+  object warp:
+    def ballot(name: String, mask: Expr[UInt], predicate: Expr[Boolean])(using
+        BlockBuilder, DslSourcePosition
+    ): Expr[UInt] = vote(name, WarpVoteOperator.Ballot, mask, predicate)
+
+    def all(name: String, mask: Expr[UInt], predicate: Expr[Boolean])(using
+        BlockBuilder, DslSourcePosition
+    ): Expr[Boolean] = vote(name, WarpVoteOperator.All, mask, predicate)
+
+    def any(name: String, mask: Expr[UInt], predicate: Expr[Boolean])(using
+        BlockBuilder, DslSourcePosition
+    ): Expr[Boolean] = vote(name, WarpVoteOperator.Any, mask, predicate)
+
+    private def vote[T](name: String, operator: WarpVoteOperator[T], mask: Expr[UInt], predicate: Expr[Boolean])(using
+        builder: BlockBuilder, position: DslSourcePosition
+    ): Expr[T] =
+      val result = LocalVariable(name, operator.resultType, position.span)
+      builder.append(WarpVote(result, operator, mask, predicate, position.span))
+      Load(result, position.span)
+
   object threadIdx:
     def x: Expr[Int] = Intrinsic("threadIdx.x", I32)
     def y: Expr[Int] = Intrinsic("threadIdx.y", I32)

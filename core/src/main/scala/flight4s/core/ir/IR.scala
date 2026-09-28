@@ -1,7 +1,7 @@
 package flight4s.core.ir
 
 import flight4s.core.abi.ScalarAbi
-import flight4s.core.types.{AccumulatorType, AdditiveType, AtomicAddType, CudaType, FloatingMathType, I32}
+import flight4s.core.types.{AccumulatorType, AdditiveType, AtomicAddType, CudaType, FloatingMathType, I32, UInt}
 
 enum BinaryOperator(val cudaToken: String):
   case Add extends BinaryOperator("+")
@@ -215,6 +215,14 @@ final case class LocalDeclaration[T](
 
 final case class LocalArrayDeclaration[T](
     array: LocalArray[T],
+    span: SourceSpan = SourceSpan.Unknown
+) extends ScopedDeclaration
+
+final case class WarpVote[T](
+    local: LocalVariable[T],
+    operator: WarpVoteOperator[T],
+    mask: Expr[UInt],
+    predicate: Expr[Boolean],
     span: SourceSpan = SourceSpan.Unknown
 ) extends ScopedDeclaration
 

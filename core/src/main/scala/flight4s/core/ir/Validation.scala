@@ -1,6 +1,6 @@
 package flight4s.core.ir
 
-import flight4s.core.types.{BF16, Bool, CudaType, F16, F32, F64, FP8E4M3, FP8E5M2, I32, U32}
+import flight4s.core.types.{BF16, Bool, CudaType, F16, F32, F64, FP8E4M3, FP8E5M2, I32, U32, UInt}
 
 enum ValidationCode:
   case InvalidConstantName
@@ -38,6 +38,7 @@ enum ValidationCode:
   case BufferTypeMismatch
   case WriteToReadOnlyBuffer
   case InvalidAtomicAddressSpace
+  case EmptyWarpMask
   case UnknownConstant
   case ConstantTypeMismatch
   case ConstantIndexOutOfBounds
@@ -381,6 +382,17 @@ object KernelValidator:
 
           (errors ++ declarationErrors, nextScope)
 
+        case ((errors, scope), (vote: WarpVote[?], index)) =>
+          val statementLocation = s"$location.statements[$index]"
+          val nameErrors = validateLocalName(vote.local, parameters, scope, statementLocation)
+          val declarationErrors = nameErrors ++ validateWarpVote(vote, parameters, statementLocation, scope)
+          val nextScope =
+            if nameErrors.isEmpty then scope.copy(
+              locals = scope.locals.updated(vote.local.name, vote.local.valueType)
+            )
+            else scope
+          (errors ++ declarationErrors, nextScope)
+
         case ((errors, scope), (atomic: AtomicFetchAdd[?, ?], index)) =>
           val statementLocation = s"$location.statements[$index]"
           val nameErrors = validateLocalName(atomic.local, parameters, scope, statementLocation)
@@ -540,6 +552,28 @@ object KernelValidator:
 
       case _: Barrier =>
         Vector.empty
+
+  private def validateWarpVote(
+      vote: WarpVote[?],
+      parameters: Map[String, KernelParam],
+      location: String,
+      scope: ValidationScope
+  ): Vector[ValidationError] =
+    val mask: Expr[?] = vote.mask
+    val maskErrors = mask match
+      case Literal(value: UInt, _, _) if value.toIntBits == 0 =>
+        Vector(ValidationError(ValidationCode.EmptyWarpMask,
+          "a calling lane must belong to a nonempty warp participation mask", s"$location.mask", vote.span))
+      case _ => Vector.empty
+    maskErrors ++
+      validateExpression(vote.mask, parameters, s"$location.mask", scope) ++
+      validateExpression(vote.predicate, parameters, s"$location.predicate", scope) ++
+      requireSameType(vote.mask.valueType, U32, "warp vote mask must have CUDA unsigned int type",
+        s"$location.mask", vote.span) ++
+      requireSameType(vote.predicate.valueType, Bool, "warp vote predicate must have CUDA bool type",
+        s"$location.predicate", vote.span) ++
+      requireSameType(vote.local.valueType, vote.operator.resultType,
+        "warp vote result type does not match the operator", location, vote.span, ValidationCode.LocalTypeMismatch)
 
   private def validateAtomicAdd(
       target: Place[?, ?, ?],

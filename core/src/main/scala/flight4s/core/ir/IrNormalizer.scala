@@ -78,6 +78,10 @@ private[core] object IrNormalizer:
 
     case declaration: LocalArrayDeclaration[?] => (Some(declaration), scope)
 
+    case vote: WarpVote[?] =>
+      (Some(vote.copy(mask = expression(vote.mask, scope), predicate = expression(vote.predicate, scope))),
+        scope.without(vote.local.name))
+
     case store: Store[?, ?] =>
       val normalized = normalizeStore(store, scope)
       val nextScope = normalized.to match
