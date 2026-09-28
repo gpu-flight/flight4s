@@ -730,6 +730,14 @@ object KernelValidator:
             binary.right.span
           ) ++ operatorErrors
 
+      case shift: UnsignedShift =>
+        validateExpression(shift.value, parameters, s"$location.value", scope) ++
+          validateExpression(shift.distance, parameters, s"$location.distance", scope) ++
+          requireSameType(shift.value.valueType, U32,
+            "unsigned shift value must have CUDA unsigned int type", s"$location.value", shift.value.span) ++
+          requireSameType(shift.distance.valueType, I32,
+            "unsigned shift distance must have CUDA int type", s"$location.distance", shift.distance.span)
+
       case comparison: Compare[?] =>
         validateExpression(
           comparison.left,

@@ -1,6 +1,6 @@
 package flight4s.core.ir
 
-import flight4s.core.types.{Bool, I32}
+import flight4s.core.types.{Bool, I32, U32, UInt}
 
 private[core] object IrNormalizer:
   private final case class ConstantScope(
@@ -161,6 +161,7 @@ private[core] object IrNormalizer:
     case literal: Literal[?] => literal.asInstanceOf[Expr[T]]
     case binary: Binary[?] =>
       normalizeBinary(binary, scope).asInstanceOf[Expr[T]]
+    case shift: UnsignedShift => normalizeUnsignedShift(shift, scope).asInstanceOf[Expr[T]]
     case comparison: Compare[?] =>
       normalizeComparison(comparison, scope).asInstanceOf[Expr[T]]
     case conditional: Conditional[?] =>
@@ -256,6 +257,25 @@ private[core] object IrNormalizer:
       .orElse(simplifyIntegerIdentity(binary, left, right))
       .getOrElse(binary.copy(left = left, right = right))
 
+  private def normalizeUnsignedShift(shift: UnsignedShift, scope: ConstantScope): Expr[UInt] =
+    val value = expression(shift.value, scope)
+    val distance = expression(shift.distance, scope)
+    val folded = for
+      bits <- unsignedLiteralBits(value)
+      count <- integerLiteralValue(distance)
+    yield
+      val result = shift.operator match
+        case UnsignedShiftOperator.Left => bits << (count & 31)
+        case UnsignedShiftOperator.Right => bits >>> (count & 31)
+      Literal(UInt.fromBits(result), U32, shift.span)
+    folded.getOrElse(shift.copy(value = value, distance = distance))
+
+  private def unsignedLiteralBits(expression: Expr[?]): Option[Int] = expression match
+    case literal: Literal[?] if literal.valueType == U32 => literal.value match
+      case value: UInt => Some(value.toIntBits)
+      case _ => None
+    case _ => None
+
   private def normalizeComparison[T](
       comparison: Compare[T],
       scope: ConstantScope
@@ -336,6 +356,7 @@ private[core] object IrNormalizer:
     expression match
       case literal: Literal[?] => literal.copy(span = span).asInstanceOf[Expr[T]]
       case binary: Binary[?] => binary.copy(span = span).asInstanceOf[Expr[T]]
+      case shift: UnsignedShift => shift.copy(span = span).asInstanceOf[Expr[T]]
       case comparison: Compare[?] => comparison.copy(span = span).asInstanceOf[Expr[T]]
       case conditional: Conditional[?] => conditional.copy(span = span).asInstanceOf[Expr[T]]
       case math: UnaryMath[?] => math.copy(span = span).asInstanceOf[Expr[T]]

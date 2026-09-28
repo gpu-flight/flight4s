@@ -110,7 +110,15 @@ val maskedTotal = gpuRange("i", literal(0), literal(32))
 ```
 
 Use parentheses around bitwise expressions when combining them with comparisons.
-Shifts, complement, and population-count operations are not implemented yet.
+Unsigned `UInt` values also support `<<`, `>>`, and `>>>` with `Expr[Int]`
+counts. Both unsigned right shifts zero-fill; counts use their low five bits,
+so shifting by 32 is the same as shifting by 0. For example:
+
+```scala
+val oneBit = literal(UInt.fromBits(1)) << (threadIdx.x & literal(31))
+```
+
+Signed shifts, complement, and population count remain separate increments.
 
 For a strict scalar recurrence, use a named `foldLeft` inside a kernel body:
 

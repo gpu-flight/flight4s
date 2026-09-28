@@ -163,6 +163,9 @@ private[core] object LocalCommonSubexpressionElimination:
             right = this.expression(binary.right)
           )
           .asInstanceOf[Expr[T]]
+      case shift: UnsignedShift =>
+        shift.copy(value = this.expression(shift.value), distance = this.expression(shift.distance))
+          .asInstanceOf[Expr[T]]
       case comparison: Compare[?] =>
         comparison
           .copy(
@@ -248,6 +251,9 @@ private[core] object LocalCommonSubexpressionElimination:
       case binary: Binary[?] =>
         collectCounts(binary.left, counts)
         collectCounts(binary.right, counts)
+      case shift: UnsignedShift =>
+        collectCounts(shift.value, counts)
+        collectCounts(shift.distance, counts)
       case comparison: Compare[?] =>
         collectCounts(comparison.left, counts)
         collectCounts(comparison.right, counts)
@@ -288,7 +294,7 @@ private[core] object LocalCommonSubexpressionElimination:
             left <- integerKey(binary.left)
             right <- integerKey(binary.right)
           yield IntegerExpressionKey.Binary(binary.operator, left, right)
-        case _: Compare[?] | _: Conditional[?] | _: UnaryMath[?] | _: Convert[?, ?] | _: ToAccumulator[?, ?] |
+        case _: UnsignedShift | _: Compare[?] | _: Conditional[?] | _: UnaryMath[?] | _: Convert[?, ?] | _: ToAccumulator[?, ?] |
             _: ReduceSum[?, ?] | _: Load[?, ?, ?] => None
 
   private def collectNames(kernel: KernelIR[?]): Set[String] =
@@ -330,6 +336,7 @@ private[core] object LocalCommonSubexpressionElimination:
     case _: Literal[?] => Set.empty
     case scalar: ScalarParam[?] => Set(scalar.name)
     case binary: Binary[?] => collectNames(binary.left) ++ collectNames(binary.right)
+    case shift: UnsignedShift => collectNames(shift.value) ++ collectNames(shift.distance)
     case comparison: Compare[?] =>
       collectNames(comparison.left) ++ collectNames(comparison.right)
     case conditional: Conditional[?] =>

@@ -80,6 +80,8 @@ private[core] object UniformityAnalysis:
     case _: Literal[?] => Uniformity.GridUniform
     case binary: Binary[?] =>
       expression(binary.left, scope).join(expression(binary.right, scope))
+    case shift: UnsignedShift =>
+      expression(shift.value, scope).join(expression(shift.distance, scope))
     case comparison: Compare[?] =>
       expression(comparison.left, scope).join(expression(comparison.right, scope))
     case conditional: Conditional[?] =>
