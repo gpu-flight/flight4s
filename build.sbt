@@ -26,6 +26,10 @@ lazy val runtime = (project in file("runtime"))
   .dependsOn(core)
   .settings(
     name := "flight4s-runtime",
+    // A native library cannot be reloaded into sbt's next test classloader.
+    Test / fork := sys.props.contains("flight4s.cuda.native.path"),
+    Test / javaOptions ++= sys.props.get("flight4s.cuda.native.path")
+      .map(path => s"-Dflight4s.cuda.native.path=$path").toSeq,
     libraryDependencies += "org.scalameta" %% "munit" % "1.0.0" % Test
   )
 

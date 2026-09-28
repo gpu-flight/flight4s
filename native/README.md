@@ -98,6 +98,19 @@ sbt -Dflight4s.cuda.native.path=/absolute/path/to/flight4s_cuda \
 Without this property, portable Scala test runs skip the JNI-dependent tests.
 Native library packaging and platform classifiers remain future work.
 
+When the property is supplied, runtime tests run in a fresh forked JVM for each
+test task, and the property is forwarded explicitly. This permits repeated
+`test`, `testOnly`, and `testQuick` invocations in one sbt session without trying
+to reload the same DLL into a new sbt classloader. Without the property, runtime
+tests keep their existing in-process behavior. This changes test execution only,
+not application JNI loading or test selection. See [sbt forking](https://www.scala-sbt.org/1.x/docs/Forking.html).
+
+For a repeated native regression run:
+
+```shell
+sbt -Dflight4s.cuda.native.path=/absolute/path/to/flight4s_cuda test test
+```
+
 Run all Scala and native-enabled tests with the same property:
 
 ```shell
