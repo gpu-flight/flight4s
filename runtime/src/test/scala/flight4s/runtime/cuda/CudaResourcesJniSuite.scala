@@ -15,6 +15,65 @@ class CudaResourcesJniSuite extends FunSuite:
   private val nativeLibraryConfigured =
     sys.props.contains("flight4s.cuda.native.path")
 
+  test("filtered ranges guard GPU arithmetic stores and strict recurrence updates"):
+    assume(nativeLibraryConfigured, "set flight4s.cuda.native.path to run JNI tests")
+    val rows = 17
+    val columns = 7
+    val values = Array.tabulate(rows * columns)(i => if i / columns == rows - 1 then 0 else i % 9 - 3)
+    val definition = kernel("filteredRanges", params(
+      input[Int]("source"), output[Int]("recurrences"), output[Int]("selected"),
+      value[Int]("from"), value[Int]("until")
+    )) { bindings =>
+      val (source, recurrences, selected, from, until) = bindings
+      val row = let("row", blockIdx.x * blockDim.x + threadIdx.x)
+      when(row < literal(rows)) {
+        val result = gpuRange("column", from, until)
+          .map(column => source(row * literal(columns) + column).read)
+          .filter(_ !== literal(0)).map(x => literal(12) / x).filter(_ > literal(2))
+          .foldLeft("state", literal(5))((acc, x) => acc * literal(2) + x)
+        recurrences(row) := result
+        for
+          column <- gpuRange("writeColumn", from, until)
+          if source(row * literal(columns) + column).read !== literal(0)
+          if literal(12) / source(row * literal(columns) + column).read > literal(2)
+        do
+          selected(row * literal(columns) + column) :=
+            literal(12) / source(row * literal(columns) + column).read
+      }
+    }
+    val generated = CudaCodegen.generate(definition).fold(error => fail(error.message), identity)
+    val generatedModule = GeneratedCudaModule(
+      generated.cudaSource, generated.sourceMap, generated.compilerOptions, Vector(generated)
+    )
+    val context = openContext()
+    try
+      val artifact = NvrtcCompiler.compile(generatedModule, context.computeCapability, "filtered_ranges.cu")
+        .fold(failure => fail(failure.message + "\n" + failure.compileLog), identity)
+      val module = context.load(artifact).fold(failure => fail(failure.message), identity)
+      val function = module.function(generated).fold(failure => fail(failure.message), identity)
+      val source = context.allocate[Int](values.length).toOption.get
+      val recurrences = context.allocate[Int](rows).toOption.get
+      val selected = context.allocate[Int](values.length).toOption.get
+      assertEquals(source.copyFrom(values), Right(()))
+      for (from, until) <- Vector((0, columns), (1, 5), (3, 3), (5, 2)) do
+        assertEquals(recurrences.copyFrom(Array.fill(rows)(-1)), Right(()))
+        assertEquals(selected.copyFrom(Array.fill(values.length)(-99)), Right(()))
+        assertEquals(function.launch(
+          definition.bind((source, recurrences, selected, from, until)),
+          LaunchConfig(Grid.x(1), LaunchBlock.x(32))
+        ), Right(()))
+        assertEquals(context.synchronize(), Right(()))
+        val expected = Vector.tabulate(rows) { row =>
+          (from until until).map(column => values(row * columns + column))
+            .filter(_ != 0).map(12 / _).filter(_ > 2).foldLeft(5)((acc, x) => acc * 2 + x)
+        }
+        assertEquals(recurrences.copyToArray().toOption.get.toVector, expected)
+        assertEquals(selected.copyToArray().toOption.get.toVector, values.indices.map { i =>
+          if i % columns >= from && i % columns < until && values(i) != 0 && 12 / values(i) > 2
+          then 12 / values(i) else -99
+        }.toVector)
+    finally context.close()
+
   test("let snapshots retain device values and reductions across later source mutation"):
     assume(nativeLibraryConfigured, "set flight4s.cuda.native.path to run JNI tests")
     val rows = 259

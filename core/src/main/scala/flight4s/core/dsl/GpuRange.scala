@@ -13,6 +13,12 @@ final class GpuRange private[dsl] (
   def map[T](valueAt: Expr[Int] => Expr[T]): MappedGpuRange[T] =
     new MappedGpuRange(this, valueAt)
 
+  def filter(predicate: Expr[Int] => Expr[Boolean])(using DslSourcePosition): FilteredGpuRange[Int] =
+    map(identity).filter(predicate)
+
+  def withFilter(predicate: Expr[Int] => Expr[Boolean])(using DslSourcePosition): FilteredGpuRange[Int] =
+    filter(predicate)
+
   /** Stages one ordered local update per element and returns its read-only result expression. */
   def foldLeft[A](accumulatorName: String, initial: Expr[A])(
       step: (Expr[A], Expr[Int]) => Expr[A]
@@ -36,6 +42,15 @@ final class MappedGpuRange[T] private[dsl] (
 ):
   def map[U](transform: Expr[T] => Expr[U]): MappedGpuRange[U] =
     new MappedGpuRange(range, valueAt.andThen(transform))
+
+  def filter(predicate: Expr[T] => Expr[Boolean])(using DslSourcePosition): FilteredGpuRange[T] =
+    new FilteredGpuRange(range, (index, body) =>
+      val value = ExpressionStaging.expression(valueAt(index))
+      when(ExpressionStaging.expression(predicate(value))) { body(value) }
+    )
+
+  def withFilter(predicate: Expr[T] => Expr[Boolean])(using DslSourcePosition): FilteredGpuRange[T] =
+    filter(predicate)
 
   def foldLeft[A](accumulatorName: String, initial: Expr[A])(
       step: (Expr[A], Expr[T]) => Expr[A]
