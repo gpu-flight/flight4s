@@ -120,6 +120,10 @@ private[core] object UniformityAnalysis:
             scope.withLocal(local.name, expression(store.value, scope))
           case _ => scope
 
+      case vote: WarpVote[?] =>
+        // Disjoint participant groups in one physical warp can receive different results.
+        scope.withLocal(vote.local.name, Uniformity.Varying)
+
       case atomic: AtomicFetchAdd[?, ?] =>
         scope.withLocal(atomic.local.name, Uniformity.Varying)
 
@@ -197,4 +201,4 @@ private[core] object UniformityAnalysis:
     case scoped: ScopedBlock => modifiedLocalNames(scoped.body)
     case loop: ForLoop => modifiedLocalNames(loop.body)
     case _: LocalDeclaration[?] | _: LocalArrayDeclaration[?] |
-        _: AtomicAdd[?, ?] | _: AtomicFetchAdd[?, ?] | _: Barrier => Set.empty
+        _: AtomicAdd[?, ?] | _: AtomicFetchAdd[?, ?] | _: WarpVote[?] | _: Barrier => Set.empty

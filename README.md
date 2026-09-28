@@ -221,6 +221,31 @@ and synchronize before consuming output. Ticket assignment is not stable input
 order, and incrementing the counter does not publish the later output store.
 Other atomic operations and explicit memory-order/scope controls remain deferred.
 
+## Warp Votes
+
+Warp votes are named, once-evaluated collective statements:
+
+```scala
+import flight4s.core.types.UInt
+
+val fullMask = literal(UInt.fromBits(-1))
+val accepted = warp.ballot("accepted", fullMask, predicate)
+val allAccepted = warp.all("allAccepted", fullMask, predicate)
+val anyAccepted = warp.any("anyAccepted", fullMask, predicate)
+```
+
+Use these inside a kernel body. `predicate` is `Expr[Boolean]`; ballot returns
+an `Expr[UInt]` snapshot, while all/any return Boolean snapshots. Every calling
+lane must be included in its mask, and participating non-exited lanes must reach
+the same call with a consistent mask. A full mask is not valid inside an
+arbitrary per-thread branch. For a tail, vote before branching on the resulting
+participation predicate or supply a correctly constructed subgroup mask.
+
+Validation checks types, scope, and literal empty masks, not the full runtime
+participation contract. Votes can compose in explicit statement loops but cannot
+be hidden in `map` or `choose` callbacks. They are collective effects, not block
+barriers or memory fences. Shuffle and warp-reduction APIs are not yet included.
+
 ## Status
 
 Flight4s is pre-alpha and under active design. The current implementation
@@ -238,6 +263,7 @@ provides:
 - staged `flatMap` and multi-generator `for ... yield` for dependent nested loops;
 - typed Float/Double device math with explicit low-precision promotion;
 - typed Int/UInt/Float atomic addition in global and shared memory;
+- named warp ballot/all/any snapshots with explicit participation masks;
 - distinct module constants, rank-aware kernel shared arrays, and lexical local
   arrays;
 - module and kernel validation for memory ownership, scope, access, and static

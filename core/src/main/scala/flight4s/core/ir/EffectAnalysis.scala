@@ -9,16 +9,18 @@ private[core] enum EffectMemorySpace:
 private[core] final case class EffectSummary(
     readSpaces: Set[EffectMemorySpace] = Set.empty,
     writtenSpaces: Set[EffectMemorySpace] = Set.empty,
-    hasBarrier: Boolean = false
+    hasBarrier: Boolean = false,
+    hasWarpCollective: Boolean = false
 ):
   def isPure: Boolean =
-    readSpaces.isEmpty && writtenSpaces.isEmpty && !hasBarrier
+    readSpaces.isEmpty && writtenSpaces.isEmpty && !hasBarrier && !hasWarpCollective
 
   def ++(other: EffectSummary): EffectSummary =
     EffectSummary(
       readSpaces ++ other.readSpaces,
       writtenSpaces ++ other.writtenSpaces,
-      hasBarrier || other.hasBarrier
+      hasBarrier || other.hasBarrier,
+      hasWarpCollective || other.hasWarpCollective
     )
 
 private[core] object EffectSummary:
@@ -52,6 +54,9 @@ private[core] object EffectAnalysis:
     case declaration: LocalDeclaration[?] =>
       expression(declaration.initial) ++ write(EffectMemorySpace.Local)
     case _: LocalArrayDeclaration[?] => EffectSummary.empty
+    case vote: WarpVote[?] =>
+      expression(vote.mask) ++ expression(vote.predicate) ++
+        write(EffectMemorySpace.Local) ++ EffectSummary(hasWarpCollective = true)
     case store: Store[?, ?] =>
       addressEffects(store.to) ++
         expression(store.value) ++
