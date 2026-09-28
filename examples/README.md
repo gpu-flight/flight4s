@@ -123,6 +123,43 @@ The recurrence follows the standard [Welford update documented by OpenTOPAS](htt
 with population rather than sample normalization. No sample variance, masking,
 cross-thread combination, streaming host API, or normalization operator is added.
 
+## Block-Cooperative Row Statistics
+
+[BlockRowStatistics.scala](src/main/scala/flight4s/examples/BlockRowStatistics.scala)
+uses the same input/result contract as `RowStatistics`, with one 128-thread block
+per row. Threads fold strided columns into local count/mean/M2 tuples, then
+combine them through seven shared-memory stages. This is an explicit algorithm;
+ordinary `foldLeft` remains sequential and is not automatically reassociated.
+
+- Shared storage: 128 Int counts and two 128-element Double arrays, 2,560 bytes.
+- Empty right states are skipped before division; zero-count left states are identities.
+- Counts are converted to Double before weight products, avoiding Int overflow.
+- Every stage snapshots all next values before stores; eight block barriers
+  separate publication and merge stages, outside lane-varying branches.
+- The kernel requires exactly `(128, 1, 1)` threads per block. Its public host
+  entry point validates finite inputs and shapes, and preserves the input.
+
+```shell
+sbt "examples/runMain flight4s.examples.BlockRowStatistics --cuda-source"
+sbt -Dflight4s.cuda.native.path=<absolute-library-path> "examples/runMain flight4s.examples.BlockRowStatistics"
+sbt "examples/testOnly flight4s.examples.BlockRowStatisticsSuite flight4s.examples.RowStatisticsReferenceSuite"
+sbt -Dflight4s.cuda.native.path=<absolute-library-path> "examples/testOnly flight4s.examples.BlockRowStatisticsJniSuite"
+```
+
+The main prints means 128, 1000128, and -7, with population variances 5504,
+5504, and 0. Native tests run 13 fixtures twice, covering 402 statistics per pass
+over 26 launches and widths from 1 to 100,001. They use the same numerical
+tolerances as the serial statistics example. The wider fixture also exercises
+partial-count products above Int.MaxValue. Racecheck reported zero hazards;
+synccheck and memcheck reported zero errors on the tested GPU.
+
+Both variants share a corrected independent decimal oracle: its second pass
+subtracts the squared residual-sum correction for the rounded centering mean.
+Portable regressions ensure subnormal singleton/constant rows have exactly zero
+reference variance. This fixed a test-oracle defect, not a CUDA kernel defect;
+no tolerance was loosened. Serial and cooperative results need not be bitwise
+identical because the grouping order differs. No throughput claim is made.
+
 ## Run the Serial Softmax Example
 
 From the repository root, inspect generated CUDA without configuring JNI:
