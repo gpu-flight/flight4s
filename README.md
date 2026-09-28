@@ -655,6 +655,12 @@ gain and bias. Statistics and normalization use Double; the output is explicitly
 narrowed to Float. It includes a complete `main`, positive-epsilon/input
 validation, independent numerical tests, and inspectable generated CUDA.
 
+[BlockRowLayerNorm](examples/src/main/scala/flight4s/examples/BlockRowLayerNorm.scala)
+uses one exact 128-thread block per row, the existing shared-memory moment
+merge, and a strided output traversal. It retains the serial example's host
+contract; floating-point grouping differs. Numerical tests and memcheck,
+racecheck, and synccheck verify the cooperative implementation.
+
 ## Build
 
 Flight4s requires JDK 17 or newer and sbt:

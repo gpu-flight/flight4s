@@ -213,6 +213,46 @@ claim. Every host call compiles, allocates, copies, launches, and cleans up.
 References: [Layer Normalization paper](https://arxiv.org/abs/1607.06450) and
 [PyTorch's population-variance formula](https://docs.pytorch.org/docs/2.14/generated/torch.nn.LayerNorm.html).
 
+## Block-Cooperative Layer Normalization
+
+[BlockRowLayerNorm.scala](src/main/scala/flight4s/examples/BlockRowLayerNorm.scala)
+retains `RowLayerNorm`'s argument validation, population variance, epsilon,
+affine arithmetic, and output type. One 128-thread block handles each row.
+Threads fold strided inputs locally, merge moments through 2,560 bytes of shared
+memory and eight barriers, then normalize their strided output columns.
+
+The example reuses the package-private Welford update and merge in
+`BlockRowStatistics`; their algorithms are unchanged. The final merge barrier
+publishes the complete mean/M2/count before any thread reads them for output.
+No shared writes follow that point. All barriers are outside lane-varying guards;
+the outer row guard is uniform across a block. Direct launch requires exactly
+`(128, 1, 1)` threads and separate, adequately sized buffers under the same
+contract as the serial example. An undersized grid will leave rows uncomputed.
+
+```shell
+sbt "examples/runMain flight4s.examples.BlockRowLayerNorm --cuda-source"
+sbt -Dflight4s.cuda.native.path=<absolute-library-path> "examples/runMain flight4s.examples.BlockRowLayerNorm"
+sbt "examples/testOnly flight4s.examples.BlockRowLayerNormSuite"
+sbt -Dflight4s.cuda.native.path=<absolute-library-path> "examples/testOnly flight4s.examples.BlockRowLayerNormJniSuite"
+```
+
+Expected main output:
+
+```text
+row 0: -0.7500000 -1.0000000
+row 1: -0.7500000 -1.0000000
+row 2: 0.2500000 1.0000000
+```
+
+Six portable tests cover API/host contracts, source inspection, required geometry,
+uniform barriers, and identical generated merge sections. Three GPU tests cover
+17 fixtures twice (562,978 values per pass), widths through 100,001, constant and
+extreme affine rows, rejected block shapes, extra grid blocks, both stream paths,
+and untouched output tails. The decimal reference and 2e-6-scaled tolerance are
+the same as the serial normalization tests. All three CUDA sanitizers reported
+zero errors (racecheck: zero hazards). Serial and cooperative results need not
+be bitwise identical; no speedup or inference-readiness claim is made.
+
 ## Run the Serial Softmax Example
 
 From the repository root, inspect generated CUDA without configuring JNI:
