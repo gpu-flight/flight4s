@@ -337,7 +337,22 @@ do output(i) := literal(12) / input(i).read
 Inside a kernel, this generates a serial loop with a CUDA `if`. `filter` and
 `withFilter` can be chained with maps, `foreach`, and strict `foldLeft`; later
 guards and effects run only for accepted elements. No compacted device array
-is allocated. Filtered `sum` is not yet supported; use a named fold.
+is allocated. An explicit named sum supports filtered and nested scalar pipelines:
+
+```scala
+val selectedTotal = gpuRange("i", literal(0), count)
+  .filter(_ > literal(0))
+  .map(i => input(i).read)
+  .sum("selectedTotal", literal(0.0f))
+```
+
+Here `input` may contain `Float`, FP16, BF16, or either FP8 format; low-precision
+elements are promoted to the `Float` accumulator before addition. Named sums
+declare a local and add accepted elements in serial traversal order. Empty or
+all-rejected traversals retain the initial value, without adding artificial
+zeros. They require a statement context and do not take a `ReductionPolicy`.
+The existing unfiltered `sum(initial, policy)` remains an expression-only
+reduction with explicit policy metadata. Neither API implies a parallel tree.
 
 Multiple generators use staged `flatMap` to express dependent nested loops:
 
