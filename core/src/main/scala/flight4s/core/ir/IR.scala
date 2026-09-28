@@ -1,7 +1,7 @@
 package flight4s.core.ir
 
 import flight4s.core.abi.ScalarAbi
-import flight4s.core.types.{AccumulatorType, AdditiveType, AtomicAddType, BitwiseType, CudaType, F32, FloatingMathType, FloatVectorType, I32, UInt, WarpShuffleType}
+import flight4s.core.types.{AccumulatorType, AdditiveType, AtomicAddType, AtomicValueType, BitwiseType, CudaType, F32, FloatingMathType, FloatVectorType, I32, UInt, WarpShuffleType}
 
 enum BinaryOperator(val cudaToken: String):
   case Add extends BinaryOperator("+")
@@ -306,6 +306,27 @@ final case class AtomicFetchAdd[T, Space <: AddressSpace](
     addition: AtomicAddType[T],
     span: SourceSpan = SourceSpan.Unknown
 ) extends ScopedDeclaration
+
+final case class AtomicResult[T, Space <: AddressSpace](
+    local: LocalVariable[T],
+    target: Place[T, Space, ReadWrite],
+    operation: AtomicOperation,
+    operands: Vector[Expr[T]],
+    atomicType: AtomicValueType[T],
+    order: MemoryOrder,
+    scope: AtomicScope,
+    failureOrder: Option[MemoryOrder] = None,
+    span: SourceSpan = SourceSpan.Unknown
+) extends ScopedDeclaration
+
+final case class AtomicStore[T, Space <: AddressSpace](
+    target: Place[T, Space, ReadWrite],
+    value: Expr[T],
+    atomicType: AtomicValueType[T],
+    order: MemoryOrder,
+    scope: AtomicScope,
+    span: SourceSpan = SourceSpan.Unknown
+) extends ExecutableStmt
 
 final case class Accumulate[T](
     target: LocalVariable[T],

@@ -40,6 +40,10 @@ enum ValidationCode:
   case BufferTypeMismatch
   case WriteToReadOnlyBuffer
   case InvalidAtomicAddressSpace
+  case InvalidAtomicOrder
+  case InvalidAtomicScope
+  case InvalidAtomicOperands
+  case UnsupportedAtomicOperation
   case EmptyWarpMask
   case InvalidWarpWidth
   case NegativeWarpSourceLane
@@ -438,6 +442,15 @@ object KernelValidator:
             else scope
           (errors ++ declarationErrors, nextScope)
 
+        case ((errors, scope), (atomic: AtomicResult[?, ?], index)) =>
+          val statementLocation = s"$location.statements[$index]"
+          val nameErrors = validateLocalName(atomic.local, parameters, scope, statementLocation)
+          val declarationErrors = nameErrors ++ validateAtomicResult(atomic, parameters, statementLocation, scope)
+          val nextScope =
+            if nameErrors.isEmpty then scope.copy(locals = scope.locals.updated(atomic.local.name, atomic.local.valueType))
+            else scope
+          (errors ++ declarationErrors, nextScope)
+
         case ((errors, scope), (declaration: LocalArrayDeclaration[?], index)) =>
           val statementLocation = s"$location.statements[$index]"
           val declarationValidation =
@@ -501,6 +514,14 @@ object KernelValidator:
       case atomic: AtomicAdd[?, ?] =>
         validateAtomicAdd(atomic.target, atomic.value, atomic.addition, atomic.span,
           parameters, location, scope)
+
+      case atomic: AtomicStore[?, ?] =>
+        validateScopedAtomicTarget(atomic.target, atomic.atomicType, atomic.scope, atomic.span, parameters, location, scope) ++
+          validateExpression(atomic.value, parameters, s"$location.value", scope) ++
+          requireSameType(atomic.value.valueType, atomic.atomicType,
+            "atomic store value type does not match the target", location, atomic.span) ++
+          (if atomic.order.validForStore then Vector.empty else Vector(ValidationError(
+            ValidationCode.InvalidAtomicOrder, "atomic store requires Relaxed, Release, or SequentiallyConsistent", location, atomic.span)))
 
       case accumulation: Accumulate[?] =>
         validatePlace(
@@ -659,6 +680,50 @@ object KernelValidator:
         Vector(ValidationError(ValidationCode.EmptyWarpMask,
           "a calling lane must belong to a nonempty warp participation mask", s"$location.mask", span))
       case _ => Vector.empty
+
+  private def validateScopedAtomicTarget(
+      target: Place[?, ?, ?], atomicType: CudaType[?], atomicScope: AtomicScope, span: SourceSpan,
+      parameters: Map[String, KernelParam], location: String, scope: ValidationScope
+  ): Vector[ValidationError] =
+    val spaceErrors = target match
+      case _: BufferElement[?, ?] => Vector.empty
+      case _: SharedElement[?] if atomicScope == AtomicScope.Block => Vector.empty
+      case _: SharedElement[?] => Vector(ValidationError(ValidationCode.InvalidAtomicScope,
+        "shared atomic storage requires Block scope", location, span))
+      case _ => Vector(ValidationError(ValidationCode.InvalidAtomicAddressSpace,
+        "scoped atomics require global or shared memory", location, span))
+    spaceErrors ++ validatePlace(target, parameters, s"$location.target", isWrite = true, scope = scope) ++
+      requireSameType(target.valueType, atomicType, "atomic capability does not match the target type", location, span)
+
+  private def validateAtomicResult(
+      atomic: AtomicResult[?, ?], parameters: Map[String, KernelParam], location: String, scope: ValidationScope
+  ): Vector[ValidationError] =
+    val operation = atomic.operation
+    val arityErrors =
+      if atomic.operands.size == operation.operandCount then Vector.empty
+      else Vector(ValidationError(ValidationCode.InvalidAtomicOperands,
+        s"$operation requires ${operation.operandCount} operands", location, atomic.span))
+    val typeErrors =
+      if !operation.integralOnly || atomic.atomicType == I32 || atomic.atomicType == U32 then Vector.empty
+      else Vector(ValidationError(ValidationCode.UnsupportedAtomicOperation,
+        s"$operation requires Int or UInt storage", location, atomic.span))
+    val validOrder = operation match
+      case AtomicOperation.Load => atomic.order.validForLoad && atomic.failureOrder.isEmpty
+      case AtomicOperation.CompareExchange => atomic.failureOrder.exists(atomic.order.permitsFailure)
+      case _ => atomic.failureOrder.isEmpty
+    val orderErrors =
+      if validOrder then Vector.empty
+      else Vector(ValidationError(ValidationCode.InvalidAtomicOrder,
+        s"invalid memory order or failure order for $operation", location, atomic.span))
+    validateScopedAtomicTarget(atomic.target, atomic.atomicType, atomic.scope, atomic.span, parameters, location, scope) ++
+      arityErrors ++ typeErrors ++ orderErrors ++
+      requireSameType(atomic.local.valueType, atomic.atomicType,
+        "atomic result type does not match the target", location, atomic.span, ValidationCode.LocalTypeMismatch) ++
+      atomic.operands.zipWithIndex.flatMap { (operand, index) =>
+        validateExpression(operand, parameters, s"$location.operands[$index]", scope) ++
+          requireSameType(operand.valueType, atomic.atomicType,
+            "atomic operand type does not match the target", location, operand.span)
+      }
 
   private def validateAtomicAdd(
       target: Place[?, ?, ?],

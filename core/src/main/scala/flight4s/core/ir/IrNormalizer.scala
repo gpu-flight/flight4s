@@ -115,6 +115,13 @@ private[core] object IrNormalizer:
     case atomic: AtomicFetchAdd[?, ?] =>
       (Some(normalizeAtomicFetch(atomic, scope)), scope.without(atomic.local.name))
 
+    case atomic: AtomicResult[?, ?] =>
+      (Some(atomic.copy(target = place(atomic.target, scope), operands = atomic.operands.map(expression(_, scope)))),
+        scope.without(atomic.local.name))
+
+    case atomic: AtomicStore[?, ?] =>
+      (Some(atomic.copy(target = place(atomic.target, scope), value = expression(atomic.value, scope))), scope)
+
     case accumulation: Accumulate[?] =>
       val normalized = accumulation.copy(value = expression(accumulation.value, scope))
       (Some(normalized), scope.without(accumulation.target.name))

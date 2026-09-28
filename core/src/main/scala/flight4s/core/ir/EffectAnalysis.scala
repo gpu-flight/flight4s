@@ -11,10 +11,11 @@ private[core] final case class EffectSummary(
     writtenSpaces: Set[EffectMemorySpace] = Set.empty,
     hasBarrier: Boolean = false,
     hasWarpCollective: Boolean = false,
-    hasWarpBarrier: Boolean = false
+    hasWarpBarrier: Boolean = false,
+    hasMemoryOrdering: Boolean = false
 ):
   def isPure: Boolean =
-    readSpaces.isEmpty && writtenSpaces.isEmpty && !hasBarrier && !hasWarpCollective && !hasWarpBarrier
+    readSpaces.isEmpty && writtenSpaces.isEmpty && !hasBarrier && !hasWarpCollective && !hasWarpBarrier && !hasMemoryOrdering
 
   def ++(other: EffectSummary): EffectSummary =
     EffectSummary(
@@ -22,7 +23,8 @@ private[core] final case class EffectSummary(
       writtenSpaces ++ other.writtenSpaces,
       hasBarrier || other.hasBarrier,
       hasWarpCollective || other.hasWarpCollective,
-      hasWarpBarrier || other.hasWarpBarrier
+      hasWarpBarrier || other.hasWarpBarrier,
+      hasMemoryOrdering || other.hasMemoryOrdering
     )
 
 private[core] object EffectSummary:
@@ -77,6 +79,14 @@ private[core] object EffectAnalysis:
     case atomic: AtomicFetchAdd[?, ?] =>
       read(atomic.target) ++ expression(atomic.value) ++
         write(spaceOf(atomic.target)) ++ write(EffectMemorySpace.Local)
+    case atomic: AtomicResult[?, ?] =>
+      read(atomic.target) ++ write(EffectMemorySpace.Local) ++
+        (if atomic.operation == AtomicOperation.Load then EffectSummary.empty else write(spaceOf(atomic.target))) ++
+        atomic.operands.foldLeft(EffectSummary.empty)((effects, operand) => effects ++ expression(operand)) ++
+        EffectSummary(hasMemoryOrdering = atomic.order != MemoryOrder.Relaxed)
+    case atomic: AtomicStore[?, ?] =>
+      addressEffects(atomic.target) ++ expression(atomic.value) ++ write(spaceOf(atomic.target)) ++
+        EffectSummary(hasMemoryOrdering = atomic.order != MemoryOrder.Relaxed)
     case accumulation: Accumulate[?] =>
       expression(accumulation.value) ++
         read(EffectMemorySpace.Local) ++
@@ -112,7 +122,7 @@ private[core] object EffectAnalysis:
     case scoped: ScopedBlock => modifiedLocalNames(scoped.body)
     case loop: ForLoop => modifiedLocalNames(loop.body)
     case _: LocalDeclaration[?] | _: LocalArrayDeclaration[?] |
-        _: AtomicAdd[?, ?] | _: AtomicFetchAdd[?, ?] | _: WarpVote[?] | _: WarpShuffle[?, ?] |
+        _: AtomicAdd[?, ?] | _: AtomicFetchAdd[?, ?] | _: AtomicResult[?, ?] | _: AtomicStore[?, ?] | _: WarpVote[?] | _: WarpShuffle[?, ?] |
         _: Barrier | _: WarpBarrier => Set.empty
 
   private def read(place: Place[?, ?, ?]): EffectSummary =

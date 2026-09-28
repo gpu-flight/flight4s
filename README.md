@@ -418,7 +418,42 @@ rules, and capture is still forbidden inside expression-only callbacks. Size the
 output for all possible contributions, initialize the counter before launch,
 and synchronize before consuming output. Ticket assignment is not stable input
 order, and incrementing the counter does not publish the later output store.
-Other atomic operations and explicit memory-order/scope controls remain deferred.
+
+### Scoped Atomic References
+
+Use `atomic.device(place)` for a read-write global element, or
+`atomic.block(place)` for read-write shared/global storage used within one block:
+
+```scala
+import flight4s.core.ir.MemoryOrder
+
+val counterRef = atomic.device(counter(literal(0)))
+val ticket = counterRef.fetchAdd("ticket", literal(1), MemoryOrder.Relaxed)
+val current = counterRef.load("current", MemoryOrder.Acquire)
+// After writing the associated payload, publish its ready flag:
+atomic.device(ready(literal(0))).store(literal(1), MemoryOrder.Release)
+```
+
+These are kernel-body snippets with declared read-write buffers, not JVM atomics.
+`Int`, `UInt`, `Float`, and `Double` support load/store, exchange, fetchAdd, and
+fetchSub. Int/UInt also support fetchMin/Max/And/Or/Xor and compareExchange.
+Each returned Expr is a named old-value snapshot; the operation runs once.
+CompareExchange returns the observed old integer, not a Boolean, and takes
+explicit success/failure orders. Compare it with a stable expected value to
+determine success; it performs no retry loop.
+
+Every operation requires an explicit order. Loads allow Relaxed, Acquire, or
+SequentiallyConsistent; stores allow Relaxed, Release, or SequentiallyConsistent.
+Read-modify-write operations also allow AcquireRelease. Invalid load/store
+orders and unsupported compare-exchange order pairs fail IR validation.
+
+This API requires CUDA 12.8+ and compute capability 6.0+, checked in emitted
+CUDA without extra headers. The older atomicAdd/atomicFetchAdd API is unchanged.
+Scopes must include all participating threads on both sides of a synchronization
+relationship. Block scope on global storage is not cross-block synchronization.
+Concurrent ordinary accesses to an atomic location remain unsafe without
+separate synchronization. No system/cluster scope, fence API, progress guarantee,
+automatic initialization, or implicit barrier is added.
 
 ## Warp Votes
 

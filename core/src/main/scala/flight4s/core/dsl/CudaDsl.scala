@@ -468,6 +468,14 @@ object CudaDsl:
       kernels.iterator.map(_.ir).toVector
     )
 
+  object atomic:
+    def device[T](target: Place[T, Global, ReadWrite])(using valueType: AtomicValueType[T]): AtomicRef[T, Global] =
+      new AtomicRef(target, AtomicScope.Device, valueType)
+
+    def block[T, Space <: Global | Shared](target: Place[T, Space, ReadWrite])(using
+        valueType: AtomicValueType[T]
+    ): AtomicRef[T, Space] = new AtomicRef(target, AtomicScope.Block, valueType)
+
   /** Executes the update once and binds CUDA's returned old value to a device local. */
   def atomicFetchAdd[T, Space <: Global | Shared](
       name: String,
