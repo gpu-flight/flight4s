@@ -142,8 +142,24 @@ do output(i) := literal(12) / input(i).read
 Inside a kernel, this generates a serial loop with a CUDA `if`. `filter` and
 `withFilter` can be chained with maps, `foreach`, and strict `foldLeft`; later
 guards and effects run only for accepted elements. No compacted device array
-is allocated. Filtered `sum` and multi-generator `for ... yield` are not yet
-supported; use a named fold or explicit nested statement loops.
+is allocated. Filtered `sum` is not yet supported; use a named fold.
+
+Multiple generators use staged `flatMap` to express dependent nested loops:
+
+```scala
+val lowerTriangle = for
+  i <- gpuRange("i", literal(0), n)
+  j <- gpuRange("j", literal(0), i)
+yield input(i * n + j).read
+
+val total = lowerTriangle.foldLeft("total", literal(0.0f))(_ + _)
+```
+
+Each thread visits outer indices first, then inner indices in ascending order.
+Maps, guards, further `flatMap`, `foreach`, and scalar/pair folds can compose.
+The inner factory builds once per terminal on the JVM; its bounds remain device
+expressions. Tuple-valued elements, comprehension value bindings, expression-only
+flattened sums, and automatic parallel distribution are not included.
 
 Typed device math includes `exp`, `log`, `sqrt`, `rsqrt`, and `tanh` for `Float`
 and `Double` expressions. Low-precision values require explicit promotion, for
@@ -164,6 +180,7 @@ provides:
 - strict named scalar/pair `foldLeft` terminals for ordered per-thread recurrences;
 - named `let` snapshots returning read-only expressions for once-evaluated values;
 - lazy filtered ranges and Scala `for` guards with ordered conditional execution;
+- staged `flatMap` and multi-generator `for ... yield` for dependent nested loops;
 - typed Float/Double device math with explicit low-precision promotion;
 - distinct module constants, rank-aware kernel shared arrays, and lexical local
   arrays;

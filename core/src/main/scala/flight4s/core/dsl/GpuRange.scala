@@ -9,7 +9,7 @@ final class GpuRange private[dsl] (
     val indexName: String,
     val from: Expr[Int],
     val until: Expr[Int]
-):
+) extends GpuTraversal[Int]:
   def map[T](valueAt: Expr[Int] => Expr[T]): MappedGpuRange[T] =
     new MappedGpuRange(this, valueAt)
 
@@ -45,7 +45,7 @@ final class GpuRange private[dsl] (
 final class MappedGpuRange[T] private[dsl] (
     private val range: GpuRange,
     private val valueAt: Expr[Int] => Expr[T]
-):
+) extends GpuTraversal[T]:
   def map[U](transform: Expr[T] => Expr[U]): MappedGpuRange[U] =
     new MappedGpuRange(range, valueAt.andThen(transform))
 

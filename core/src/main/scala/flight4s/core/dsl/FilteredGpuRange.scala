@@ -9,7 +9,7 @@ final class FilteredGpuRange[T] private[dsl] (
     private val range: GpuRange,
     // A continuation keeps each later map, predicate, and terminal inside preceding guards.
     private val stageElement: (Expr[Int], Expr[T] => (BlockBuilder ?=> Unit)) => (BlockBuilder ?=> Unit)
-):
+) extends GpuTraversal[T]:
   def map[U](transform: Expr[T] => Expr[U]): FilteredGpuRange[U] =
     new FilteredGpuRange(range, (index, body) =>
       stageElement(index, value => body(ExpressionStaging.expression(transform(value))))
