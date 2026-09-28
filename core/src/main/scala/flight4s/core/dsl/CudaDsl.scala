@@ -578,6 +578,16 @@ object CudaDsl:
     def y: Expr[Int] = Intrinsic("blockDim.y", I32)
     def z: Expr[Int] = Intrinsic("blockDim.z", I32)
 
+  extension (value: Expr[UInt])
+    def <<(distance: Expr[Int])(using position: DslSourcePosition): Expr[UInt] =
+      UnsignedShift(UnsignedShiftOperator.Left, value, distance, position.span)
+
+    def >>(distance: Expr[Int])(using position: DslSourcePosition): Expr[UInt] =
+      UnsignedShift(UnsignedShiftOperator.Right, value, distance, position.span)
+
+    def >>>(distance: Expr[Int])(using position: DslSourcePosition): Expr[UInt] =
+      UnsignedShift(UnsignedShiftOperator.Right, value, distance, position.span)
+
   extension [T](left: Expr[T])
     def +(right: Expr[T])(using valueType: AdditiveType[T]): Expr[T] =
       Binary(BinaryOperator.Add, left, right, valueType)

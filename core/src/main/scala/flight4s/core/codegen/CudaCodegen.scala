@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 17
+  val ArtifactVersion: Int = 18
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -362,6 +362,12 @@ object CudaCodegen:
             right <- emitExpression(binary.right)
           yield s"($left ${binary.operator.cudaToken} $right)"
 
+        case shift: UnsignedShift =>
+          for
+            value <- emitExpression(shift.value)
+            distance <- emitExpression(shift.distance)
+          yield s"($value ${shift.operator.cudaToken} ($distance & 31))"
+
         case comparison: Compare[?] =>
           for
             left <- emitExpression(comparison.left)
@@ -678,6 +684,7 @@ object CudaCodegen:
         Vector.empty
       case binary: Binary[?] =>
         collectTypes(binary.left) ++ collectTypes(binary.right)
+      case shift: UnsignedShift => collectTypes(shift.value) ++ collectTypes(shift.distance)
       case comparison: Compare[?] =>
         collectTypes(comparison.left) ++ collectTypes(comparison.right)
       case conditional: Conditional[?] =>
@@ -756,6 +763,7 @@ object CudaCodegen:
         Set(scalar.name)
       case binary: Binary[?] =>
         collectIdentifiers(binary.left) ++ collectIdentifiers(binary.right)
+      case shift: UnsignedShift => collectIdentifiers(shift.value) ++ collectIdentifiers(shift.distance)
       case comparison: Compare[?] =>
         collectIdentifiers(comparison.left) ++
           collectIdentifiers(comparison.right)

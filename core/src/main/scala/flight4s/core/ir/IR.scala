@@ -39,6 +39,18 @@ final case class Binary[T](
     span: SourceSpan = SourceSpan.Unknown
 ) extends Expr[T]
 
+enum UnsignedShiftOperator(val cudaToken: String):
+  case Left extends UnsignedShiftOperator("<<")
+  case Right extends UnsignedShiftOperator(">>")
+
+final case class UnsignedShift(
+    operator: UnsignedShiftOperator,
+    value: Expr[UInt],
+    distance: Expr[Int],
+    span: SourceSpan = SourceSpan.Unknown
+) extends Expr[UInt]:
+  override val valueType: CudaType[UInt] = flight4s.core.types.U32
+
 final case class Compare[T](
     operator: ComparisonOperator,
     left: Expr[T],
