@@ -49,7 +49,11 @@ type, and reduction policy. `foreach` lowers to the existing GPU loop for
 explicit stores and other statements.
 
 Scala callbacks run during IR construction, not on the device. Keep `map`
-callbacks expression-only. Reusing an `Expr` does not snapshot or memoize a
+callbacks expression-only. DSL statements and shared declarations inside map,
+reduction, fold-step, or `choose`-arm callbacks raise a source-located
+`DslError(StatementInsideExpression)` instead of escaping into an outer block.
+This staging check does not prohibit ordinary JVM mutation or I/O.
+Reusing an `Expr` does not snapshot or memoize a
 load; use `local` when a device value must be stored before later mutations.
 Automatic grid distribution and parallel reductions are not implied by this API.
 

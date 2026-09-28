@@ -4,6 +4,7 @@ import flight4s.core.ir.SourceSpan
 
 enum DslErrorCode:
   case SharedMemoryDeclarationOutsideKernelBody
+  case StatementInsideExpression
 
 final case class DslError(
     code: DslErrorCode,

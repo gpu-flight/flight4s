@@ -13,9 +13,11 @@ object CudaDsl:
     private val statements = ArrayBuffer.empty[Stmt]
 
     private[dsl] def append(statement: Stmt): Unit =
+      ExpressionStaging.requireStatementsAllowed(statement.span)
       statements += statement
 
     private[dsl] def declareShared(memory: SharedArray[?, ?]): Unit =
+      ExpressionStaging.requireStatementsAllowed(memory.span)
       sharedDeclarations match
         case Some(declarations) =>
           declarations += memory
@@ -38,11 +40,17 @@ object CudaDsl:
   def literal[T](value: T)(using valueType: CudaType[T]): Expr[T] =
     Literal(value, valueType)
 
-  def choose[T](condition: Expr[Boolean])(whenTrue: Expr[T])(whenFalse: Expr[T])(using
+  def choose[T](condition: Expr[Boolean])(whenTrue: => Expr[T])(whenFalse: => Expr[T])(using
       valueType: CudaType[T],
       position: DslSourcePosition
   ): Expr[T] =
-    Conditional(condition, whenTrue, whenFalse, valueType, position.span)
+    Conditional(
+      condition,
+      ExpressionStaging.expression(whenTrue),
+      ExpressionStaging.expression(whenFalse),
+      valueType,
+      position.span
+    )
 
   def input[T](name: String)(using valueType: CudaType[T]): BufferParam[T, ReadOnly] =
     BufferParam(name, valueType)
@@ -235,7 +243,7 @@ object CudaDsl:
       from = from,
       until = until,
       initial = initial,
-      value = body(index),
+      value = ExpressionStaging.expression(body(index)),
       rule = rule,
       addition = addition,
       policy = policy,
