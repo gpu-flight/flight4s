@@ -244,7 +244,20 @@ participation predicate or supply a correctly constructed subgroup mask.
 Validation checks types, scope, and literal empty masks, not the full runtime
 participation contract. Votes can compose in explicit statement loops but cannot
 be hidden in `map` or `choose` callbacks. They are collective effects, not block
-barriers or memory fences. Shuffle and warp-reduction APIs are not yet included.
+barriers or memory fences.
+
+Direct shuffle captures another participating lane's scalar value:
+
+```scala
+val firstValue = warp.shuffle("firstValue", fullMask, value, literal(0), width = 32)
+```
+
+Supported values are Int, UInt, Float, and Double. Width is a host integer from
+1, 2, 4, 8, 16, 32; the source lane is a nonnegative `Expr[Int]` relative to that
+width-sized subgroup, with CUDA modulo-width wraparound. The selected lane must
+actually participate in the mask. Width does not make inactive lanes available.
+The result is a once-evaluated read-only snapshot, not a memory fence. Shuffle
+up/down/xor and warp reductions remain separate work.
 
 ## Status
 

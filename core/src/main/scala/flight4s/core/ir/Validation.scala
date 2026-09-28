@@ -39,6 +39,8 @@ enum ValidationCode:
   case WriteToReadOnlyBuffer
   case InvalidAtomicAddressSpace
   case EmptyWarpMask
+  case InvalidWarpWidth
+  case NegativeWarpSourceLane
   case UnknownConstant
   case ConstantTypeMismatch
   case ConstantIndexOutOfBounds
@@ -382,6 +384,17 @@ object KernelValidator:
 
           (errors ++ declarationErrors, nextScope)
 
+        case ((errors, scope), (shuffle: WarpShuffle[?], index)) =>
+          val statementLocation = s"$location.statements[$index]"
+          val nameErrors = validateLocalName(shuffle.local, parameters, scope, statementLocation)
+          val declarationErrors = nameErrors ++ validateWarpShuffle(shuffle, parameters, statementLocation, scope)
+          val nextScope =
+            if nameErrors.isEmpty then scope.copy(
+              locals = scope.locals.updated(shuffle.local.name, shuffle.local.valueType)
+            )
+            else scope
+          (errors ++ declarationErrors, nextScope)
+
         case ((errors, scope), (vote: WarpVote[?], index)) =>
           val statementLocation = s"$location.statements[$index]"
           val nameErrors = validateLocalName(vote.local, parameters, scope, statementLocation)
@@ -553,19 +566,43 @@ object KernelValidator:
       case _: Barrier =>
         Vector.empty
 
+  private def validateWarpShuffle(
+      shuffle: WarpShuffle[?],
+      parameters: Map[String, KernelParam],
+      location: String,
+      scope: ValidationScope
+  ): Vector[ValidationError] =
+    val widthErrors =
+      if Set(1, 2, 4, 8, 16, 32).contains(shuffle.width) then Vector.empty
+      else Vector(ValidationError(ValidationCode.InvalidWarpWidth,
+        "warp shuffle width must be one of 1, 2, 4, 8, 16, 32", location, shuffle.span))
+    val lane: Expr[?] = shuffle.sourceLane
+    val laneErrors = lane match
+      case Literal(value: Int, _, _) if value < 0 =>
+        Vector(ValidationError(ValidationCode.NegativeWarpSourceLane,
+          "warp shuffle source lane must be nonnegative", s"$location.sourceLane", shuffle.span))
+      case _ => Vector.empty
+    widthErrors ++ laneErrors ++
+      validateNonemptyWarpMask(shuffle.mask, location, shuffle.span) ++
+      validateExpression(shuffle.mask, parameters, s"$location.mask", scope) ++
+      validateExpression(shuffle.value, parameters, s"$location.value", scope) ++
+      validateExpression(shuffle.sourceLane, parameters, s"$location.sourceLane", scope) ++
+      requireSameType(shuffle.mask.valueType, U32, "warp shuffle mask must have CUDA unsigned int type",
+        s"$location.mask", shuffle.span) ++
+      requireSameType(shuffle.sourceLane.valueType, I32, "warp shuffle source lane must have CUDA int type",
+        s"$location.sourceLane", shuffle.span) ++
+      requireSameType(shuffle.local.valueType, shuffle.value.valueType,
+        "warp shuffle result type does not match the value", location, shuffle.span, ValidationCode.LocalTypeMismatch) ++
+      requireSameType(shuffle.shuffleType, shuffle.value.valueType,
+        "warp shuffle capability does not match the value type", location, shuffle.span)
+
   private def validateWarpVote(
       vote: WarpVote[?],
       parameters: Map[String, KernelParam],
       location: String,
       scope: ValidationScope
   ): Vector[ValidationError] =
-    val mask: Expr[?] = vote.mask
-    val maskErrors = mask match
-      case Literal(value: UInt, _, _) if value.toIntBits == 0 =>
-        Vector(ValidationError(ValidationCode.EmptyWarpMask,
-          "a calling lane must belong to a nonempty warp participation mask", s"$location.mask", vote.span))
-      case _ => Vector.empty
-    maskErrors ++
+    validateNonemptyWarpMask(vote.mask, location, vote.span) ++
       validateExpression(vote.mask, parameters, s"$location.mask", scope) ++
       validateExpression(vote.predicate, parameters, s"$location.predicate", scope) ++
       requireSameType(vote.mask.valueType, U32, "warp vote mask must have CUDA unsigned int type",
@@ -574,6 +611,16 @@ object KernelValidator:
         s"$location.predicate", vote.span) ++
       requireSameType(vote.local.valueType, vote.operator.resultType,
         "warp vote result type does not match the operator", location, vote.span, ValidationCode.LocalTypeMismatch)
+
+  private def validateNonemptyWarpMask(
+      mask: Expr[?],
+      location: String,
+      span: SourceSpan
+  ): Vector[ValidationError] = mask match
+      case Literal(value: UInt, _, _) if value.toIntBits == 0 =>
+        Vector(ValidationError(ValidationCode.EmptyWarpMask,
+          "a calling lane must belong to a nonempty warp participation mask", s"$location.mask", span))
+      case _ => Vector.empty
 
   private def validateAtomicAdd(
       target: Place[?, ?, ?],

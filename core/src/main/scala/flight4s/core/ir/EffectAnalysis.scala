@@ -57,6 +57,9 @@ private[core] object EffectAnalysis:
     case vote: WarpVote[?] =>
       expression(vote.mask) ++ expression(vote.predicate) ++
         write(EffectMemorySpace.Local) ++ EffectSummary(hasWarpCollective = true)
+    case shuffle: WarpShuffle[?] =>
+      expression(shuffle.mask) ++ expression(shuffle.value) ++ expression(shuffle.sourceLane) ++
+        write(EffectMemorySpace.Local) ++ EffectSummary(hasWarpCollective = true)
     case store: Store[?, ?] =>
       addressEffects(store.to) ++
         expression(store.value) ++

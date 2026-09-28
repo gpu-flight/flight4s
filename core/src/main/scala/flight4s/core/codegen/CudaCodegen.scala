@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 13
+  val ArtifactVersion: Int = 14
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -259,6 +259,16 @@ object CudaCodegen:
             target <- emitPlace(store.to)
             value <- emitExpression(store.value)
           yield writer.line(s"$prefix$target = $value;", store.span)
+
+        case shuffle: WarpShuffle[?] =>
+          for
+            mask <- emitExpression(shuffle.mask)
+            value <- emitExpression(shuffle.value)
+            source <- emitExpression(shuffle.sourceLane)
+          yield writer.line(
+            s"$prefix${shuffle.local.valueType.cudaName} ${shuffle.local.name} = ::__shfl_sync($mask, $value, $source, ${shuffle.width});",
+            shuffle.span
+          )
 
         case vote: WarpVote[?] =>
           for
@@ -630,6 +640,8 @@ object CudaCodegen:
         Vector(declaration.array.valueType)
       case vote: WarpVote[?] =>
         vote.local.valueType +: (collectTypes(vote.mask) ++ collectTypes(vote.predicate))
+      case shuffle: WarpShuffle[?] =>
+        shuffle.local.valueType +: (collectTypes(shuffle.mask) ++ collectTypes(shuffle.value) ++ collectTypes(shuffle.sourceLane))
       case store: Store[?, ?] =>
         collectTypes(store.to) ++ collectTypes(store.value)
       case atomic: AtomicAdd[?, ?] =>
@@ -704,6 +716,8 @@ object CudaCodegen:
         Set(declaration.array.name)
       case vote: WarpVote[?] =>
         collectIdentifiers(vote.mask) ++ collectIdentifiers(vote.predicate) + vote.local.name
+      case shuffle: WarpShuffle[?] =>
+        collectIdentifiers(shuffle.mask) ++ collectIdentifiers(shuffle.value) ++ collectIdentifiers(shuffle.sourceLane) + shuffle.local.name
       case store: Store[?, ?] =>
         collectIdentifiers(store.to) ++ collectIdentifiers(store.value)
       case atomic: AtomicAdd[?, ?] =>

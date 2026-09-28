@@ -509,6 +509,17 @@ object CudaDsl:
     builder.append(Barrier(position.span))
 
   object warp:
+    def shuffle[T](
+        name: String,
+        mask: Expr[UInt],
+        value: Expr[T],
+        sourceLane: Expr[Int],
+        width: Int = 32
+    )(using shuffleType: WarpShuffleType[T], builder: BlockBuilder, position: DslSourcePosition): Expr[T] =
+      val result = LocalVariable(name, shuffleType, position.span)
+      builder.append(WarpShuffle(result, mask, value, sourceLane, width, shuffleType, position.span))
+      Load(result, position.span)
+
     def ballot(name: String, mask: Expr[UInt], predicate: Expr[Boolean])(using
         BlockBuilder, DslSourcePosition
     ): Expr[UInt] = vote(name, WarpVoteOperator.Ballot, mask, predicate)
