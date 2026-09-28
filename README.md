@@ -97,9 +97,25 @@ val maximum = gpuRange("i", literal(0), count)
 
 The fold stages an initialized local and a serial loop at its call site. Its
 returned expression reads that result; repeated reads do not repeat the fold.
-State has one CUDA scalar type, empty ranges return the initial value, and no
+Each state component has a fixed CUDA scalar type, empty ranges return the initial value, and no
 parallel reassociation is implied. Floating-point comparison behavior remains
 explicit in the step function.
+
+Pair state supports combined statistics and cross-dependent recurrences:
+
+```scala
+val (count, total) = gpuRange("i", literal(0), n)
+  .map(i => input(i).read).filter(_ > literal(0.0f))
+  .foldLeft("positive", (literal(0), literal(0.0f))) { (state, x) =>
+    (state._1 + literal(1), state._2 + x)
+  }
+```
+
+Both next components are evaluated before either state is updated. The pair
+is a Scala tuple of scalar expressions, not a CUDA struct or a device collection.
+The prefix above reserves `positive_0`, `positive_1`, `positive_next_0`, and
+`positive_next_1` in their respective scopes. Existing name-conflict checks apply.
+Arbitrary tuple sizes and parallel folds are not yet supported.
 
 Ranges also support staged guards, including Scala `for` syntax:
 
@@ -131,7 +147,7 @@ provides:
 - lazy staged `gpuRange.map` composition with typed `sum` and `foreach` terminals;
 - lexical `scoped` bodies for reusable higher-order Scala statement helpers;
 - typed value-producing conditionals with guarded CUDA expression evaluation;
-- strict named scalar `foldLeft` terminals for ordered per-thread recurrences;
+- strict named scalar/pair `foldLeft` terminals for ordered per-thread recurrences;
 - named `let` snapshots returning read-only expressions for once-evaluated values;
 - lazy filtered ranges and Scala `for` guards with ordered conditional execution;
 - typed Float/Double device math with explicit low-precision promotion;

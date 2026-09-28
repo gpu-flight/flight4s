@@ -37,3 +37,8 @@ final class FilteredGpuRange[T] private[dsl] (
     val accumulator = local(accumulatorName, initial)
     foreach(value => accumulator := ExpressionStaging.expression(step(accumulator.read, value)))
     Load(accumulator, position.span)
+
+  def foldLeft[A, B](stateName: String, initial: (Expr[A], Expr[B]))(
+      step: ((Expr[A], Expr[B]), Expr[T]) => (Expr[A], Expr[B])
+  )(using CudaType[A], CudaType[B], BlockBuilder, DslSourcePosition): (Expr[A], Expr[B]) =
+    PairFold.stage(stateName, initial)(step)(body => foreach(body))

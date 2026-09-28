@@ -1,12 +1,12 @@
 package flight4s.core.dsl
 
-import flight4s.core.ir.{Expr, SourceSpan}
+import flight4s.core.ir.SourceSpan
 
 private[dsl] object ExpressionStaging:
   // A callback can capture any outer builder, so an instance-local flag is insufficient.
   private val active = ThreadLocal.withInitial[Boolean](() => false)
 
-  def expression[T](body: => Expr[T]): Expr[T] =
+  def expression[T](body: => T): T =
     if active.get() then body
     else
       active.set(true)

@@ -27,6 +27,12 @@ final class GpuRange private[dsl] (
     foreach { index => accumulator := ExpressionStaging.expression(step(accumulator.read, index)) }
     Load(accumulator, position.span)
 
+  /** Pair components advance simultaneously from the previous iteration's state. */
+  def foldLeft[A, B](stateName: String, initial: (Expr[A], Expr[B]))(
+      step: ((Expr[A], Expr[B]), Expr[Int]) => (Expr[A], Expr[B])
+  )(using CudaType[A], CudaType[B], BlockBuilder, DslSourcePosition): (Expr[A], Expr[B]) =
+    PairFold.stage(stateName, initial)(step)(body => foreach(body))
+
   def foreach(
       body: Expr[Int] => (BlockBuilder ?=> Unit)
   )(using builder: BlockBuilder, position: DslSourcePosition): Unit =
@@ -56,6 +62,11 @@ final class MappedGpuRange[T] private[dsl] (
       step: (Expr[A], Expr[T]) => Expr[A]
   )(using valueType: CudaType[A], builder: BlockBuilder, position: DslSourcePosition): Expr[A] =
     range.foldLeft(accumulatorName, initial)((accumulator, index) => step(accumulator, valueAt(index)))
+
+  def foldLeft[A, B](stateName: String, initial: (Expr[A], Expr[B]))(
+      step: ((Expr[A], Expr[B]), Expr[T]) => (Expr[A], Expr[B])
+  )(using CudaType[A], CudaType[B], BlockBuilder, DslSourcePosition): (Expr[A], Expr[B]) =
+    range.foldLeft(stateName, initial)((state, index) => step(state, valueAt(index)))
 
   def sum[A](
       initial: Expr[A],
