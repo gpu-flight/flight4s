@@ -41,7 +41,8 @@ val rowSquares = kernel(
 }
 ```
 
-`gpuRange` is half-open and unit-stride. Each CUDA thread executes its range
+`gpuRange` is half-open and defaults to unit stride. Use `.by(4)` before mapping
+or filtering to select a positive static stride. Each CUDA thread executes its range
 serially; the example explicitly assigns one row per thread. `map` composes
 expression builders without allocating an intermediate device collection.
 `sum` lowers to `ReduceSum`, preserving its explicit initial value, accumulator
@@ -61,7 +62,18 @@ host `Int`, not a device expression. Zero and negative steps fail validation.
 Non-unit loops use a private wide counter to avoid overflow on the final
 increment; the callback index remains `Expr[Int]`. The lower bound is evaluated
 once and the upper bound is rechecked, so use `let` to explicitly snapshot a
-mutable endpoint. Functional range `.by` support is the next slice.
+mutable endpoint. The same stride works with functional composition:
+
+```scala
+val total = gpuRange("column", literal(0), columns).by(4)
+  .map(column => source(column).read)
+  .sum(literal(0.0f))
+```
+
+`.by` returns a new range; `.by(2).by(3)` selects 3, not 6. Mapped/filtered
+traversals, scalar/pair folds, and nested `for` generators retain the stride.
+Invalid steps are diagnosed at terminal validation, with the terminal's source
+location. The step does not assign work to threads or imply a parallel reduction.
 
 Scala callbacks run during IR construction, not on the device. Keep `map`
 callbacks expression-only. DSL statements and shared declarations inside map,
@@ -441,6 +453,21 @@ Fine-grained expression/operator spans remain a later increment.
 
 ### Compilation artifacts and caches
 
+Header-dependent kernels (for example, `Float16` with `cuda_fp16.h`) need an
+explicit toolkit include directory when NVRTC has no configured header search
+path. Pass it when generating the compilation artifact:
+
+```scala
+import flight4s.core.codegen.{CompilerOptions, CudaCodegen}
+val include = java.nio.file.Path.of(sys.env("CUDA_PATH"), "include")
+val options = CompilerOptions(additionalNvrtcOptions = Vector(s"--include-path=$include"))
+val generated = CudaCodegen.generate(kernelDefinition, options)
+```
+
+`CUDA_PATH` is read by this application snippet, not implicitly by the compiler.
+Cache identity includes options but not filesystem header contents; invalidate
+affected caches if external headers change at the same path.
+
 - **Identity:** A versioned canonical SHA-256 covers CUDA source and its
   generated/raw provenance, resolved options, target, compiler version,
   generated-source codegen version, program name, and kernel ABI/launch metadata.
@@ -528,6 +555,8 @@ ctest --test-dir native/build -C Release --output-on-failure
 ```
 
 See [native/README.md](native/README.md) for JNI and GPU integration tests.
+The half-header GPU test additionally requires `CUDA_PATH` to identify a toolkit
+containing `include/cuda_fp16.h`.
 
 ## Coordinates
 

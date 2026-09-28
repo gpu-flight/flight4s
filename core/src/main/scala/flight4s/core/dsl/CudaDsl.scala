@@ -245,7 +245,8 @@ object CudaDsl:
       from: Expr[Int],
       until: Expr[Int],
       initial: Expr[Accumulator],
-      policy: ReductionPolicy = ReductionPolicy.Strict
+      policy: ReductionPolicy = ReductionPolicy.Strict,
+      step: Int = 1
   )(
       body: Expr[Int] => Expr[Input]
   )(using
@@ -263,7 +264,8 @@ object CudaDsl:
       rule = rule,
       addition = addition,
       policy = policy,
-      span = position.span
+      span = position.span,
+      step = step
     )
 
   def gpuRange(

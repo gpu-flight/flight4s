@@ -158,7 +158,8 @@ final case class ReduceSum[Input, Accumulator](
     rule: AccumulatorType[Input, Accumulator],
     addition: AdditiveType[Accumulator],
     policy: ReductionPolicy,
-    span: SourceSpan = SourceSpan.Unknown
+    span: SourceSpan = SourceSpan.Unknown,
+    step: Int = 1
 ) extends Expr[Accumulator]:
   override def valueType: CudaType[Accumulator] = rule.accumulatorType
 

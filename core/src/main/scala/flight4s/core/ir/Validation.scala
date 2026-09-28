@@ -544,9 +544,7 @@ object KernelValidator:
         val nameErrors =
           validateLoopIndexName(loop.index, parameters, scope, s"$location.index")
         val stepErrors =
-          if loop.step > 0 then Vector.empty
-          else Vector(ValidationError(ValidationCode.InvalidLoopStep,
-            "loop step must be a positive static integer", s"$location.step", loop.span))
+          validateLoopStep(loop.step, location, loop.span)
         val rangeErrors =
           validateExpression(loop.from, parameters, s"$location.from", scope) ++
             validateExpression(loop.until, parameters, s"$location.until", scope) ++
@@ -578,6 +576,11 @@ object KernelValidator:
           validateExpression(barrier.mask, parameters, s"$location.mask", scope) ++
           requireSameType(barrier.mask.valueType, U32, "warp synchronization mask must have CUDA unsigned int type",
             s"$location.mask", barrier.span)
+
+  private def validateLoopStep(step: Int, location: String, span: SourceSpan): Vector[ValidationError] =
+    if step > 0 then Vector.empty
+    else Vector(ValidationError(ValidationCode.InvalidLoopStep,
+      "loop step must be a positive static integer", s"$location.step", span))
 
   private def validateWarpShuffle(
       shuffle: WarpShuffle[?, ?],
@@ -996,7 +999,8 @@ object KernelValidator:
               reduction.value.span
             )
 
-        indexErrors ++ rangeErrors ++ accumulatorErrors ++ valueErrors
+        indexErrors ++ rangeErrors ++ validateLoopStep(reduction.step, location, reduction.span) ++
+          accumulatorErrors ++ valueErrors
 
       case load: Load[?, ?, ?] =>
         validatePlace(

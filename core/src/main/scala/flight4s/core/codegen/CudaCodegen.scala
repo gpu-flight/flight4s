@@ -7,7 +7,7 @@ import flight4s.core.ir.*
 import flight4s.core.types.*
 
 object CudaCodegen:
-  val ArtifactVersion: Int = 22
+  val ArtifactVersion: Int = 23
 
   def generate[Args <: Tuple](
       kernel: Kernel[Args],
@@ -329,24 +329,9 @@ object CudaCodegen:
             from <- emitExpression(loop.from)
             until <- emitExpression(loop.until)
             _ =
-              if loop.step == 1 then
-                writer.line(
-                  s"${prefix}for (int ${loop.index.name} = $from; " +
-                    s"${loop.index.name} < $until; ++${loop.index.name}) {",
-                  loop.span
-                )
-              else
-                val induction = freshNames.value()
-                // The final positive increment may exceed Int.MaxValue.
-                writer.line(
-                  s"${prefix}for (long long $induction = $from; " +
-                    s"$induction < $until; $induction += ${loop.step}LL) {",
-                  loop.span
-                )
-                writer.line(
-                  s"${indent(indentation + 1)}const int ${loop.index.name} = static_cast<int>($induction);",
-                  loop.index.span
-                )
+              val (header, binding) = loopOpening(loop.index.name, from, until, loop.step)
+              writer.line(s"$prefix$header", loop.span)
+              binding.foreach(line => writer.line(s"${indent(indentation + 1)}$line", loop.index.span))
             _ <- emitBlock(loop.body, indentation + 1)
           yield writer.line(s"$prefix}")
 
@@ -481,6 +466,15 @@ object CudaCodegen:
             s"${local.arrayName}[$index]"
           )
 
+    private def loopOpening(index: String, from: String, until: String, step: Int): (String, Option[String]) =
+      if step == 1 then
+        (s"for (int $index = $from; $index < $until; ++$index) {", None)
+      else
+        // The final positive increment may exceed Int.MaxValue.
+        val induction = freshNames.value()
+        (s"for (long long $induction = $from; $induction < $until; $induction += ${step}LL) {",
+          Some(s"const int $index = static_cast<int>($induction);"))
+
     private def emitReduction(
         reduction: ReduceSum[?, ?]
     ): Either[CodegenError, String] =
@@ -499,10 +493,10 @@ object CudaCodegen:
         val lowering = ReductionLoweringStrategy.select(reduction.policy)
         val accumulator = freshNames.accumulator()
         val accumulatorType = reduction.valueType.cudaName
+        val (header, binding) = loopOpening(reduction.index.name, from, until, reduction.step)
         s"([&]() { /* flight4s reduction: ${lowering.cudaMarker} */ " +
           s"$accumulatorType $accumulator = $initial; " +
-          s"for (int ${reduction.index.name} = $from; " +
-          s"${reduction.index.name} < $until; ++${reduction.index.name}) { " +
+          s"$header " + binding.fold("")(_ + " ") +
           s"$accumulator += $accumulatedValue; } return $accumulator; }())"
 
     private def emitConversion(
