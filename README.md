@@ -166,6 +166,13 @@ and `Double` expressions. Low-precision values require explicit promotion, for
 example `exp(halfValue.toAccumulator[Float])`. These emit standard CUDA math
 calls; no JVM constant folding or automatic fast-math option is introduced.
 
+Conversion IR is validated before code generation: unsupported type pairs,
+rounding modes, or saturation requests are rejected instead of being ignored.
+F32-to-F16/BF16 supports all four rounding modes without finite saturation;
+F32-to-FP8 supports nearest-even with either saturation policy. Exact widening
+and identity conversions use nearest-even/no-saturation metadata. Existing
+public conversion helpers select supported policies automatically.
+
 ## Status
 
 Flight4s is pre-alpha and under active design. The current implementation

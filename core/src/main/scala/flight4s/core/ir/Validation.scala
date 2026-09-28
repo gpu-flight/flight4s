@@ -1,6 +1,6 @@
 package flight4s.core.ir
 
-import flight4s.core.types.{Bool, CudaType, I32}
+import flight4s.core.types.{BF16, Bool, CudaType, F16, F32, FP8E4M3, FP8E5M2, I32}
 
 enum ValidationCode:
   case InvalidConstantName
@@ -45,6 +45,9 @@ enum ValidationCode:
   case SharedMemoryIndexRankMismatch
   case SharedMemoryIndexOutOfBounds
   case ExpressionTypeMismatch
+  case UnsupportedConversion
+  case UnsupportedConversionRounding
+  case UnsupportedConversionSaturation
   case UnknownIntrinsic
   case InvalidReductionIndexName
   case DuplicateReductionIndex
@@ -660,7 +663,7 @@ object KernelValidator:
           parameters,
           s"$location.value",
           scope
-        )
+        ) ++ validateConversion(conversion, location)
 
       case accumulation: ToAccumulator[?, ?] =>
         validateExpression(
@@ -827,6 +830,37 @@ object KernelValidator:
           isWrite = false,
           scope = scope
         )
+
+  private def validateConversion(conversion: Convert[?, ?], location: String): Vector[ValidationError] =
+    val from = conversion.value.valueType
+    val to = conversion.valueType
+    val nearest = Set(RoundingMode.NearestEven)
+    val noSaturation = Set(SaturationMode.NoSaturation)
+    val policy = (from, to) match
+      case (F32, F16) | (F32, BF16) =>
+        Some((RoundingMode.values.toSet, noSaturation))
+      case (F32, FP8E4M3) | (F32, FP8E5M2) =>
+        Some((nearest, SaturationMode.values.toSet))
+      case (F16, F32) | (BF16, F32) | (FP8E4M3, F32) | (FP8E5M2, F32) =>
+        Some((nearest, noSaturation))
+      case _ if from == to => Some((nearest, noSaturation))
+      case _ => None
+    policy match
+      case None =>
+        Vector(ValidationError(ValidationCode.UnsupportedConversion,
+          s"conversion from ${from.cudaName} to ${to.cudaName} is not supported", location, conversion.span))
+      case Some((roundingModes, saturationModes)) =>
+        val roundingErrors =
+          if roundingModes.contains(conversion.rounding) then Vector.empty
+          else Vector(ValidationError(ValidationCode.UnsupportedConversionRounding,
+            s"conversion from ${from.cudaName} to ${to.cudaName} does not support ${conversion.rounding} rounding",
+            location, conversion.span))
+        val saturationErrors =
+          if saturationModes.contains(conversion.saturation) then Vector.empty
+          else Vector(ValidationError(ValidationCode.UnsupportedConversionSaturation,
+            s"conversion from ${from.cudaName} to ${to.cudaName} does not support ${conversion.saturation} saturation",
+            location, conversion.span))
+        roundingErrors ++ saturationErrors
 
   private def validatePlace(
       place: Place[?, ?, ?],
