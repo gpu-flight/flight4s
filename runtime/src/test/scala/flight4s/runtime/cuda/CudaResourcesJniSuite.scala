@@ -15,6 +15,69 @@ class CudaResourcesJniSuite extends FunSuite:
   private val nativeLibraryConfigured =
     sys.props.contains("flight4s.cuda.native.path")
 
+  test("staged range composition executes row sums and foreach with empty-range semantics"):
+    assume(nativeLibraryConfigured, "set flight4s.cuda.native.path to run JNI tests")
+    val rows = 259
+    val columns = 7
+    val values = Array.tabulate(rows * columns)(i => (i % 11).toFloat)
+    val signature = params(
+      input[Float]("source"), output[Float]("sums"), output[Float]("squares"),
+      value[Int]("rowCount"), value[Int]("from"), value[Int]("until")
+    )
+    val definition = kernel("rowSquares", signature) { bindings =>
+      val (source, sums, squares, rowCount, from, until) = bindings
+      val row = local("row", blockIdx.x * blockDim.x + threadIdx.x)
+      when(row.read < rowCount) {
+        sums(row.read) := gpuRange("column", from, until)
+          .map(column => source(row.read * literal(columns) + column).read)
+          .map(value => value * value)
+          .sum(literal(3.0f))
+        gpuRange("copyColumn", from, until).foreach { column =>
+          val index = row.read * literal(columns) + column
+          val value = source(index).read
+          squares(index) := value * value
+        }
+      }
+    }
+    val generated = CudaCodegen.generate(definition).fold(error => fail(error.message), identity)
+    val generatedModule = GeneratedCudaModule(
+      generated.cudaSource, generated.sourceMap, generated.compilerOptions, Vector(generated)
+    )
+    val context = openContext()
+    try
+      val artifact = NvrtcCompiler.compile(generatedModule, context.computeCapability, "row_squares.cu")
+        .fold(failure => fail(failure.message + "\n" + failure.compileLog), identity)
+      val module = context.load(artifact).fold(failure => fail(failure.message), identity)
+      val function = module.function(generated).fold(failure => fail(failure.message), identity)
+      val source = context.allocate[Float](values.length).toOption.get
+      val sums = context.allocate[Float](rows).toOption.get
+      val squares = context.allocate[Float](values.length).toOption.get
+      assertEquals(source.copyFrom(values), Right(()))
+      for (from, until) <- Vector((0, columns), (2, 6), (4, 4), (5, 2)) do
+        assertEquals(sums.copyFrom(Array.fill(rows)(-1.0f)), Right(()))
+        assertEquals(squares.copyFrom(Array.fill(values.length)(-1.0f)), Right(()))
+        assertEquals(
+          function.launch(
+            definition.bind((source, sums, squares, rows, from, until)),
+            LaunchConfig(Grid.x((rows + 127) / 128), LaunchBlock.x(128))
+          ),
+          Right(())
+        )
+        assertEquals(context.synchronize(), Right(()))
+        val expectedSums = Vector.tabulate(rows) { row =>
+          (from until until).foldLeft(3.0f) { (sum, column) =>
+            val value = values(row * columns + column)
+            sum + value * value
+          }
+        }
+        val expectedSquares = values.indices.map { i =>
+          if i % columns >= from && i % columns < until then values(i) * values(i)
+          else -1.0f
+        }.toVector
+        assertEquals(sums.copyToArray().toOption.get.toVector, expectedSums)
+        assertEquals(squares.copyToArray().toOption.get.toVector, expectedSquares)
+    finally context.close()
+
   test("raw vectorAdd compiles loads launches and matches the CPU result"):
     assume(nativeLibraryConfigured, "set flight4s.cuda.native.path to run JNI tests")
     val raw = RawCuda.kernel(

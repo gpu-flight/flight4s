@@ -14,6 +14,45 @@ composition: reusable typed expressions and staged transformations, with
 explicit memory and synchronization effects. Raw CUDA is an interoperability
 path alongside the Scala DSL.
 
+## Scala-style CUDA
+
+Compose typed expressions with ordinary Scala functions, then stage loops and
+reductions into the validated CUDA IR:
+
+```scala
+import flight4s.core.dsl.CudaDsl.*
+import flight4s.core.ir.Expr
+
+def square(x: Expr[Float]): Expr[Float] = x * x
+
+val rowSquares = kernel(
+  "rowSquares",
+  params(input[Float]("source"), output[Float]("sums"),
+    value[Int]("rows"), value[Int]("columns"))
+) { bindings =>
+  val (source, sums, rows, columns) = bindings
+  val row = local("row", blockIdx.x * blockDim.x + threadIdx.x)
+  when(row.read < rows) {
+    sums(row.read) := gpuRange("column", literal(0), columns)
+      .map(column => source(row.read * columns + column).read)
+      .map(square)
+      .sum(literal(0.0f))
+  }
+}
+```
+
+`gpuRange` is half-open and unit-stride. Each CUDA thread executes its range
+serially; the example explicitly assigns one row per thread. `map` composes
+expression builders without allocating an intermediate device collection.
+`sum` lowers to `ReduceSum`, preserving its explicit initial value, accumulator
+type, and reduction policy. `foreach` lowers to the existing GPU loop for
+explicit stores and other statements.
+
+Scala callbacks run during IR construction, not on the device. Keep `map`
+callbacks expression-only. Reusing an `Expr` does not snapshot or memoize a
+load; use `local` when a device value must be stored before later mutations.
+Automatic grid distribution and parallel reductions are not implied by this API.
+
 ## Status
 
 Flight4s is pre-alpha and under active design. The current implementation
@@ -21,6 +60,7 @@ provides:
 
 - CUDA scalar type witnesses, including F16, BF16, and FP8 formats;
 - typed expressions, places, statements, control flow, and reductions;
+- lazy staged `gpuRange.map` composition with typed `sum` and `foreach` terminals;
 - distinct module constants, rank-aware kernel shared arrays, and lexical local
   arrays;
 - module and kernel validation for memory ownership, scope, access, and static
