@@ -10,7 +10,8 @@ sealed trait AdditiveType[T] extends CudaType[T]
 sealed trait MultiplicativeType[T] extends CudaType[T]
 sealed trait DivisibleType[T] extends CudaType[T]
 sealed trait RemainderType[T] extends CudaType[T]
-sealed trait BitwiseType[T] extends CudaType[T]
+sealed trait BitwiseType[T] extends CudaType[T]:
+  private[core] def allBitsSet: T
 sealed trait OrderedType[T] extends CudaType[T]
 sealed trait EqualityComparableType[T] extends CudaType[T]
 sealed trait FloatingMathType[T] extends CudaType[T]
@@ -79,6 +80,7 @@ case object I32
       OrderedType[Int],
       EqualityComparableType[Int]:
   override val cudaName: String = "int"
+  override private[core] val allBitsSet: Int = -1
   override val sizeBytes: Int = 4
   override val alignmentBytes: Int = 4
 
@@ -93,6 +95,7 @@ case object U32
       OrderedType[UInt],
       EqualityComparableType[UInt]:
   override val cudaName: String = "unsigned int"
+  override private[core] val allBitsSet: UInt = UInt.fromBits(-1)
   override val sizeBytes: Int = 4
   override val alignmentBytes: Int = 4
 
