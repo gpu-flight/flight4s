@@ -517,6 +517,44 @@ object CudaDsl:
       PopulationCount(value, wordType, position.span)
 
   object warp:
+    def reduceSum[T](name: String, mask: UInt, value: Expr[T], width: Int = 32)(using
+        WarpShuffleType[T], AdditiveType[T], BlockBuilder, DslSourcePosition
+    ): Expr[T] = reduceTree(name, mask, value, width)(_ + _)
+
+    def reduceTree[T](name: String, mask: UInt, value: Expr[T], width: Int = 32)(
+        combine: (Expr[T], Expr[T]) => Expr[T]
+    )(using shuffleType: WarpShuffleType[T], builder: BlockBuilder, position: DslSourcePosition): Expr[T] =
+      validateReductionGroup(mask, width)
+      if width == 1 then let(name, value)
+      else
+        val linearThread = threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)
+        var current = let(s"${name}_input", value)
+        var distance = 1
+        while distance < width do
+          val partner = shuffleXor(s"${name}_partner_$distance", literal(mask), current, literal(distance), width)
+          val lowerLane = (linearThread & literal(distance)) === literal(0)
+          // Preserve left/right subtree order in every lane, including noncommutative combines.
+          val left = choose(lowerLane)(current)(partner)
+          val right = choose(lowerLane)(partner)(current)
+          val combined = ExpressionStaging.expression(combine(left, right))
+          val stageName = if distance * 2 == width then name else s"${name}_stage_$distance"
+          current = let(stageName, combined)
+          distance *= 2
+        current
+
+    private def validateReductionGroup(mask: UInt, width: Int)(using position: DslSourcePosition): Unit =
+      val validWidth = width >= 1 && width <= 32 && (width & (width - 1)) == 0
+      val bits = java.lang.Integer.toUnsignedLong(mask.toIntBits)
+      val completeGroups = validWidth && (0 until 32 by width).forall { start =>
+        val group = ((1L << width) - 1L) << start
+        val selected = bits & group
+        selected == 0L || selected == group
+      }
+      if bits == 0L || !completeGroups then
+        throw DslError(DslErrorCode.InvalidWarpReductionGroup,
+          "warp reduction requires a nonempty static mask containing complete aligned groups " +
+            "of width 1, 2, 4, 8, 16, or 32", position.span)
+
     def sync(mask: Expr[UInt])(using builder: BlockBuilder, position: DslSourcePosition): Unit =
       builder.append(WarpBarrier(mask, position.span))
 

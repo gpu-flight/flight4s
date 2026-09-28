@@ -5,6 +5,7 @@ import flight4s.core.ir.SourceSpan
 enum DslErrorCode:
   case SharedMemoryDeclarationOutsideKernelBody
   case StatementInsideExpression
+  case InvalidWarpReductionGroup
 
 final case class DslError(
     code: DslErrorCode,
