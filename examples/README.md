@@ -45,9 +45,9 @@ shared-memory stores and block barriers combine those partial results.
 
 `BlockRowSoftmax.run(values, rows, columns, deviceOrdinal = 0)` uses the same
 finite-input and shape validation and preserves the input array. It launches
-exactly `(128, 1, 1)` threads per block. **Direct users of its exposed definition
-must use that shape too**; generic launch metadata does not yet express this
-algorithm-specific constraint. This is a correctness example, not a benchmark
+exactly `(128, 1, 1)` threads per block. Its definition declares
+`.requiringBlock(LaunchBlock.x(128))`, so typed launches of the exposed definition
+also reject any other shape before native submission. This is a correctness example, not a benchmark
 or a tuned replacement for cuDNN.
 
 ```shell

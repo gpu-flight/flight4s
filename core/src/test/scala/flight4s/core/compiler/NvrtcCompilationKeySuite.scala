@@ -5,6 +5,7 @@ import munit.FunSuite
 import flight4s.core.codegen.*
 import flight4s.core.dsl.CudaDsl.*
 import flight4s.core.ir.{ReductionPolicy, SourceSpan}
+import flight4s.core.launch.{Block as LaunchBlock}
 import flight4s.core.unsafe.raw.RawCuda
 
 class NvrtcCompilationKeySuite extends FunSuite:
@@ -27,72 +28,94 @@ class NvrtcCompilationKeySuite extends FunSuite:
     assertEquals(first.toString, first.hex)
     assertEquals(
       first.hex,
+      "8198ba43bd8f1503bb636ed03612dd333e86796418d48467e7cce37629d78717"
+    )
+    // Encoding v3 must not reuse any of the earlier v2 cache identities.
+    assertNotEquals(
+      first.hex,
       "dfdcb6216b4a704f4c680cd88f605dcc17d33b2d2dae46ed437da3e766055b3a"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 22).hex,
       "2a5a273905247900df1ff1637b8be816805032e7cf6a748b3079aad64bcdd8e7"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 21).hex,
       "75442bd854c4b03269dd2ba7719772c18de4236e9d34e9321afc5e8c274d19f9"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 20).hex,
       "010a2abc0ebb8ee4f5c63d21fc34fa9d4f56075ffe16ac45c8173baec5c8fd48"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 19).hex,
       "a7e9688c9002e414620aa0b518bc774fa29f181d7c1dab755ab3870eda3be1a3"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 18).hex,
       "d4728173a7b8019141f5c5b6020d15b33cad86c917444b70aba90d19940c0210"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 17).hex,
       "dd9af418098caac63e6dd4d162c20f886536c875e8a0faeaf60ad00db929a74a"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 16).hex,
       "67b29366699bf4ae3afc244cfb1d49cbf41b45cc6848ccf923438a8bff09369c"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 15).hex,
       "fb1222db1773487068514c23b8ac3acf4e8b0011ea1eb80657c78b7f7e1c0b9d"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 14).hex,
       "a81e163de06c5214d927beef4d16c41719be4175695420761a565a6743702512"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 13).hex,
       "8b4310d2d5248b8e529f51f8df3f1ac2c9294be8d3b42ed9c0c5738d3a29f0cc"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 12).hex,
       "9802f54c26f291e6d1be5104989e716b4c191e2b2b2b04a45d9139aa609a1028"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 11).hex,
       "4b93dfe58695696b324af592b81ae871dc8b6430da2cc0ffb67d48b3caff34da"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 10).hex,
       "a30d5164a26f12b34d08f9ac274d661936bfedd4b380e8f8e05eea447240bd13"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 9).hex,
       "124cd591c0dd3a6123e8cd3d025f6e9d501577b622d9da75471677280389373d"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 8).hex,
       "20704f17112945b4c073dc98c55f72479ca415947600f0e121e4d76e7756e693"
     )
-    assertEquals(
+    assertNotEquals(
       derive(generated, codegenVersion = 7).hex,
       "e03e074906e92c6e7c00e58e46ca8b0db07916bdc014b9e2be8062c672ad5b64"
     )
+
+  test("required block shapes affect generated and raw identities including every dimension"):
+    val generated = copyModule()
+    val shapes = Vector(None, Some(LaunchBlock.x(128)), Some(LaunchBlock.xy(64, 2)),
+      Some(LaunchBlock.xyz(32, 2, 2)), Some(LaunchBlock.xyz(32, 4, 1)))
+    val generatedKeys = shapes.map { shape =>
+      derive(generated.copy(kernels = generated.kernels.map(kernel =>
+        withLaunchRequirements(kernel, kernel.launchRequirements.copy(requiredBlock = shape)))))
+    }
+    assertEquals(generatedKeys.distinct.size, shapes.size)
+    val signature = params()
+    val rawKeys = shapes.map { shape =>
+      val raw = RawCuda.kernel("rawShape", signature, "extern \"C\" __global__ void rawShape() {}",
+        CompilerOptions(), KernelLaunchRequirements(requiredBlock = shape))
+      NvrtcCompilationKey.derive(flight4s.core.compiler.NvrtcCompilationInput.raw(raw), target, version, programName)
+    }
+    assertEquals(rawKeys.distinct.size, shapes.size)
 
   test("every compiler-relevant input invalidates the key"):
     val generated = copyModule()

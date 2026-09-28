@@ -20,8 +20,9 @@ import flight4s.core.codegen.{
   SourceMapEntry
 }
 import flight4s.core.compiler.*
-import flight4s.core.dsl.CudaDsl.{params, value}
+import flight4s.core.dsl.CudaDsl.{kernel, module, params, value}
 import flight4s.core.ir.{KernelSignature, SourceSpan}
+import flight4s.core.launch.{Block as LaunchBlock}
 import flight4s.core.unsafe.raw.RawCuda
 
 class NvrtcArtifactStoreSuite extends FunSuite:
@@ -61,6 +62,28 @@ class NvrtcArtifactStoreSuite extends FunSuite:
       val module = generated("Missing.scala")
 
       assertEquals(store.load(compilationKey(module), module), Right(None))
+    }
+
+  test("persistent generated and raw artifacts retain exact block contracts and reject mismatched rebinds"):
+    withStore { store =>
+      val requirements = KernelLaunchRequirements(requiredBlock = Some(LaunchBlock.x(128)))
+      val base = CudaCodegen.generateModule(module(kernels = Vector(kernel("persistentKernel") { () }))).toOption.get
+      val constrained = base.copy(kernels = base.kernels.map(kernel => kernel.copy(launchRequirements = requirements)))
+      val raw = rawInput(params(value[Int]("count")), requirements = requirements)
+      Vector(NvrtcCompilationInput.generated(constrained), raw).foreach { input =>
+        val key = NvrtcCompilationKey.derive(input, target, version, programName)
+        assertEquals(store.store(key, artifact(input)), Right(()))
+        val loaded = store.load(key, input).toOption.flatten.get
+        assertEquals(loaded.input.kernels.head.launchRequirements.requiredBlock, Some(LaunchBlock.x(128)))
+        assert(Files.readString(store.entryPath(key).resolve("manifest")).contains("schema=2\n"))
+      }
+      val generatedKey = compilationKey(constrained)
+      assert(store.load(generatedKey, base).left.exists(_.isInstanceOf[NvrtcArtifactStoreInvalidEntry]))
+      val changedShape = constrained.copy(kernels = constrained.kernels.map(kernel =>
+        kernel.copy(launchRequirements = requirements.copy(requiredBlock = Some(LaunchBlock.xy(64, 2))))))
+      assert(store.load(generatedKey, changedShape).left.exists(_.isInstanceOf[NvrtcArtifactStoreInvalidEntry]))
+      val rawKey = NvrtcCompilationKey.derive(raw, target, version, programName)
+      assert(store.load(rawKey, rawInput(params(value[Int]("count")))).left.exists(_.isInstanceOf[NvrtcArtifactStoreInvalidEntry]))
     }
 
   test("stores raw artifacts with explicit source provenance"):

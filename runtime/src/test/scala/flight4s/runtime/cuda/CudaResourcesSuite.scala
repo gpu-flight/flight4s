@@ -16,6 +16,72 @@ import flight4s.runtime.cuda.internal.*
 
 class CudaResourcesSuite extends FunSuite:
   for rawLaunch <- Vector(false, true); explicit <- Vector(false, true) do
+    test(s"required block dimensions are enforced before native work: raw=$rawLaunch explicit=$explicit"):
+      val backend = RecordingBackend()
+      val context = openedContext(backend)
+      val required = LaunchBlock.xyz(8, 4, 4)
+      val definition = kernel("requiredShape") { () }.requiringBlock(required)
+      val generated = generatedFixture(definition)
+      val raw = RawCuda.kernel(definition.name, definition.signature, generated.kernel.cudaSource,
+        generated.kernel.compilerOptions, generated.kernel.launchRequirements)
+      try
+        val module = context.load(if rawLaunch then rawArtifact(raw) else generated.artifact).toOption.get
+        val function = if rawLaunch then module.function(raw).toOption.get else module.function(generated.kernel).toOption.get
+        val stream = if explicit then Some(context.createStream().toOption.get) else None
+        def launch(shape: LaunchBlock) =
+          val config = LaunchConfig(Grid.x(1), shape)
+          stream match
+            case Some(value) =>
+              if rawLaunch then function.launch(raw.bind(EmptyTuple), config, value)
+              else function.launch(definition.bind(EmptyTuple), config, value)
+            case None =>
+              if rawLaunch then function.launch(raw.bind(EmptyTuple), config)
+              else function.launch(definition.bind(EmptyTuple), config)
+        val before = backend.events.toVector
+        Vector(LaunchBlock.x(128), LaunchBlock.xyz(4, 8, 4), LaunchBlock.xyz(8, 8, 2), LaunchBlock.xyz(8, 4, 2)).foreach { shape =>
+          assertEquals(launch(shape), Left(CudaLaunchFailure.BlockShapeMismatch(definition.name, required, shape)))
+          assertEquals(backend.events.toVector, before)
+          assert(backend.lastLaunch.isEmpty)
+        }
+        assertEquals(launch(required), Right(()))
+        assertEquals(backend.lastLaunch.get.config.block, required)
+        assertEquals(backend.events.count(_.startsWith("launch:")), 1)
+      finally context.close()
+
+  test("caller copies cannot remove a compiled kernel's canonical block constraint"):
+    val backend = RecordingBackend()
+    val context = openedContext(backend)
+    val definition = kernel("canonicalShape") { () }.requiringBlock(LaunchBlock.x(128))
+    val fixture = generatedFixture(definition)
+    try
+      val module = context.load(fixture.artifact).toOption.get
+      val changedArtifact = fixture.kernel.copy(launchRequirements = KernelLaunchRequirements())
+      val changedDefinition = definition.copy(ir = definition.ir.copy(requiredBlock = None))
+      val function = module.function(changedArtifact).toOption.get
+      assertEquals(function.kernel.launchRequirements.requiredBlock, definition.requiredBlock)
+      assertEquals(function.launch(changedDefinition.bind(EmptyTuple), LaunchConfig(Grid.x(1), LaunchBlock.x(64))),
+        Left(CudaLaunchFailure.BlockShapeMismatch(definition.name, LaunchBlock.x(128), LaunchBlock.x(64))))
+      assert(backend.lastLaunch.isEmpty)
+    finally context.close()
+
+  test("shared PTX keeps each artifact's distinct block constraint"):
+    val backend = RecordingBackend()
+    val context = openedContext(backend)
+    val plain = kernel("sharedPtxShape") { () }
+    val a = generatedFixture(plain.requiringBlock(LaunchBlock.x(128)))
+    val b = generatedFixture(plain.requiringBlock(LaunchBlock.xy(64, 2)))
+    try
+      val first = context.load(a.artifact).toOption.get.function(a.kernel).toOption.get
+      val second = context.load(b.artifact.copy(ptx = a.artifact.ptx)).toOption.get.function(b.kernel).toOption.get
+      assertEquals(backend.events.count(_.startsWith("load:")), 1)
+      val config = LaunchConfig(Grid.x(1), LaunchBlock.x(128))
+      assertEquals(first.launch(a.definition.bind(EmptyTuple), config), Right(()))
+      assertEquals(second.launch(b.definition.bind(EmptyTuple), config),
+        Left(CudaLaunchFailure.BlockShapeMismatch(plain.name, LaunchBlock.xy(64, 2), LaunchBlock.x(128))))
+      assertEquals(backend.events.count(_.startsWith("launch:")), 1)
+    finally context.close()
+
+  for rawLaunch <- Vector(false, true); explicit <- Vector(false, true) do
     test(s"foreign owned buffers are rejected: raw=$rawLaunch explicit=$explicit"):
       val backend = RecordingBackend()
       val context = openedContext(backend)

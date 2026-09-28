@@ -24,6 +24,8 @@ class BlockRowSoftmaxSuite extends FunSuite:
     assertEquals(BlockRowSoftmax.run(Array.emptyFloatArray, 0, 3).toVector, Vector.empty)
 
   test("launch geometry is exactly one full fixed-size block per row"):
+    assertEquals(BlockRowSoftmax.definition.requiredBlock, Some(LaunchBlock.x(128)))
+    assertEquals(BlockRowSoftmax.generated.launchRequirements.requiredBlock, Some(LaunchBlock.x(128)))
     Vector(1, 3, 129, Int.MaxValue).foreach { rows =>
       assertEquals(BlockRowSoftmax.launchConfig(rows), LaunchConfig(Grid.x(rows), LaunchBlock.x(128)))
     }

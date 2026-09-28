@@ -15,7 +15,7 @@ import flight4s.core.compiler.{
   NvrtcSourceProvenance
 }
 import flight4s.core.ir.{DeviceBuffer, KernelInvocation, KernelSignature}
-import flight4s.core.launch.LaunchConfig
+import flight4s.core.launch.{Block as LaunchBlock, LaunchConfig}
 import flight4s.core.types.CudaType
 import flight4s.core.unsafe.raw.{RawCudaInvocation, RawCudaKernel}
 import flight4s.runtime.cuda.internal.*
@@ -67,6 +67,15 @@ sealed trait CudaLaunchFailure:
   def message: String
 
 object CudaLaunchFailure:
+  final case class BlockShapeMismatch(
+      kernelName: String,
+      required: LaunchBlock,
+      configured: LaunchBlock
+  ) extends CudaLaunchFailure:
+    override val message: String =
+      s"kernel $kernelName requires block (${required.x}, ${required.y}, ${required.z}), " +
+        s"but the configured block is (${configured.x}, ${configured.y}, ${configured.z})"
+
   final case class InvocationMismatch(
       expectedKernel: String,
       actualKernel: String
@@ -1493,6 +1502,7 @@ final class CudaFunction[Args <: Tuple] private[cuda] (
         case value: RawCudaInvocation[Args] => value.arguments
       for
         _ <- validateInvocation(invocation)
+        _ <- validateBlockShape(config)
         _ <- validateDynamicSharedMemory(config)
         streamHandle <- validateStream(stream)
         _ <- validateBuffers(arguments)
@@ -1546,6 +1556,12 @@ final class CudaFunction[Args <: Tuple] private[cuda] (
           actualKernel = actualName
         )
       )
+
+  private def validateBlockShape(config: LaunchConfig): Either[CudaLaunchFailure, Unit] =
+    kernel.launchRequirements.requiredBlock match
+      case Some(required) if required != config.block =>
+        Left(CudaLaunchFailure.BlockShapeMismatch(name, required, config.block))
+      case _ => Right(())
 
   private def validateDynamicSharedMemory(
       config: LaunchConfig
