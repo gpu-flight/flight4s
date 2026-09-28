@@ -212,7 +212,24 @@ Both next components are evaluated before either state is updated. The pair
 is a Scala tuple of scalar expressions, not a CUDA struct or a device collection.
 The prefix above reserves `positive_0`, `positive_1`, `positive_next_0`, and
 `positive_next_1` in their respective scopes. Existing name-conflict checks apply.
-Arbitrary tuple sizes and parallel folds are not yet supported.
+Nonempty tuple state extends the same rule beyond pairs:
+
+```scala
+val (count, total, squaredTotal) = gpuRange("i", literal(0), n)
+  .map(i => input(i).read)
+  .foldLeft("stats", (literal(0), literal(0.0f), literal(0.0f))) { (state, x) =>
+    (state._1 + literal(1), state._2 + x, state._3 + x * x)
+  }
+```
+
+Tuple folds work through plain, mapped, filtered, and nested traversals.
+`Tuple1` and tuples beyond 22 components are supported (23 components are tested
+on CUDA). Every component must remain an `Expr` of its original scalar type;
+empty tuples, host-valued components, and changing tuple shapes are rejected.
+All next values are snapshotted before stores, inside the accepted element's
+guards. This is per-thread recurrence semantics, not atomicity between threads.
+Large state can increase register/local-memory pressure. Case-class state,
+tuple-valued traversal elements, and parallel folds remain separate work.
 
 Ranges also support staged guards, including Scala `for` syntax:
 
@@ -240,7 +257,7 @@ val total = lowerTriangle.foldLeft("total", literal(0.0f))(_ + _)
 ```
 
 Each thread visits outer indices first, then inner indices in ascending order.
-Maps, guards, further `flatMap`, `foreach`, and scalar/pair folds can compose.
+Maps, guards, further `flatMap`, `foreach`, and scalar/tuple folds can compose.
 The inner factory builds once per terminal on the JVM; its bounds remain device
 expressions. Tuple-valued elements, comprehension value bindings, expression-only
 flattened sums, and automatic parallel distribution are not included.
