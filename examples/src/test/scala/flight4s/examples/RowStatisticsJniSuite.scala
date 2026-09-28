@@ -1,11 +1,8 @@
 package flight4s.examples
 
-import java.math.{BigDecimal as Decimal, MathContext, RoundingMode}
 import munit.FunSuite
 
 class RowStatisticsJniSuite extends FunSuite:
-  private val precision = new MathContext(80, RoundingMode.HALF_EVEN)
-
   test("Welford tuple state matches independent high-precision population statistics on CUDA"):
     assume(sys.props.contains("flight4s.cuda.native.path"), "set flight4s.cuda.native.path to run JNI tests")
     val tiny = java.lang.Float.MIN_VALUE
@@ -31,7 +28,7 @@ class RowStatisticsJniSuite extends FunSuite:
       assertEquals(actual.means.length, rows)
       assertEquals(actual.populationVariances.length, rows)
       values.grouped(columns).zipWithIndex.foreach { (row, index) =>
-        val (mean, variance) = reference(row)
+        val (mean, variance) = RowStatisticsReference(row)
         val scale = row.iterator.map(x => math.abs(x.toDouble)).max
         val actualMean = actual.means(index)
         val actualVariance = actual.populationVariances(index)
@@ -55,13 +52,3 @@ class RowStatisticsJniSuite extends FunSuite:
     val actual = RowStatistics.run(Array(1.0f, 2.0f, 3.0f, 4.0f), 1, 4)
     assertEquals(actual.means.toVector, Vector(2.5))
     assertEquals(actual.populationVariances.toVector, Vector(1.25))
-
-  private def reference(row: Array[Float]): (Double, Double) =
-    val exact = row.map(x => new Decimal(x.toDouble))
-    val count = Decimal.valueOf(row.length.toLong)
-    val mean = exact.foldLeft(Decimal.ZERO)((sum, x) => sum.add(x)).divide(count, precision)
-    val squaredDeviations = exact.foldLeft(Decimal.ZERO) { (sum, x) =>
-      val delta = x.subtract(mean)
-      sum.add(delta.multiply(delta))
-    }
-    (mean.doubleValue(), squaredDeviations.divide(count, precision).doubleValue())

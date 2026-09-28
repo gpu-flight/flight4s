@@ -631,6 +631,11 @@ sbt "examples/runMain flight4s.examples.RowStatistics --cuda-source"
 sbt -Dflight4s.cuda.native.path=<absolute-library-path> "examples/runMain flight4s.examples.RowStatistics"
 ```
 
+[BlockRowStatistics](examples/src/main/scala/flight4s/examples/BlockRowStatistics.scala)
+keeps that serial baseline intact and combines per-thread moments with an
+explicit shared-memory tree. Its exact 128-thread block contract, empty-state
+handling, and barriers are verified by GPU fixtures and CUDA sanitizers.
+
 ## Build
 
 Flight4s requires JDK 17 or newer and sbt:
