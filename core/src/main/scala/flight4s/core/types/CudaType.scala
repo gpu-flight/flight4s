@@ -12,6 +12,7 @@ sealed trait DivisibleType[T] extends CudaType[T]
 sealed trait RemainderType[T] extends CudaType[T]
 sealed trait OrderedType[T] extends CudaType[T]
 sealed trait EqualityComparableType[T] extends CudaType[T]
+sealed trait FloatingMathType[T] extends CudaType[T]
 
 sealed trait AccumulatorType[Input, Accumulator]:
   def inputType: CudaType[Input]
@@ -110,6 +111,7 @@ case object BF16
 
 case object F32
     extends AdditiveType[Float],
+      FloatingMathType[Float],
       MultiplicativeType[Float],
       DivisibleType[Float],
       OrderedType[Float],
@@ -120,6 +122,7 @@ case object F32
 
 case object F64
     extends AdditiveType[Double],
+      FloatingMathType[Double],
       MultiplicativeType[Double],
       DivisibleType[Double],
       OrderedType[Double],
@@ -195,6 +198,10 @@ object EqualityComparableType:
   given bfloat16Type: EqualityComparableType[BFloat16] = BF16
   given floatType: EqualityComparableType[Float] = F32
   given doubleType: EqualityComparableType[Double] = F64
+
+object FloatingMathType:
+  given floatType: FloatingMathType[Float] = F32
+  given doubleType: FloatingMathType[Double] = F64
 
 object AccumulatorType:
   given intAccumulator: AccumulatorType[Int, Int] with

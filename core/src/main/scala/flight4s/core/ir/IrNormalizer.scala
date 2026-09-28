@@ -150,6 +150,8 @@ private[core] object IrNormalizer:
       normalizeComparison(comparison, scope).asInstanceOf[Expr[T]]
     case conditional: Conditional[?] =>
       normalizeConditional(conditional, scope).asInstanceOf[Expr[T]]
+    case math: UnaryMath[?] =>
+      math.copy(value = expression(math.value, scope)).asInstanceOf[Expr[T]]
     case intrinsic: Intrinsic[?] => intrinsic.asInstanceOf[Expr[T]]
     case conversion: Convert[?, ?] =>
       conversion
@@ -303,6 +305,7 @@ private[core] object IrNormalizer:
       case binary: Binary[?] => binary.copy(span = span).asInstanceOf[Expr[T]]
       case comparison: Compare[?] => comparison.copy(span = span).asInstanceOf[Expr[T]]
       case conditional: Conditional[?] => conditional.copy(span = span).asInstanceOf[Expr[T]]
+      case math: UnaryMath[?] => math.copy(span = span).asInstanceOf[Expr[T]]
       case intrinsic: Intrinsic[?] => intrinsic.copy(span = span).asInstanceOf[Expr[T]]
       case conversion: Convert[?, ?] => conversion.copy(span = span).asInstanceOf[Expr[T]]
       case accumulation: ToAccumulator[?, ?] =>

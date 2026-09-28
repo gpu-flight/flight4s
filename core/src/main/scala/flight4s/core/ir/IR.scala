@@ -1,7 +1,7 @@
 package flight4s.core.ir
 
 import flight4s.core.abi.ScalarAbi
-import flight4s.core.types.{AccumulatorType, AdditiveType, CudaType, I32}
+import flight4s.core.types.{AccumulatorType, AdditiveType, CudaType, FloatingMathType, I32}
 
 enum BinaryOperator(val cudaToken: String):
   case Add extends BinaryOperator("+")
@@ -52,6 +52,21 @@ final case class Conditional[T](
     valueType: CudaType[T],
     span: SourceSpan = SourceSpan.Unknown
 ) extends Expr[T]
+
+enum UnaryMathOperator(val cudaName: String):
+  case Exp extends UnaryMathOperator("exp")
+  case Log extends UnaryMathOperator("log")
+  case Sqrt extends UnaryMathOperator("sqrt")
+  case Rsqrt extends UnaryMathOperator("rsqrt")
+  case Tanh extends UnaryMathOperator("tanh")
+
+final case class UnaryMath[T](
+    operator: UnaryMathOperator,
+    value: Expr[T],
+    mathType: FloatingMathType[T],
+    span: SourceSpan = SourceSpan.Unknown
+) extends Expr[T]:
+  override def valueType: CudaType[T] = mathType
 
 final case class Intrinsic[T](
     name: String,

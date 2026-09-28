@@ -625,6 +625,14 @@ object KernelValidator:
             s"$location.whenFalse", conditional.whenFalse.span
           )
 
+      case math: UnaryMath[?] =>
+        validateExpression(math.value, parameters, s"$location.value", scope) ++
+          requireSameType(
+            math.value.valueType, math.mathType,
+            "operand type does not match device math type",
+            s"$location.value", math.value.span
+          )
+
       case intrinsic: Intrinsic[?] =>
         intrinsicTypes.get(intrinsic.name) match
           case None =>
