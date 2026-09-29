@@ -16,6 +16,47 @@ path alongside the Scala DSL.
 
 ## Scala-style CUDA
 
+### Automatic Local Names
+
+Kernel-local bindings no longer need a CUDA variable name. Scala identifiers
+remain your handles; Flight4s chooses collision-free names in the generated CUDA:
+
+```scala
+import flight4s.core.dsl.CudaDsl.*
+import flight4s.core.launch.{Block as LaunchBlock}
+
+val blockSums = kernel("blockSums",
+  params(input[Float]("source"), output[Float]("sums"), value[Int]("count"))) { p =>
+  val i = let { blockIdx.x * blockDim.x + threadIdx.x }
+  val reduction = block.reduction[Float](LaunchBlock.x(256))
+  val item = choose(i < p._3)(p._1(i).read)(literal(0.0f))
+  val total = reduction.sum(item)
+  when(threadIdx.x === literal(0)) { p._2(blockIdx.x) := total }
+}
+```
+
+Launch this kernel with exactly `LaunchBlock.x(256)` and one output element
+per block. Every thread participates in the reduction, including threads past
+`count`, which contribute zero.
+
+Unnamed overloads also cover `local(initial)`, `localArray[T](count)`,
+`sharedArray[T](count)`, `sharedArray2D[T](rows, columns[, rowStride])`,
+`sharedArray3D[T](depth, rows, columns[, rowStride])`,
+`dynamicSharedArray[T]()`, `gpuFor(from, until[, step])`,
+`gpuRange(from, until)`, and `reduction.reduceTree(value)(combine)`.
+The bracketed arguments above mean optional overload arguments, not Scala syntax.
+Existing explicit-name overloads remain available for debugging and inspection.
+Automatic names are deterministic in generated CUDA, including across independent
+kernel constructions, and avoid explicit names declared later or at module scope.
+
+`let(expression)` and `let { expression }` both store one device snapshot.
+Plain `val x = expression` still binds a host expression tree, not a device
+snapshot. Use `local` for mutable device state and `when`/`gpuIf` for device
+control flow. An `@kernel` frontend that translates ordinary Scala bindings
+and control flow is planned, but is not implemented by these overloads.
+Kernel/parameter/constant names, named fold and ordered-sum results, warp
+collectives, and atomic results still use their explicit-name APIs.
+
 ### Native Vector Values
 
 `Float2` and `Float4` are actual CUDA `float2`/`float4` values, each owned by

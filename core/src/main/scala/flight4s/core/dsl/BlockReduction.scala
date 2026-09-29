@@ -11,6 +11,14 @@ final class BlockReduction[T] private[dsl] (
     threadCount: Int,
     valueType: CudaType[T]
 ):
+  def sum(value: Expr[T])(using
+      AdditiveType[T], BlockBuilder, DslSourcePosition
+  ): Expr[T] = reduceTree(value)(_ + _)
+
+  def reduceTree(value: Expr[T])(combine: (Expr[T], Expr[T]) => Expr[T])(using
+      builder: BlockBuilder, position: DslSourcePosition
+  ): Expr[T] = reduceTree(builder.freshName("reduction"), value)(combine)
+
   def sum(name: String, value: Expr[T])(using
       AdditiveType[T], BlockBuilder, DslSourcePosition
   ): Expr[T] = reduceTree(name, value)(_ + _)
