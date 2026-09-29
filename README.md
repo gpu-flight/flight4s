@@ -85,8 +85,32 @@ The factory and callers require explicit `@experimental` opt-in; no global
 `-experimental` flag is enabled. `input` is read-only and `output` is read-write.
 Device control flow still uses the DSL. Nested `when`, `gpuIf`, `scoped`,
 `gpuFor`, and traversal `foreach` bodies use their own snapshot builder;
-expression-only callbacks cannot acquire implicit statement snapshots.
-Scala `var`, `lazy val`, host/helper calls, external expression captures, and
+expression-only callbacks cannot acquire implicit statement snapshots or assignments.
+Initialized Scala `var` bindings of exactly `Expr[T]` become mutable device locals:
+
+```scala
+@experimental
+@kernel
+def rowSums = buildKernel("rowSums", params(
+    input[Float]("data"), output[Float]("sums"),
+    value[Int]("rows"), value[Int]("columns"))) { p =>
+  val row = blockIdx.x * blockDim.x + threadIdx.x
+  when(row < p._3) {
+    var total = literal(0.0f)
+    gpuRange(literal(0), p._4).foreach { column =>
+      total = total + p._1(row * p._4 + column).read
+    }
+    p._2(row) := total
+  }
+}
+```
+
+Assignments update the CUDA local, not a host Scala expression reference.
+Nested bodies may update an enclosing device local; declarations remain lexical
+and loop-local initializers execute on each device iteration. `val before = total`
+still snapshots its earlier value. `+=` is supported when Scala desugars it to
+assignment; plain host vars such as `var total = 0.0f` are not translated.
+`lazy val`, host/helper calls, external expression captures, and
 implicit tuple/product snapshots are rejected by this prototype.
 See the [frontend contract and tests](frontend/README.md).
 

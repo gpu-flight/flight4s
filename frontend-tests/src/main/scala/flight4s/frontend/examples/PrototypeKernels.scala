@@ -102,3 +102,63 @@ object PrototypeKernels:
         }
     }
   }
+
+  @experimental
+  @kernel
+  def mutableBranches = buildKernel("annotationMutableBranches", params(
+      input[Int]("data"), output[Int]("current"), output[Int]("saved"),
+      output[Int]("inner"), value[Int]("count"))) { p =>
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    when(i < p._5) {
+      var total = p._1(i).read
+      val before = total
+      gpuIf((i % literal(2)) === literal(0)) {
+        total = total + literal(3)
+      } {
+        total = total - literal(2)
+      }
+      scoped {
+        var total = literal(100) + i
+        total += literal(1)
+        p._4(i) := total
+      }
+      p._2(i) := total
+      p._3(i) := before
+    }
+  }
+
+  @experimental
+  @kernel
+  def mutableLoops = buildKernel("annotationMutableLoops", params(
+      input[Int]("data"), output[Int]("current"), output[Int]("previous"),
+      value[Int]("count"), value[Int]("rounds"))) { p =>
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    when(i < p._4) {
+      var total = p._1(i).read
+      gpuFor(literal(0), p._5) { round =>
+        var step = round + literal(1)
+        val before = total
+        step += literal(1)
+        total = before + step
+        p._3(i) := before
+      }
+      p._2(i) := total
+    }
+  }
+
+  @experimental
+  @kernel
+  def mutableRowSums = buildKernel("annotationMutableRowSums", params(
+      input[Float]("data"), output[Float]("sums"), output[Float]("previous"),
+      value[Int]("rows"), value[Int]("columns"))) { p =>
+    val row = blockIdx.x * blockDim.x + threadIdx.x
+    when(row < p._4) {
+      var total = literal(0.0f)
+      gpuRange(literal(0), p._5).foreach { column =>
+        val before = total
+        total = total + p._1(row * p._5 + column).read
+        p._3(row) := before
+      }
+      p._2(row) := total
+    }
+  }

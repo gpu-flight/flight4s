@@ -3,7 +3,8 @@
 This optional Scala 3.8.1 module implements `flight4s.frontend.kernel` using
 Scala's experimental `MacroAnnotation` API. It annotates an existing typed
 kernel factory and rewrites `Expr[T]` vals in statement-producing bodies to
-`CudaDsl.let` snapshots, including supported nested DSL callbacks.
+`CudaDsl.let` snapshots, including supported nested DSL callbacks. Initialized
+`Expr[T]` vars lower to typed device locals and assignments to device stores.
 
 ## Public Contract
 
@@ -89,16 +90,57 @@ Explicit attempts to emit DSL statements there retain the core's
 `DslErrorCode.StatementInsideExpression` staging rejection. This slice does
 not support implicit snapshots in arbitrary Scala expression blocks.
 
+## Mutable Device Locals
+
+Inside an annotated statement body:
+
+```scala
+var total = literal(0.0f)
+gpuRange(literal(0), columns).foreach { column =>
+  val before = total
+  total = total + data(row * columns + column).read
+  previous(row) := before
+}
+target(row) := total
+```
+
+The annotation replaces the Scala var with an immutable hidden
+`LocalVariable[Float]` handle. Each read becomes a `Load` and each assignment a
+`Store`, using the existing typed IR, effects, validation, optimizers, and codegen.
+The explicit DSL equivalent uses `local(literal(0.0f))`, `.read`, and `:=`.
+The initializer constructs its expression once and runs at its lexical CUDA
+declaration, including again on each iteration for a loop-local declaration.
+There is no host-side assignment to an Expr reference.
+
+Bindings must have exactly the public `Expr[T]` type, inferred or annotated;
+use `literal(0.0f)`, not a host `0.0f`. Assignments must be statements in the
+direct body or supported nested callbacks. Enclosing variables can be updated
+from branches, scopes, and foreach/for bodies. Compiler-symbol identity keeps
+same-named nested variables distinct. Compound assignment such as `+=` follows
+Scala's existing assignment desugaring. `val before = total` remains a snapshot
+even after subsequent assignments, whereas reading `total` sees the current value.
+An explicit `let` used as a var initializer retains its own snapshot plus the
+separate writable local; it is not an alias to mutable storage.
+
+Pure expression callbacks may read an enclosing device local under the existing
+IR read-effect rules, but cannot declare vars or assign them. General Scala
+expression blocks with assignments are not admitted. A statement callback
+embedded inside a pure callback still raises `StatementInsideExpression` during
+staging; the annotation does not bypass that boundary. Declarations, assignments,
+and rewritten reads retain their original source spans.
+
 ## Supported Subset
 
 - Immutable bindings with exactly the public `Expr[T]` type in the direct
   body and supported nested statement callbacks.
+- Initialized mutable `Expr[T]` bindings, reads, and statement assignments in
+  those same bodies, including compound assignment after Scala desugaring.
 - Literal host constants and existing non-Expr core DSL binding objects as metadata.
 - Existing DSL operations, typed buffer access, arithmetic and explicit
   `when`/`gpuIf` control flow, subject to existing IR validation.
 - The complete existing CUDA C++ -> NVRTC/PTX -> typed launch pipeline.
 
-The prototype rejects Scala `var`, `lazy val`, ordinary control flow/assignment,
+The prototype rejects host vars, `lazy val`, ordinary control flow, host assignment,
 implicit Expr vals in expression-only contexts, arbitrary host/helper calls (including
 parameterless methods), captured mutable host state, captured external Expr
 values, tuple/product snapshot bindings, and concrete IR-node subtype vals.
@@ -107,7 +149,7 @@ The method's signature and kernel name are normal host-side DSL construction.
 
 The annotation runs after Scala type checking. It cannot make ordinary
 `if (Expr[Boolean])` type-check. A Unit-returning CUDA-looking method with typed
-parameters, automatic signature inference, mutable state,
+parameters, automatic signature inference,
 and ordinary device control flow remain future frontend work.
 
 ## Verification
@@ -122,7 +164,7 @@ java "-Dsbt.supershell=false" "-Dflight4s.cuda.native.path=C:\Users\myoun\Docume
 opt-in and typed argument admission, and runs negative programs through actual
 compiler phases. `AnnotationIrSuite` compares exact IR, effects, validation,
 generated artifacts (including explicit-let branch/loop references),
-deterministic names, lexical placement, and source mapping. Five GPU tests
+deterministic names, lexical placement, and source mapping. The existing GPU tests
 run vector addition and Int/Float snapshot-after-write cases through NVRTC on
 both default and explicit streams, including bounds, sentinels, and input
 preservation. Without the native property, GPU fixtures skip.
@@ -131,6 +173,12 @@ Nested GPU cases cover zero/partial work, both branch alternatives, enclosing
 scope aliases, and zero/one/multiple loop iterations. A mapped/filtered/flattened
 `foreach` verifies that snapshots refresh rather than hoist. Compiler fixtures
 also retain default-argument getter symbols when copying method selections.
+Mutable-state tests compare exact branch/shadow/loop IR and generated artifacts
+with explicit local/read/store references. Eight GPU fixtures also cover Int
+branch updates, same-name scope isolation, loop-carried state, per-iteration
+locals, Float foreach row sums, saved previous values, empty work, and tails.
+Compiler programs verify scalar/vector types, purity and host-state rejection,
+and initialization with default-argument calls.
 
 The compiler harness depends on the pinned compiler only in the non-published
 test project. The published frontend depends on the stable core.
