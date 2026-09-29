@@ -10,7 +10,7 @@ ThisBuild / scmInfo := Some(
 )
 
 lazy val root = (project in file("."))
-  .aggregate(core, runtime, examples)
+  .aggregate(core, runtime, examples, frontend, frontendTests)
   .settings(
     name := "flight4s-root",
     publish / skip := true
@@ -43,4 +43,27 @@ lazy val examples = (project in file("examples"))
     javaOptions ++= sys.props.get("flight4s.cuda.native.path")
       .map(path => s"-Dflight4s.cuda.native.path=$path").toSeq,
     libraryDependencies += "org.scalameta" %% "munit" % "1.0.0" % Test
+  )
+
+lazy val frontend = (project in file("frontend"))
+  .dependsOn(core)
+  .settings(
+    name := "flight4s-frontend",
+    scalacOptions ++= Seq("-Xcheck-macros", "-Ycheck:all")
+  )
+
+lazy val frontendTests = (project in file("frontend-tests"))
+  .dependsOn(frontend, runtime)
+  .settings(
+    name := "flight4s-frontend-tests",
+    publish / skip := true,
+    Compile / scalacOptions ++= Seq("-Xcheck-macros", "-Ycheck:all"),
+    Test / scalacOptions ++= Seq("-Xcheck-macros", "-Ycheck:all"),
+    Test / fork := true,
+    Test / javaOptions ++= sys.props.get("flight4s.cuda.native.path")
+      .map(path => s"-Dflight4s.cuda.native.path=$path").toSeq,
+    libraryDependencies ++= Seq(
+      "org.scalameta" %% "munit" % "1.0.0" % Test,
+      "org.scala-lang" %% "scala3-compiler" % scalaVersion.value % Test
+    )
   )

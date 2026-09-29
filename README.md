@@ -50,13 +50,43 @@ Automatic names are deterministic in generated CUDA, including across independen
 kernel constructions, and avoid explicit names declared later or at module scope.
 
 `let(expression)` and `let { expression }` both store one device snapshot.
-Plain `val x = expression` still binds a host expression tree, not a device
-snapshot. Use `local` for mutable device state and `when`/`gpuIf` for device
-control flow. An `@kernel` frontend that translates ordinary Scala bindings
-and control flow is planned, but is not implemented by these overloads.
+In the explicit DSL, plain `val x = expression` binds a host expression tree.
+Use `local` for mutable device state and `when`/`gpuIf` for device control flow.
+The separate annotation prototype below adds snapshots for a limited subset
+of Scala bindings.
 Kernel/parameter/constant names remain explicit. The low-level `reduceSum`
 primitive still takes an index name; use `gpuRange(from, until).map(f).sum(initial)`
 for its unnamed expression form.
+
+### Annotation Prototype
+
+The optional `flight4s-frontend` module supports `@kernel` on a factory returning
+the existing typed `Kernel[Args]`. Top-level `val` bindings of `Expr[T]` become
+device snapshots automatically:
+
+```scala
+import scala.annotation.experimental
+import flight4s.frontend.kernel
+import flight4s.core.dsl.CudaDsl.{kernel as buildKernel, *}
+
+@experimental
+@kernel
+def vectorAdd = buildKernel("vectorAdd", params(
+    input[Float]("left"), input[Float]("right"),
+    output[Float]("target"), value[Int]("count"))) { p =>
+  val i = blockIdx.x * blockDim.x + threadIdx.x
+  when(i < p._4) {
+    p._3(i) := p._1(i).read + p._2(i).read
+  }
+}
+```
+
+The factory and callers require explicit `@experimental` opt-in; no global
+`-experimental` flag is enabled. `input` is read-only and `output` is read-write.
+Device control flow still uses the DSL. Nested snapshots use explicit `let`;
+Scala `var`, `lazy val`, host/helper calls, external expression captures, and
+implicit tuple/product snapshots are rejected by this prototype.
+See the [frontend contract and tests](frontend/README.md).
 
 ### Automatic Result Names
 
