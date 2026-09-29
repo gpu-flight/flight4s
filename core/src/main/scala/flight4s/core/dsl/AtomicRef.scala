@@ -10,6 +10,44 @@ final class AtomicRef[T, Space <: Global | Shared] private[dsl] (
     scope: AtomicScope,
     atomicType: AtomicValueType[T]
 ):
+  def load(order: MemoryOrder)(using builder: BlockBuilder, position: DslSourcePosition): Expr[T] =
+    load(builder.freshName("atomic"), order)
+
+  def exchange(value: Expr[T], order: MemoryOrder)(using builder: BlockBuilder, position: DslSourcePosition): Expr[T] =
+    exchange(builder.freshName("atomic"), value, order)
+
+  def fetchAdd(value: Expr[T], order: MemoryOrder)(using builder: BlockBuilder, position: DslSourcePosition): Expr[T] =
+    fetchAdd(builder.freshName("atomic"), value, order)
+
+  def fetchSub(value: Expr[T], order: MemoryOrder)(using builder: BlockBuilder, position: DslSourcePosition): Expr[T] =
+    fetchSub(builder.freshName("atomic"), value, order)
+
+  def fetchMin(value: Expr[T], order: MemoryOrder)(using
+      integral: AtomicIntegralType[T], builder: BlockBuilder, position: DslSourcePosition
+  ): Expr[T] = fetchMin(builder.freshName("atomic"), value, order)
+
+  def fetchMax(value: Expr[T], order: MemoryOrder)(using
+      integral: AtomicIntegralType[T], builder: BlockBuilder, position: DslSourcePosition
+  ): Expr[T] = fetchMax(builder.freshName("atomic"), value, order)
+
+  def fetchAnd(value: Expr[T], order: MemoryOrder)(using
+      integral: AtomicIntegralType[T], builder: BlockBuilder, position: DslSourcePosition
+  ): Expr[T] = fetchAnd(builder.freshName("atomic"), value, order)
+
+  def fetchOr(value: Expr[T], order: MemoryOrder)(using
+      integral: AtomicIntegralType[T], builder: BlockBuilder, position: DslSourcePosition
+  ): Expr[T] = fetchOr(builder.freshName("atomic"), value, order)
+
+  def fetchXor(value: Expr[T], order: MemoryOrder)(using
+      integral: AtomicIntegralType[T], builder: BlockBuilder, position: DslSourcePosition
+  ): Expr[T] = fetchXor(builder.freshName("atomic"), value, order)
+
+  /** Returns the observed old value, not a success Boolean. */
+  def compareExchange(expected: Expr[T], desired: Expr[T], successOrder: MemoryOrder,
+      failureOrder: MemoryOrder)(using
+      integral: AtomicIntegralType[T], builder: BlockBuilder, position: DslSourcePosition
+  ): Expr[T] = compareExchange(builder.freshName("atomic"), expected, desired, successOrder, failureOrder)
+
   def load(name: String, order: MemoryOrder)(using BlockBuilder, DslSourcePosition): Expr[T] =
     result(name, AtomicOperation.Load, Vector.empty, order)
 

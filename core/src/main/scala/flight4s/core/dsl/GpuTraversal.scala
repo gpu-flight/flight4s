@@ -6,6 +6,12 @@ import flight4s.core.types.{AccumulatorType, AdditiveType}
 
 /** Common serial traversal contract for library-built staged ranges. */
 abstract class GpuTraversal[T] private[dsl] () extends GpuValueTraversal[Expr[T]]:
+  /** Statement-producing sum; deliberately distinct from MappedGpuRange's expression-only sum. */
+  final def orderedSum[A](initial: Expr[A])(using
+      rule: AccumulatorType[T, A], addition: AdditiveType[A],
+      builder: BlockBuilder, position: DslSourcePosition
+  ): Expr[A] = sum(builder.freshName("sum"), initial)
+
   /** Named ordered accumulation, including guarded/nested traversals and explicit promotion. */
   final def sum[A](accumulatorName: String, initial: Expr[A])(using
       rule: AccumulatorType[T, A],
