@@ -65,6 +65,8 @@ object CudaCodegen:
     def value(): String =
       next("value")
 
+    def binding(label: String): String = next(s"auto_$label")
+
     private def next(label: String): String =
       var candidate = s"flight4s_${label}_$nextId"
       nextId += 1
@@ -178,8 +180,16 @@ object CudaCodegen:
       writer: SourceWriter,
       moduleSymbols: Set[String]
   ):
-    private val freshNames =
-      FreshNames(collectIdentifiers(kernel) ++ moduleSymbols)
+    private val identifiers = collectIdentifiers(kernel)
+    private val freshNames = FreshNames(identifiers ++ moduleSymbols)
+
+    // Ownership stamps protect IR bindings across kernels, but must not affect source or cache keys.
+    private val automaticNames = identifiers.iterator
+      .filter(AutomaticBindingName.isGenerated).toVector
+      .sortBy(AutomaticBindingName.emissionOrder)
+      .map(name => name -> freshNames.binding(AutomaticBindingName.label(name))).toMap
+
+    private def bindingName(name: String): String = automaticNames.getOrElse(name, name)
 
     def emit(): Either[CodegenError, Int] =
       if usesScopedAtomics(kernel.body) then
@@ -219,14 +229,14 @@ object CudaCodegen:
           val dimensions =
             static.layout.physicalDimensions.map(size => s"[$size]").mkString
           writer.line(
-            s"${indentation}__shared__ ${shared.valueType.cudaName} ${shared.name}$dimensions;",
+            s"${indentation}__shared__ ${shared.valueType.cudaName} ${bindingName(shared.name)}$dimensions;",
             shared.span
           )
         case DynamicSharedMemory =>
           writer.line(
             s"$indentation" +
               s"extern __shared__ __align__(${shared.valueType.alignmentBytes}) " +
-              s"${shared.valueType.cudaName} ${shared.name}[];",
+              s"${shared.valueType.cudaName} ${bindingName(shared.name)}[];",
             shared.span
           )
 
@@ -249,7 +259,7 @@ object CudaCodegen:
           emitExpression(declaration.initial).map { initial =>
             writer.line(
               s"$prefix${declaration.local.valueType.cudaName} " +
-                s"${declaration.local.name} = $initial;",
+                s"${bindingName(declaration.local.name)} = $initial;",
               declaration.span
             )
           }
@@ -257,7 +267,7 @@ object CudaCodegen:
         case declaration: LocalArrayDeclaration[?] =>
           writer.line(
             s"$prefix${declaration.array.valueType.cudaName} " +
-              s"${declaration.array.name}[${declaration.array.elementCount}];",
+              s"${bindingName(declaration.array.name)}[${declaration.array.elementCount}];",
             declaration.span
           )
           Right(())
@@ -274,7 +284,7 @@ object CudaCodegen:
             value <- emitExpression(shuffle.value)
             selector <- emitExpression(shuffle.selector)
           yield writer.line(
-            s"$prefix${shuffle.local.valueType.cudaName} ${shuffle.local.name} = ::${shuffle.operator.cudaName}($mask, $value, $selector, ${shuffle.width});",
+            s"$prefix${shuffle.local.valueType.cudaName} ${bindingName(shuffle.local.name)} = ::${shuffle.operator.cudaName}($mask, $value, $selector, ${shuffle.width});",
             shuffle.span
           )
 
@@ -283,7 +293,7 @@ object CudaCodegen:
             mask <- emitExpression(vote.mask)
             predicate <- emitExpression(vote.predicate)
           yield writer.line(
-            s"$prefix${vote.local.valueType.cudaName} ${vote.local.name} = ::${vote.operator.cudaName}($mask, $predicate);",
+            s"$prefix${vote.local.valueType.cudaName} ${bindingName(vote.local.name)} = ::${vote.operator.cudaName}($mask, $predicate);",
             vote.span
           )
 
@@ -292,7 +302,7 @@ object CudaCodegen:
             target <- emitPlace(atomic.target)
             value <- emitExpression(atomic.value)
           yield writer.line(
-            s"$prefix${atomic.local.valueType.cudaName} ${atomic.local.name} = ::atomicAdd(&$target, $value);",
+            s"$prefix${atomic.local.valueType.cudaName} ${bindingName(atomic.local.name)} = ::atomicAdd(&$target, $value);",
             atomic.span
           )
 
@@ -307,7 +317,7 @@ object CudaCodegen:
             target <- emitPlace(atomic.target)
             operands <- sequence(atomic.operands.map(emitExpression))
           yield
-            val name = atomic.local.name
+            val name = bindingName(atomic.local.name)
             val cudaType = atomic.atomicType.cudaName
             val order = atomic.order.cudaName
             val scope = atomic.scope.cudaName
@@ -342,7 +352,7 @@ object CudaCodegen:
         case accumulation: Accumulate[?] =>
           emitExpression(accumulation.value).map { value =>
             writer.line(
-              s"$prefix${accumulation.target.name} += $value;",
+              s"$prefix${bindingName(accumulation.target.name)} += $value;",
               accumulation.span
             )
           }
@@ -374,7 +384,7 @@ object CudaCodegen:
             from <- emitExpression(loop.from)
             until <- emitExpression(loop.until)
             _ =
-              val (header, binding) = loopOpening(loop.index.name, from, until, loop.step)
+              val (header, binding) = loopOpening(bindingName(loop.index.name), from, until, loop.step)
               writer.line(s"$prefix$header", loop.span)
               binding.foreach(line => writer.line(s"${indent(indentation + 1)}$line", loop.index.span))
             _ <- emitBlock(loop.body, indentation + 1)
@@ -461,10 +471,10 @@ object CudaCodegen:
           }
 
         case index: ReductionIndex =>
-          Right(index.name)
+          Right(bindingName(index.name))
 
         case index: LoopIndex =>
-          Right(index.name)
+          Right(bindingName(index.name))
 
         case reduction: ReduceSum[?, ?] =>
           emitReduction(reduction)
@@ -507,15 +517,15 @@ object CudaCodegen:
 
         case shared: SharedElement[?] =>
           sequence(shared.indices.map(emitExpression)).map { indices =>
-            shared.arrayName + indices.map(index => s"[$index]").mkString
+            bindingName(shared.arrayName) + indices.map(index => s"[$index]").mkString
           }
 
         case local: LocalVariable[?] =>
-          Right(local.name)
+          Right(bindingName(local.name))
 
         case local: LocalArrayElement[?] =>
           emitExpression(local.index).map(index =>
-            s"${local.arrayName}[$index]"
+            s"${bindingName(local.arrayName)}[$index]"
           )
 
     private def loopOpening(index: String, from: String, until: String, step: Int): (String, Option[String]) =
@@ -545,7 +555,7 @@ object CudaCodegen:
         val lowering = ReductionLoweringStrategy.select(reduction.policy)
         val accumulator = freshNames.accumulator()
         val accumulatorType = reduction.valueType.cudaName
-        val (header, binding) = loopOpening(reduction.index.name, from, until, reduction.step)
+        val (header, binding) = loopOpening(bindingName(reduction.index.name), from, until, reduction.step)
         s"([&]() { /* flight4s reduction: ${lowering.cudaMarker} */ " +
           s"$accumulatorType $accumulator = $initial; " +
           s"$header " + binding.fold("")(_ + " ") +

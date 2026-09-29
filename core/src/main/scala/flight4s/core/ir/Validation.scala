@@ -233,7 +233,7 @@ object KernelValidator:
       case (memory, index) =>
         val location = s"sharedMemory[$index]"
         val identifierErrors =
-          if isIdentifier(memory.name) then Vector.empty
+          if isBindingIdentifier(memory.name) then Vector.empty
           else
             Vector(
               ValidationError(
@@ -991,7 +991,7 @@ object KernelValidator:
 
       case reduction: ReduceSum[?, ?] =>
         val indexErrors =
-          (if isIdentifier(reduction.index.name) then Vector.empty
+          (if isBindingIdentifier(reduction.index.name) then Vector.empty
            else
              Vector(
                ValidationError(
@@ -1365,7 +1365,7 @@ object KernelValidator:
 
       case local: LocalVariable[?] =>
         val nameErrors =
-          if isIdentifier(local.name) then Vector.empty
+          if isBindingIdentifier(local.name) then Vector.empty
           else
             Vector(
               ValidationError(
@@ -1442,7 +1442,7 @@ object KernelValidator:
       location: String
   ): Vector[ValidationError] =
     val identifierErrors =
-      if isIdentifier(local.name) then Vector.empty
+      if isBindingIdentifier(local.name) then Vector.empty
       else
         Vector(
           ValidationError(
@@ -1507,7 +1507,7 @@ object KernelValidator:
       location: String
   ): LocalArrayDeclarationValidation =
     val identifierErrors =
-      if isIdentifier(array.name) then Vector.empty
+      if isBindingIdentifier(array.name) then Vector.empty
       else
         Vector(
           ValidationError(
@@ -1590,7 +1590,7 @@ object KernelValidator:
       location: String
   ): Vector[ValidationError] =
     val identifierErrors =
-      if isIdentifier(index.name) then Vector.empty
+      if isBindingIdentifier(index.name) then Vector.empty
       else
         Vector(
           ValidationError(
@@ -1652,3 +1652,6 @@ object KernelValidator:
 
   private def isIdentifier(value: String): Boolean =
     CudaIdentifier.isValid(value)
+
+  private def isBindingIdentifier(value: String): Boolean =
+    isIdentifier(value) || AutomaticBindingName.isGenerated(value)
