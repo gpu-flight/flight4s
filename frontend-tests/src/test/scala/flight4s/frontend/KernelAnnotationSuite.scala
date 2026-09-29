@@ -1,6 +1,7 @@
 package flight4s.frontend
 
 import munit.FunSuite
+import flight4s.core.dsl.{DslError, DslErrorCode}
 import flight4s.core.ir.*
 
 class KernelAnnotationSuite extends FunSuite:
@@ -65,6 +66,26 @@ class KernelAnnotationSuite extends FunSuite:
       }
     }
 
+  test("nested statement callbacks admit ordinary snapshot vals"):
+    val bodies = Vector(
+      "when(threadIdx.x < literal(1)) { BODY }",
+      "gpuIf(threadIdx.x < literal(1)) { BODY } { BODY }",
+      "scoped { BODY }",
+      "gpuFor(literal(0), literal(2)) { index => BODY }",
+      "gpuRange(literal(0), literal(2)).foreach { index => BODY }",
+      "gpuRange(literal(0), literal(2)).map(index => index + literal(1)).foreach { index => BODY }",
+      "gpuRange(literal(0), literal(2)).map(index => (index, index + literal(1))).foreach { pair => BODY }",
+      "gpuRange(literal(0), literal(2)).filter(index => index < literal(1)).foreach { index => BODY }",
+      "gpuRange(literal(0), literal(2)).flatMap(index => gpuRange(literal(0), literal(2))).foreach { index => BODY }"
+    )
+    val snapshot = "val old = p._1(literal(0)).read; p._1(literal(0)) := literal(9); p._1(literal(1)) := old"
+    bodies.foreach { body =>
+      CompilerHarness.withDirectory { directory =>
+        val result = CompilerHarness.compile(directory, "Nested", factory(body.replace("BODY", snapshot)))
+        assertEquals(result.errors, Vector.empty, body)
+      }
+    }
+
   test("host calls are rejected instead of executing during kernel construction"):
     rejected(factory("println(\"host effect\"); p._1(literal(0)) := literal(1)"), "DSL operations")
 
@@ -82,13 +103,55 @@ class KernelAnnotationSuite extends FunSuite:
   test("tuple Expr bindings require an explicit structured-state contract"):
     rejected(factory("val pair = (threadIdx.x, threadIdx.x); p._1(literal(0)) := pair._1"), "binding type")
 
-  test("Scala control flow mutable state and nested implicit snapshots are rejected"):
+  test("Scala control flow and mutable state remain rejected"):
     rejected(factory("if true then p._1(literal(0)) := literal(1)"), "explicit DSL control flow")
     rejected(factory("while false do p._1(literal(0)) := literal(1)"), "explicit DSL control flow")
     rejected(factory("var i = threadIdx.x; p._1(literal(0)) := i"), "var or lazy val")
     rejected(factory("lazy val i = threadIdx.x; p._1(literal(0)) := i"), "var or lazy val")
-    rejected(factory("when(threadIdx.x < literal(1)) { val i = threadIdx.x; p._1(literal(0)) := i }"),
-      "top-level Expr vals")
+
+  test("expression-only traversal callbacks cannot acquire implicit statement snapshots"):
+    rejected(factory("val result = gpuRange(literal(0), literal(2)).map { index => val saved = index + literal(1); saved }.sum(literal(0)); p._1(literal(0)) := result"),
+      "expression-only callbacks remain pure")
+    rejected(factory("gpuRange(literal(0), literal(2)).filter { index => val saved = index + literal(1); saved < literal(2) }.foreach { index => p._1(index) := index }"),
+      "expression-only callbacks remain pure")
+    rejected(factory("val result = gpuRange(literal(0), literal(2)).foldLeft(literal(0)) { (sum, index) => val saved = index + literal(1); sum + saved }; p._1(literal(0)) := result"),
+      "expression-only callbacks remain pure")
+
+  test("nested statement callbacks retain host capture binding and mutable-state restrictions"):
+    rejected(factory("when(threadIdx.x < literal(1)) { println(\"host\") }"), "DSL operations")
+    rejected(factory("scoped { val saved = external; p._1(literal(0)) := saved }", "val external = threadIdx.x"), "external Expr values")
+    rejected(factory("gpuFor(literal(0), literal(2)) { index => val saved = literal(host); p._1(index) := saved }", "var host = 7"), "mutable host state")
+    rejected(factory("when(threadIdx.x < literal(1)) { var saved = threadIdx.x; p._1(literal(0)) := saved }"), "var or lazy val")
+    rejected(factory("scoped { val pair = (threadIdx.x, threadIdx.x); p._1(literal(0)) := pair._1 }"), "binding type")
+
+  test("expression-only callbacks keep existing explicit statement-effect rejection"):
+    CompilerHarness.withDirectory { directory =>
+      val result = CompilerHarness.compile(directory, "PureBoundary", factory(
+        "val result = gpuRange(literal(0), literal(2)).map { index => scoped { val saved = index + literal(1); p._1(index) := saved }; index }.sum(literal(0)); p._1(literal(0)) := result"))
+      assertEquals(result.errors, Vector.empty)
+      CompilerHarness.withClasses(Seq(result.classes)) { loader =>
+        val definition = loader.loadClass("frontendfixture.Definitions")
+        val failure = intercept[java.lang.reflect.InvocationTargetException] {
+          definition.getMethod("definition").invoke(definition.getConstructor().newInstance())
+        }
+        val error = failure.getCause.asInstanceOf[DslError]
+        assertEquals(error.code, DslErrorCode.StatementInsideExpression)
+      }
+    }
+
+  test("snapshot initializers preserve compiler-created default-argument bindings"):
+    CompilerHarness.withDirectory { directory =>
+      val result = CompilerHarness.compile(directory, "DefaultArgument", factory(
+        "val result = gpuRange(literal(0), literal(2)).map(index => index + literal(1)).sum(literal(0)); p._1(literal(0)) := result"))
+      assertEquals(result.errors, Vector.empty)
+      CompilerHarness.withClasses(Seq(result.classes)) { loader =>
+        val definition = loader.loadClass("frontendfixture.Definitions")
+        val staged = definition.getMethod("definition").invoke(definition.getConstructor().newInstance())
+          .asInstanceOf[Kernel[Tuple1[DeviceBuffer[Int]]]]
+        assertEquals(staged.body.statements.size, 2)
+        assert(KernelValidator.validate(staged).isValid)
+      }
+    }
 
   test("annotations reject wrong targets signatures and indirect factories"):
     val imports = """

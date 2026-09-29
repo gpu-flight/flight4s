@@ -2,7 +2,8 @@
 
 This optional Scala 3.8.1 module implements `flight4s.frontend.kernel` using
 Scala's experimental `MacroAnnotation` API. It annotates an existing typed
-kernel factory and rewrites top-level `Expr[T]` vals to `CudaDsl.let` snapshots.
+kernel factory and rewrites `Expr[T]` vals in statement-producing bodies to
+`CudaDsl.let` snapshots, including supported nested DSL callbacks.
 
 ## Public Contract
 
@@ -50,7 +51,7 @@ and `-Ycheck:all`, including actual separate compiler invocations.
 
 ## Snapshot Semantics
 
-Inside the direct kernel body:
+Inside the direct kernel body or a supported nested statement body:
 
 ```scala
 val original = data(i).read
@@ -64,20 +65,41 @@ constructs its expression once, and the original val's Scala source span is
 retained. Each factory invocation builds a fresh kernel with automatic local
 binding identities; generated CUDA names remain deterministic.
 
-Explicit `let` vals are preserved without an extra snapshot. In nested DSL
-branches and callbacks, use explicit `let` where statement effects are allowed.
-Expression-only callbacks still enforce the core's staging restrictions.
+Explicit `let` vals are preserved without an extra snapshot. Nested `when`,
+both `gpuIf` alternatives, `scoped`, `gpuFor`, and traversal `foreach` bodies
+use the callback's own `BlockBuilder`. This includes mapped, tuple-valued,
+filtered, and flattened traversal terminals.
+
+```scala
+when(i < count) {
+  val original = data(i).read
+  data(i) := literal(9)
+  target(i) := original
+}
+```
+
+The snapshot stays inside the branch; an inactive lane does not load `data(i)`.
+A snapshot inside a loop executes again on each device iteration. Nested
+callbacks may read earlier snapshots from enclosing lexical scopes.
+
+Expression-only `map`, filter predicates, reduction expressions, and fold
+steps do not provide a statement builder for implicit snapshots. Initialized
+`Expr` vals there are rejected; callback parameters are not declarations.
+Explicit attempts to emit DSL statements there retain the core's
+`DslErrorCode.StatementInsideExpression` staging rejection. This slice does
+not support implicit snapshots in arbitrary Scala expression blocks.
 
 ## Supported Subset
 
-- Top-level immutable bindings with exactly the public `Expr[T]` type.
+- Immutable bindings with exactly the public `Expr[T]` type in the direct
+  body and supported nested statement callbacks.
 - Literal host constants and existing non-Expr core DSL binding objects as metadata.
 - Existing DSL operations, typed buffer access, arithmetic and explicit
   `when`/`gpuIf` control flow, subject to existing IR validation.
 - The complete existing CUDA C++ -> NVRTC/PTX -> typed launch pipeline.
 
 The prototype rejects Scala `var`, `lazy val`, ordinary control flow/assignment,
-implicit Expr vals in nested bodies, arbitrary host/helper calls (including
+implicit Expr vals in expression-only contexts, arbitrary host/helper calls (including
 parameterless methods), captured mutable host state, captured external Expr
 values, tuple/product snapshot bindings, and concrete IR-node subtype vals.
 The restriction is a documented compiler subset, not a security sandbox.
@@ -85,7 +107,7 @@ The method's signature and kernel name are normal host-side DSL construction.
 
 The annotation runs after Scala type checking. It cannot make ordinary
 `if (Expr[Boolean])` type-check. A Unit-returning CUDA-looking method with typed
-parameters, automatic signature inference, nested snapshots, mutable state,
+parameters, automatic signature inference, mutable state,
 and ordinary device control flow remain future frontend work.
 
 ## Verification
@@ -99,10 +121,16 @@ java "-Dsbt.supershell=false" "-Dflight4s.cuda.native.path=C:\Users\myoun\Docume
 `KernelAnnotationSuite` compiles definition/use programs separately, checks
 opt-in and typed argument admission, and runs negative programs through actual
 compiler phases. `AnnotationIrSuite` compares exact IR, effects, validation,
-generated artifacts, deterministic names, and source mapping. Three GPU tests
+generated artifacts (including explicit-let branch/loop references),
+deterministic names, lexical placement, and source mapping. Five GPU tests
 run vector addition and Int/Float snapshot-after-write cases through NVRTC on
 both default and explicit streams, including bounds, sentinels, and input
 preservation. Without the native property, GPU fixtures skip.
+
+Nested GPU cases cover zero/partial work, both branch alternatives, enclosing
+scope aliases, and zero/one/multiple loop iterations. A mapped/filtered/flattened
+`foreach` verifies that snapshots refresh rather than hoist. Compiler fixtures
+also retain default-argument getter symbols when copying method selections.
 
 The compiler harness depends on the pinned compiler only in the non-published
 test project. The published frontend depends on the stable core.
