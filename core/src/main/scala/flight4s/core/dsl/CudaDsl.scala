@@ -524,6 +524,12 @@ object CudaDsl:
 
   /** Executes the update once and binds CUDA's returned old value to a device local. */
   def atomicFetchAdd[T, Space <: Global | Shared](
+      target: Place[T, Space, ReadWrite], value: Expr[T]
+  )(using addition: AtomicAddType[T], builder: BlockBuilder, position: DslSourcePosition): Expr[T] =
+    atomicFetchAdd(builder.freshName("atomic"), target, value)
+
+  /** Executes the update once and binds CUDA's returned old value to a device local. */
+  def atomicFetchAdd[T, Space <: Global | Shared](
       name: String,
       target: Place[T, Space, ReadWrite],
       value: Expr[T]
@@ -639,6 +645,67 @@ object CudaDsl:
       new BlockReduction(sharedArray[T](name, count.toInt), shape, count.toInt, valueType)
 
   object warp:
+    def reduceSum[T](mask: UInt, value: Expr[T])(using
+        WarpShuffleType[T], AdditiveType[T], BlockBuilder, DslSourcePosition
+    ): Expr[T] = reduceSum(mask, value, 32)
+
+    def reduceSum[T](mask: UInt, value: Expr[T], width: Int)(using
+        shuffleType: WarpShuffleType[T], addition: AdditiveType[T],
+        builder: BlockBuilder, position: DslSourcePosition
+    ): Expr[T] = reduceSum(builder.freshName("warp"), mask, value, width)
+
+    def reduceTree[T](mask: UInt, value: Expr[T])(combine: (Expr[T], Expr[T]) => Expr[T])(using
+        WarpShuffleType[T], BlockBuilder, DslSourcePosition
+    ): Expr[T] = reduceTree(mask, value, 32)(combine)
+
+    def reduceTree[T](mask: UInt, value: Expr[T], width: Int)(combine: (Expr[T], Expr[T]) => Expr[T])(using
+        shuffleType: WarpShuffleType[T], builder: BlockBuilder, position: DslSourcePosition
+    ): Expr[T] = reduceTree(builder.freshName("warp"), mask, value, width)(combine)
+
+    def shuffle[T](mask: Expr[UInt], value: Expr[T], sourceLane: Expr[Int])(using
+        WarpShuffleType[T], BlockBuilder, DslSourcePosition
+    ): Expr[T] = shuffle(mask, value, sourceLane, 32)
+
+    def shuffle[T](mask: Expr[UInt], value: Expr[T], sourceLane: Expr[Int], width: Int)(using
+        shuffleType: WarpShuffleType[T], builder: BlockBuilder, position: DslSourcePosition
+    ): Expr[T] = shuffle(builder.freshName("warp"), mask, value, sourceLane, width)
+
+    def shuffleUp[T](mask: Expr[UInt], value: Expr[T], delta: Expr[UInt])(using
+        WarpShuffleType[T], BlockBuilder, DslSourcePosition
+    ): Expr[T] = shuffleUp(mask, value, delta, 32)
+
+    def shuffleUp[T](mask: Expr[UInt], value: Expr[T], delta: Expr[UInt], width: Int)(using
+        shuffleType: WarpShuffleType[T], builder: BlockBuilder, position: DslSourcePosition
+    ): Expr[T] = shuffleUp(builder.freshName("warp"), mask, value, delta, width)
+
+    def shuffleDown[T](mask: Expr[UInt], value: Expr[T], delta: Expr[UInt])(using
+        WarpShuffleType[T], BlockBuilder, DslSourcePosition
+    ): Expr[T] = shuffleDown(mask, value, delta, 32)
+
+    def shuffleDown[T](mask: Expr[UInt], value: Expr[T], delta: Expr[UInt], width: Int)(using
+        shuffleType: WarpShuffleType[T], builder: BlockBuilder, position: DslSourcePosition
+    ): Expr[T] = shuffleDown(builder.freshName("warp"), mask, value, delta, width)
+
+    def shuffleXor[T](mask: Expr[UInt], value: Expr[T], laneMask: Expr[Int])(using
+        WarpShuffleType[T], BlockBuilder, DslSourcePosition
+    ): Expr[T] = shuffleXor(mask, value, laneMask, 32)
+
+    def shuffleXor[T](mask: Expr[UInt], value: Expr[T], laneMask: Expr[Int], width: Int)(using
+        shuffleType: WarpShuffleType[T], builder: BlockBuilder, position: DslSourcePosition
+    ): Expr[T] = shuffleXor(builder.freshName("warp"), mask, value, laneMask, width)
+
+    def ballot(mask: Expr[UInt], predicate: Expr[Boolean])(using
+        builder: BlockBuilder, position: DslSourcePosition
+    ): Expr[UInt] = ballot(builder.freshName("warp"), mask, predicate)
+
+    def all(mask: Expr[UInt], predicate: Expr[Boolean])(using
+        builder: BlockBuilder, position: DslSourcePosition
+    ): Expr[Boolean] = all(builder.freshName("warp"), mask, predicate)
+
+    def any(mask: Expr[UInt], predicate: Expr[Boolean])(using
+        builder: BlockBuilder, position: DslSourcePosition
+    ): Expr[Boolean] = any(builder.freshName("warp"), mask, predicate)
+
     def reduceSum[T](name: String, mask: UInt, value: Expr[T], width: Int = 32)(using
         WarpShuffleType[T], AdditiveType[T], BlockBuilder, DslSourcePosition
     ): Expr[T] = reduceTree(name, mask, value, width)(_ + _)

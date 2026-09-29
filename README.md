@@ -54,8 +54,48 @@ Plain `val x = expression` still binds a host expression tree, not a device
 snapshot. Use `local` for mutable device state and `when`/`gpuIf` for device
 control flow. An `@kernel` frontend that translates ordinary Scala bindings
 and control flow is planned, but is not implemented by these overloads.
-Kernel/parameter/constant names, named fold and ordered-sum results, warp
-collectives, and atomic results still use their explicit-name APIs.
+Kernel/parameter/constant names remain explicit. The low-level `reduceSum`
+primitive still takes an index name; use `gpuRange(from, until).map(f).sum(initial)`
+for its unnamed expression form.
+
+### Automatic Result Names
+
+Scalar, tuple, and case-class folds also support `foldLeft(initial)(step)`.
+Use `orderedSum(initial)` for a stored, serial result from any scalar traversal:
+
+```scala
+// Inside a kernel body with count and a Float source buffer.
+val positiveTotal = gpuRange(literal(0), count)
+  .map(i => source(i).read)
+  .filter(_ > literal(0.0f))
+  .orderedSum(literal(0.0f))
+
+val pair = gpuRange(literal(0), count)
+  .foldLeft((literal(0), literal(1))) { (state, _) =>
+    (state._2, state._1 + state._2)
+  }
+```
+
+Tuple and case-class fields update simultaneously from the previous state.
+The existing mapped `.sum(initial, policy)` remains expression-only;
+`orderedSum(initial)` emits statements and cannot be used in expression-only
+callbacks. Neither API implicitly parallelizes a traversal.
+
+Warp reductions, shuffles, votes, and atomic snapshots also accept unnamed forms:
+
+```scala
+// Inside a convergent kernel body; item is Expr[Float], counter is an Int buffer.
+import flight4s.core.ir.MemoryOrder
+import flight4s.core.types.UInt
+
+val warpTotal = warp.reduceSum(UInt.fromBits(-1), item)
+val ticket = atomic.device(counter(literal(0)))
+  .fetchAdd(literal(1), MemoryOrder.Relaxed)
+```
+
+Warp participation masks and optional widths are unchanged. Atomic memory orders
+and scopes remain explicit, and compare-exchange returns the observed old value,
+not a Boolean. Explicit-name overloads remain available for every operation.
 
 ### Native Vector Values
 

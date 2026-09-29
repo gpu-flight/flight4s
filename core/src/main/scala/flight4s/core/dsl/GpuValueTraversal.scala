@@ -1,11 +1,28 @@
 package flight4s.core.dsl
 
 import flight4s.core.dsl.CudaDsl.*
-import flight4s.core.ir.SourceSpan
+import flight4s.core.ir.{Expr, SourceSpan}
+import flight4s.core.types.CudaType
 
 /** Shared ordered composition for scalar, tuple, and named-product expression traversals. */
 abstract class GpuValueTraversal[Value] private[dsl] ():
   def foreach(body: Value => (BlockBuilder ?=> Unit))(using BlockBuilder, DslSourcePosition): Unit
+
+  def foldLeft[A](accumulatorName: String, initial: Expr[A])(
+      step: (Expr[A], Value) => Expr[A]
+  )(using CudaType[A], BlockBuilder, DslSourcePosition): Expr[A]
+
+  final def foldLeft[A](initial: Expr[A])(step: (Expr[A], Value) => Expr[A])(using
+      valueType: CudaType[A], builder: BlockBuilder, position: DslSourcePosition
+  ): Expr[A] = foldLeft(builder.freshName("fold"), initial)(step)
+
+  final def foldLeft[State <: Product](initial: State)(step: (State, Value) => State)(using
+      state: ProductFoldState[State], builder: BlockBuilder, position: DslSourcePosition
+  ): State = foldLeft(builder.freshName("fold"), initial)(step)
+
+  final def foldLeft[State <: NonEmptyTuple](initial: State)(step: (State, Value) => State)(using
+      state: TupleFoldState[State], builder: BlockBuilder, position: DslSourcePosition
+  ): State = foldLeft(builder.freshName("fold"), initial)(step)
 
   final def map[Next <: Product](transform: Value => Next)(using ProductFoldState[Next]): GpuProductTraversal[Next] =
     new GpuProductTraversal(body => foreach(value => body(ExpressionStaging.expression(transform(value)))))
