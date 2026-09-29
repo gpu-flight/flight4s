@@ -75,14 +75,25 @@ final class kernel extends MacroAnnotation:
           while owner != Symbol.noSymbol && owner != method.symbol do owner = owner.owner
           owner == method.symbol
 
+        def statementBuilder(function: DefDef): Option[Symbol] =
+          function.termParamss.flatMap(_.params) match
+            case List(parameter) if function.rhs.nonEmpty &&
+                parameter.tpt.tpe =:= TypeRepr.of[CudaDsl.BlockBuilder] &&
+                function.returnTpt.tpe =:= TypeRepr.of[Unit] => Some(parameter.symbol)
+            case _ => None
+
         def checkNested(tree: Tree): Unit =
           val check = new TreeTraverser:
             override def traverseTree(tree: Tree)(owner: Symbol): Unit =
               tree match
+                // Each statement callback is checked separately with its own builder.
+                case Block(List(function: DefDef), closure: Closure) if closure.meth.symbol == function.symbol =>
+                  if statementBuilder(function).isEmpty then
+                    function.rhs.foreach(body => traverseTree(body)(function.symbol))
                 case value: ValDef if value.symbol.flags.is(Flags.Mutable) || value.symbol.flags.is(Flags.Lazy) =>
                   report.errorAndAbort("@kernel prototype does not support Scala var or lazy val; use explicit DSL state", value.pos)
-                case value: ValDef if deviceType(value).nonEmpty && !value.rhs.exists(explicitLet) =>
-                  report.errorAndAbort("@kernel prototype snapshots only top-level Expr vals; use explicit let in nested bodies", value.pos)
+                case value: ValDef if value.rhs.nonEmpty && deviceType(value).nonEmpty && !value.rhs.exists(explicitLet) =>
+                  report.errorAndAbort("@kernel implicit snapshots require a statement-producing DSL body; expression-only callbacks remain pure", value.pos)
                 case _: If | _: Match | _: While | _: Try | _: Return | _: Assign =>
                   report.errorAndAbort("@kernel prototype requires explicit DSL control flow and assignment", tree.pos)
                 case call: Apply if !libraryOperation(calledSymbol(call)) =>
@@ -97,9 +108,30 @@ final class kernel extends MacroAnnotation:
                 case _ => traverseTreeChildren(tree)(owner)
           check.traverseTree(tree)(method.symbol)
 
+        def nestedRewriter(tree: Tree): TreeMap =
+          checkNested(tree)
+          new TreeMap:
+            override def transformTerm(term: Term)(owner: Symbol): Term = term match
+              case block @ Block(List(function: DefDef), closure: Closure) if
+                  closure.meth.symbol == function.symbol && statementBuilder(function).nonEmpty =>
+                val body = transformStatements(function.rhs.get, statementBuilder(function).get)
+                val transformed = DefDef.copy(function)(function.name, function.paramss, function.returnTpt, Some(body))
+                Block.copy(block)(List(transformed), closure)
+              case selection: Select =>
+                val qualifier = transformTerm(selection.qualifier)(owner)
+                // Select.copy round-trips structured compiler names through String.
+                if qualifier == selection.qualifier then selection
+                else Select(qualifier, selection.symbol)
+              case _ => super.transformTerm(term)(owner)
+
+        def transformNested(tree: Term): Term =
+          nestedRewriter(tree).transformTerm(tree)(method.symbol)
+
+        def transformNestedStatement(tree: Statement): Statement =
+          nestedRewriter(tree).transformStatement(tree)(method.symbol)
+
         def snapshot(value: ValDef, builder: Symbol): ValDef =
-          val rhs = value.rhs.get
-          checkNested(rhs)
+          val rhs = transformNested(value.rhs.get)
           deviceType(value).get.asType match
             case '[t] =>
               if !(value.tpt.tpe =:= TypeRepr.of[DeviceExpr[t]]) then
@@ -127,14 +159,11 @@ final class kernel extends MacroAnnotation:
                   !value.rhs.exists(hostLiteral) =>
                 report.errorAndAbort("@kernel prototype does not support this binding type; use explicit DSL bindings", value.pos)
               case statement =>
-                checkNested(statement)
-                statement
+                transformNestedStatement(statement)
             }
-            checkNested(result)
-            Block.copy(block)(transformed, result)
+            Block.copy(block)(transformed, transformNested(result))
           case other =>
-            checkNested(other)
-            other
+            transformNested(other)
 
         List(DefDef.copy(method)(method.name, method.paramss, method.returnTpt, Some(transformFactory(rhs))))
       case _ =>

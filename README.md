@@ -61,8 +61,8 @@ for its unnamed expression form.
 ### Annotation Prototype
 
 The optional `flight4s-frontend` module supports `@kernel` on a factory returning
-the existing typed `Kernel[Args]`. Top-level `val` bindings of `Expr[T]` become
-device snapshots automatically:
+the existing typed `Kernel[Args]`. `val` bindings of `Expr[T]` in the direct
+body and nested statement-producing DSL bodies become device snapshots automatically:
 
 ```scala
 import scala.annotation.experimental
@@ -83,7 +83,9 @@ def vectorAdd = buildKernel("vectorAdd", params(
 
 The factory and callers require explicit `@experimental` opt-in; no global
 `-experimental` flag is enabled. `input` is read-only and `output` is read-write.
-Device control flow still uses the DSL. Nested snapshots use explicit `let`;
+Device control flow still uses the DSL. Nested `when`, `gpuIf`, `scoped`,
+`gpuFor`, and traversal `foreach` bodies use their own snapshot builder;
+expression-only callbacks cannot acquire implicit statement snapshots.
 Scala `var`, `lazy val`, host/helper calls, external expression captures, and
 implicit tuple/product snapshots are rejected by this prototype.
 See the [frontend contract and tests](frontend/README.md).

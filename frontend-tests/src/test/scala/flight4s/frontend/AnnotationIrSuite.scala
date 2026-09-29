@@ -10,6 +10,101 @@ import flight4s.core.ir.*
 
 @experimental
 class AnnotationIrSuite extends FunSuite:
+  private def statements(block: Block): Vector[Stmt] = block.statements.flatMap {
+    case branch: IfThen => Vector(branch) ++ statements(branch.thenBlock) ++ branch.elseBlock.toVector.flatMap(statements)
+    case scope: ScopedBlock => Vector(scope) ++ statements(scope.body)
+    case loop: ForLoop => Vector(loop) ++ statements(loop.body)
+    case statement => Vector(statement)
+  }
+
+  test("nested branches scopes and loops exactly match explicit let IR effects and artifacts"):
+    for branches <- Vector(true, false) do
+      val actual = if branches then PrototypeKernels.nestedBranches else PrototypeKernels.nestedLoops
+      val pending = scala.collection.mutable.Queue.from(statements(actual.body))
+      def save(initial: Expr[Int])(using builder: BlockBuilder): Expr[Int] =
+        val declaration = pending.dequeue().asInstanceOf[LocalDeclaration[Int]]
+        let(declaration.local.name, initial)(using summon[flight4s.core.types.CudaType[Int]], builder,
+          DslSourcePosition(declaration.span))
+      def write(target: Place[Int, Global, ReadWrite], value: Expr[Int])(using builder: BlockBuilder): Unit =
+        val store = pending.dequeue().asInstanceOf[Store[Int, Global]]
+        target.:=(value)(using builder, DslSourcePosition(store.span))
+      def guarded(condition: Expr[Boolean])(body: BlockBuilder ?=> Unit)(using builder: BlockBuilder): Unit =
+        val branch = pending.dequeue().asInstanceOf[IfThen]
+        when(condition)(body)(using builder, DslSourcePosition(branch.span))
+      def scope(body: BlockBuilder ?=> Unit)(using builder: BlockBuilder): Unit =
+        val node = pending.dequeue().asInstanceOf[ScopedBlock]
+        scoped(body)(using builder, DslSourcePosition(node.span))
+      def alternative(condition: Expr[Boolean])(yes: BlockBuilder ?=> Unit)(no: BlockBuilder ?=> Unit)(using builder: BlockBuilder): Unit =
+        val node = pending.dequeue().asInstanceOf[IfThen]
+        gpuIf(condition)(yes)(no)(using builder, DslSourcePosition(node.span))
+      def loop(from: Expr[Int], until: Expr[Int])(body: Expr[Int] => (BlockBuilder ?=> Unit))(using builder: BlockBuilder): Unit =
+        val node = pending.dequeue().asInstanceOf[ForLoop]
+        gpuFor(node.index.name, from, until, node.step)(body)(using builder, DslSourcePosition(node.span))
+      val reference = CudaDsl.kernel(actual.name, actual.signature) { bindings =>
+        val i = save(blockIdx.x * blockDim.x + threadIdx.x)
+        if branches then
+          val p = bindings.asInstanceOf[(BufferParam[Int, ReadWrite], BufferParam[Int, ReadWrite], BufferParam[Int, ReadWrite], ScalarParam[Int])]
+          guarded(i < p._4) {
+            val original = save(p._1(i).read)
+            scope {
+              val alias = save(original)
+              alternative((i % literal(2)) === literal(0)) {
+                val result = save(alias + literal(1))
+                write(p._1(i), literal(900) + i)
+                write(p._2(i), result)
+                write(p._3(i), p._1(i).read)
+              } {
+                val result = save(alias - literal(1))
+                write(p._1(i), literal(900) + i)
+                write(p._2(i), result)
+                write(p._3(i), p._1(i).read)
+              }
+            }
+          }
+        else
+          val p = bindings.asInstanceOf[(BufferParam[Int, ReadWrite], BufferParam[Int, ReadWrite], ScalarParam[Int], ScalarParam[Int])]
+          guarded(i < p._3) {
+            loop(literal(0), p._4) { round =>
+              val original = save(p._1(i).read)
+              val alias = save(original)
+              write(p._1(i), original + round + literal(1))
+              write(p._2(i), alias)
+            }
+          }
+      }
+      assert(pending.isEmpty)
+      assertEquals(actual.ir, reference.ir)
+      assert(KernelValidator.validate(actual).isValid)
+      assertEquals(KernelValidator.validate(actual), KernelValidator.validate(reference))
+      assertEquals(EffectAnalysis.block(actual.body), EffectAnalysis.block(reference.body))
+      assertEquals(CudaCodegen.generate(actual), CudaCodegen.generate(reference))
+
+  test("nested snapshot declarations retain lexical placement source spans and deterministic names"):
+    val factories = Vector(
+      (() => PrototypeKernels.nestedBranches, 5),
+      (() => PrototypeKernels.nestedLoops, 3),
+      (() => PrototypeKernels.nestedTraversal, 2))
+    factories.foreach { (factory, expected) =>
+      val definition = factory()
+      assertEquals(definition.body.statements.size, 2)
+      assert(definition.body.statements.head.isInstanceOf[LocalDeclaration[?]])
+      assert(definition.body.statements.last.isInstanceOf[IfThen])
+      val declarations = statements(definition.body).collect { case declaration: LocalDeclaration[?] => declaration }
+      assertEquals(declarations.size, expected)
+      assertEquals(declarations.map(_.local.name).distinct.size, expected)
+      val generated = CudaCodegen.generate(definition).toOption.get
+      val mapped = generated.sourceMap.entries.map(_.sourceSpan)
+      declarations.foreach { declaration =>
+        assert(declaration.span.file.replace('\\', '/').endsWith("examples/PrototypeKernels.scala"))
+        assertNotEquals(declaration.span, SourceSpan.Unknown)
+        assert(mapped.contains(declaration.span))
+      }
+      val second = factory()
+      assertNotEquals(declarations.head.local.name,
+        statements(second.body).head.asInstanceOf[LocalDeclaration[?]].local.name)
+      assertEquals(generated.cudaSource, CudaCodegen.generate(second).toOption.get.cudaSource)
+    }
+
   test("annotation snapshots exactly match manual let IR effects validation and generated CUDA"):
     val actual = PrototypeKernels.intSnapshots
     val declarations = actual.body.statements.take(3).map(_.asInstanceOf[LocalDeclaration[Int]])
