@@ -157,3 +157,16 @@ class KernelSignatureSuite extends FunSuite:
     val codes = KernelValidator.validate(definition).errors.map(_.code)
 
     assert(codes.contains(ValidationCode.UnknownScalarParameter))
+
+  test("inline tuple factories evaluate bindings once and retain the runtime signature contract"):
+    var evaluations = 0
+    def bindings() =
+      evaluations += 1
+      (input[Float]("data"), output[Float]("target"), value[Int]("count"))
+    val signature = paramsTuple(bindings())
+    assertEquals(evaluations, 1)
+    val supplied = KernelSignature.fromTupleWithEvidence(signature.bindings)
+    val typed: KernelSignature[(DeviceBuffer[Float], DeviceBuffer[Float], Int)] = signature
+    assert(supplied.bindings eq signature.bindings)
+    assertEquals(supplied.parameters, typed.parameters)
+    assertEquals(supplied.abiDescriptors, typed.abiDescriptors)

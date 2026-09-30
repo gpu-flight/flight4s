@@ -49,6 +49,45 @@ captures/calls, numeric conversions, vectors, and low-precision source types
 are deferred in this frontend. The existing DSL and annotation remain available.
 See the [frontend contract](frontend/README.md#quoted-scala-syntax-prototype).
 
+### Tuple Signatures
+
+For more than six parameters, pass one tuple to `params`. Names in the body remain
+ordinary Scala bindings; the signature retains exact launch types and access modes:
+
+```scala
+@experimental
+def tupleScale = kernel("tuple_scale", params((
+  input[Float]("data"), output[Float]("target"), value[Int]("count"),
+  value[Float]("factor"), value[Float]("bias"),
+  value[Boolean]("enabled"), value[Double]("cutoff")
+))) { (data, target, count, factor, bias, enabled, cutoff) =>
+  val i = blockIdx.x * blockDim.x + threadIdx.x
+  if i < count && enabled && cutoff > 0.0 then
+    target(i) = data(i) * factor + bias
+}
+```
+
+Equivalent CUDA C++ below uses simplified local names:
+
+```cpp
+extern "C" __global__
+void tuple_scale(const float* data, float* target, int count,
+                 float factor, float bias, bool enabled, double cutoff) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < count && enabled && cutoff > 0.0) {
+        target[i] = data[i] * factor + bias;
+    }
+}
+```
+
+The return type is `Kernel[(DeviceBuffer[Float], DeviceBuffer[Float], Int, Float,
+Float, Boolean, Double)]`. `tupleScale.bind((data, target, count, factor, bias,
+enabled, cutoff))` checks that exact order and types. Tuple signatures also support
+`EmptyTuple`, `Tuple1`, and tuples beyond 22 elements; arities 0/1/2/6/7/23 are
+compiler-tested. This is a parameter list, not tuple-valued GPU traversal state.
+See the [generic signature contract](frontend/README.md#generic-tuple-signature-contract)
+for evidence staging and explicit-evidence migration.
+
 Direct half-open `Int` ranges now support ordinary `for ... do` loops, with
 unit stride and bounds captured once on entry. Nested loops and equivalent
 multiple-generator `for ... do` forms preserve lexical locals and serial order:

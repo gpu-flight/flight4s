@@ -626,6 +626,30 @@ class ScalaKernelIrSuite extends FunSuite:
     assert(names.isEmpty)
     assertReference(actual, reference)
 
+  test("seven parameter tuples exactly match explicit DSL IR effects and CUDA artifacts"):
+    val actual = ScalaKernels.tupleScale
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, paramsTuple((input[Float]("data"), output[Float]("target"),
+        value[Int]("count"), value[Float]("factor"), value[Float]("bias"),
+        value[Boolean]("enabled"), value[Double]("cutoff")))) { p =>
+      val count = declare(p._3)
+      val factor = declare(p._4)
+      val bias = declare(p._5)
+      val enabled = declare(p._6)
+      val cutoff = declare(p._7)
+      scoped {
+        val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+        when(i < count && enabled && cutoff > literal(0.0)) {
+          p._2(i) := p._1(i).read * factor + bias
+        }
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(actual.params, reference.params)
+    assertEquals(actual.signature.abiDescriptors, reference.signature.abiDescriptors)
+
   test("all fixtures preserve source maps scope unique names validation and deterministic CUDA"):
     val factories: Vector[() => Kernel[?]] = Vector(() => ScalaKernels.scale, () => ScalaKernels.branches,
       () => ScalaKernels.shortCircuit, () => ScalaKernels.doubles, () => ScalaKernels.rowSum,
@@ -633,7 +657,7 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.guardedState, () => ScalaKernels.nestedGuards, () => ScalaKernels.yieldRows,
       () => ScalaKernels.yieldReuse, () => ScalaKernels.yieldNested, () => ScalaKernels.foldRows,
       () => ScalaKernels.foldReuse, () => ScalaKernels.foldNested, () => ScalaKernels.flatMapRows,
-      () => ScalaKernels.flatMapReuse, () => ScalaKernels.flatMapNested)
+      () => ScalaKernels.flatMapReuse, () => ScalaKernels.flatMapNested, () => ScalaKernels.tupleScale)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)

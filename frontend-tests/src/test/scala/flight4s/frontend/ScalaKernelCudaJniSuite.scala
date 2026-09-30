@@ -575,6 +575,31 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("seven parameter tuples launch mixed scalar types with tails and both stream paths"):
+    val definition = ScalaKernels.tupleScale
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val size = count + 32
+          val initial = Array.tabulate(size)(i => (i - 90).toFloat * 0.25f)
+          val data = context.allocate[Float](size).toOption.get
+          val target = context.allocate[Float](size).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for enabled <- Vector(false, true); cutoff <- Vector(-1.0, 0.0, 0.125)
+                factor <- Vector(0.0f, 2.0f, -0.5f); bias <- Vector(0.0f, 7.0f); explicit <- Vector(false, true) do
+              val expected = initial.take(count).map(x => if enabled && cutoff > 0.0 then x * factor + bias else -999f).toVector
+              assertEquals(target.copyFrom(Array.fill(size)(-999f)), Right(()))
+              launch(context, function, definition.bind((data, target, count, factor, bias, enabled, cutoff)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))

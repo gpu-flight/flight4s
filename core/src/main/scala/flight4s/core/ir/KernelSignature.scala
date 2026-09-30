@@ -2,6 +2,7 @@ package flight4s.core.ir
 
 import flight4s.core.abi.*
 import flight4s.core.launch.{Block as LaunchBlock, LaunchConfig}
+import scala.compiletime.summonInline
 
 trait DeviceBuffer[T]:
   private[flight4s] def deviceAddress: DeviceAddress
@@ -115,7 +116,13 @@ object KernelSignature:
     ): PackedKernelArguments =
       PackedKernelArguments(tuple.pack(bindings, arguments))
 
-  def fromTuple[Params <: Tuple](
+  inline def fromTuple[Params <: Tuple](
+      bindings: Params
+  ): KernelSignature[KernelArgumentsOf[Params]] { type Bindings = Params } =
+    // Resolve evidence after tuple inference, avoiding Scala 3.8.1's typer recheck mismatch.
+    fromTupleWithEvidence(bindings)(using summonInline[KernelParamTuple[Params]])
+
+  def fromTupleWithEvidence[Params <: Tuple](
       bindings: Params
   )(using tuple: KernelParamTuple[Params])
       : KernelSignature[KernelArgumentsOf[Params]] { type Bindings = Params } =

@@ -5,6 +5,14 @@ import flight4s.frontend.ScalaKernel.*
 
 @experimental
 object ScalaKernels:
+  def tupleScale = kernel("quotedTupleScale", params((input[Float]("data"), output[Float]("target"),
+      value[Int]("count"), value[Float]("factor"), value[Float]("bias"),
+      value[Boolean]("enabled"), value[Double]("cutoff")))) { (data, target, count, factor, bias, enabled, cutoff) =>
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    if i < count && enabled && cutoff > 0.0 then
+      target(i) = data(i) * factor + bias
+  }
+
   def scale = kernel("quotedScale", params(input[Float]("data"), output[Float]("target"),
       value[Int]("count"), value[Float]("factor"))) { (data, target, count, factor) =>
     val i = blockIdx.x * blockDim.x + threadIdx.x
