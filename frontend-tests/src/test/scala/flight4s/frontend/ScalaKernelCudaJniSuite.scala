@@ -600,6 +600,102 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("tuple row guards preserve lazy bounds mixed fields ordered Float state and input tails"):
+    val definition = ScalaKernels.tupleRows
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for rows <- counts; columns <- Vector(0, 1, 3, 7) do
+          val initial = Array.tabulate(math.max(1, rows * columns))(i => (i % 17 - 8).toFloat * 0.25f)
+          val data = context.allocate[Float](initial.length).toOption.get
+          val target = context.allocate[Float](rows + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for threshold <- Vector(-2.0f, 0.0f, 2.0f); seed <- Vector(7.0f, -3.0f); explicit <- Vector(false, true) do
+              val expected = Vector.tabulate(rows) { row =>
+                var total = seed
+                for column <- 0 until columns if column % 2 == 0 do
+                  val item = initial(row * columns + column)
+                  if item > threshold then total = total - item * 2.0f - (if column == 0 then 0.5f else 0.0f)
+                total
+              }
+              assertEquals(target.copyFrom(Array.fill(rows + 32)(-999f)), Right(()))
+              launch(context, function, definition.bind((data, target, rows, columns, threshold, seed)), config(rows), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("tuple fields retain pre-store values while reused plans observe new data on the GPU"):
+    val definition = ScalaKernels.tupleReuse
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(count + 32)(i => i % 7 - 3)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val target = context.allocate[Int](initial.length).toOption.get
+          try
+            for (from, until) <- Vector((0, 0), (3, 1), (-3, 2), (0, 7), (2, 7)); explicit <- Vector(false, true) do
+              val expected = initial.take(count).map { original =>
+                var data = original
+                var total = 0
+                for i <- from until until do
+                  val first = data + i
+                  val saved = data
+                  if first >= 0 then
+                    data = first + 1
+                    total += saved + saved + i
+                for i <- from until until do
+                  val first = data + i
+                  val saved = data
+                  if first >= 0 then total = total - first - saved
+                (data, total)
+              }.toVector
+              assertEquals(data.copyFrom(initial), Right(()))
+              assertEquals(target.copyFrom(Array.fill(initial.length)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, count, from, until)), config(count), stream, explicit)
+              assertEquals(data.copyToArray().toOption.get.toVector, expected.map(_._1) ++ initial.drop(count).toVector)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected.map(_._2) ++ Vector.fill(32)(-999))
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("tuple flatMap retains outer Double and Boolean fields across inner generators and scalar folds"):
+    val definition = ScalaKernels.tupleNested
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 17 - 8).toDouble * 0.25)
+          val data = context.allocate[Double](initial.length).toOption.get
+          val target = context.allocate[Double](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for rounds <- Vector(0, 1, 2, 4, 7); enabled <- Vector(false, true); explicit <- Vector(false, true) do
+              val expected = initial.take(count).map { original =>
+                var total = original
+                for outer <- 0 until rounds; inner <- 0 until outer if inner % 2 == 0 && enabled && inner + outer > 0
+                    k <- 0 until 2 do
+                  val item = if k == 0 then original / 2.0 else original / 2.0 + 1.0
+                  total = total / 2.0 - item
+                total
+              }.toVector
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999.0)), Right(()))
+              launch(context, function, definition.bind((data, target, count, rounds, enabled)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999.0))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))

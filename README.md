@@ -191,9 +191,51 @@ An immutable plan can be aliased and traversed again. Bounds snapshot once at
 guards against current device state. Every mapped item snapshots once per visited
 element, so a terminal write cannot change that item. There is no intermediate
 JVM/GPU collection or implicit parallel reduction. Scalar `Int`/`Float`/`Double`/
-`Boolean` mappings are supported. Scalar nested `flatMap` is supported; tuples and collectives
-in this quoted frontend remain separate slices; the explicit DSL already has
-those richer traversal APIs.
+`Boolean` mappings and flat primitive tuple elements are supported, including
+nested `flatMap`. Tuple accumulators, case-class elements and collectives remain
+separate quoted frontend slices; the explicit DSL already has those richer APIs.
+
+### Tuple Traversal Elements
+
+A map or `for ... yield` can carry related primitive values together:
+
+```scala
+val pairs = for i <- deviceRange(0, count) yield (i, data(i))
+pairs.withFilter(pair => pair._1 % 2 == 0).foreach { pair =>
+  target(pair._1) = pair._2 * 2.0f
+}
+val total = pairs.foldLeft(7.0f)((sum, pair) => sum - pair._2)
+```
+
+Equivalent CUDA C++ with simplified names:
+
+```cpp
+const int start = 0, end = count;
+for (int i = start; i < end; ++i) {
+    const int index = i;
+    const float item = data[i];
+    if (index % 2 == 0) {
+        target[index] = item * 2.0f;
+    }
+}
+float accumulator = 7.0f;
+for (int i = start; i < end; ++i) {
+    const int index = i;
+    const float item = data[i];
+    accumulator = accumulator - item;
+}
+const float total = accumulator;
+```
+
+Every field snapshots left to right before later guards or terminal writes. A
+reused plan reruns mappings with fresh reads, over its original captured bounds.
+Fields retain their Scala types; no CUDA tuple/struct or collection is allocated.
+`_N`, literal `pair(0)`, tupled callbacks, immutable tuple aliases and scalar/tuple
+map/flatMap transitions compose. Fold state remains scalar and ordered.
+This quoted subset supports standard `Tuple1` through `Tuple22`; larger traversal
+tuples, nested tuples, case classes and tuple accumulators are deferred. The
+explicit DSL and arbitrary-arity kernel signatures are unaffected. See the
+[tuple traversal contract](frontend/README.md#flat-tuple-traversal-contract).
 
 ### Ordered Scalar Folds
 
@@ -268,7 +310,7 @@ iteration's captured bounds or saved outer mapped value. Returning an existing
 aliased plan reuses its original bounds. Each terminal runs the nested loops in
 outer-first order, with one fold state across all accepted inner elements.
 Further maps, guards, `flatMap`, `foreach` and folds compose without allocating
-intermediate collections. Callback blocks, tuples/products, pattern generators
+intermediate collections. Effectful callback blocks, case-class products, pattern generators
 and generator value bindings remain deferred. See the
 [nested traversal contract](frontend/README.md#nested-scalar-traversal-contract).
 
