@@ -62,10 +62,10 @@ evaluate once in normal call order; that configuration is outside the body.
 `ScalaKernelCompilerSuite` contains 29 actual compiler-program tests,
 including separate callers, negative admission, all intrinsic axes, supported
 operators, scopes and configuration evaluation order. `ScalaKernelIrSuite`
-contains eighteen tests: independent explicit-DSL branch/short-circuit/loop/guard/traversal/fold/flatMap references
+contains nineteen tests: independent explicit-DSL branch/short-circuit/loop/guard/traversal/fold/flatMap/signature references
 compare exact IR/effects/generated artifacts after aligning only source spans;
-all nineteen fixtures validate and retain source maps and deterministic CUDA.
-`ScalaKernelCudaJniSuite` has nineteen real GPU fixtures for Float scaling, mutable
+all twenty fixtures validate and retain source maps and deterministic CUDA.
+`ScalaKernelCudaJniSuite` has twenty real GPU fixtures for Float scaling, mutable
 Int snapshots/shadowing, tightly sized short-circuit inputs, and Double/Boolean
 branches. They cover counts 0/1/63/64/65/193/257, 32 output tails, both stream
 paths, disabled execution, unchanged read-only inputs, and in-place updates.
@@ -85,6 +85,36 @@ distinct Int elements. Full buffers, tails and both stream paths are checked.
 FlatMap fixtures additionally verify guarded inner-bound loads, per-outer bounds,
 saved outer values across stores, reused inner aliases, three-level flattening,
 live terminal captures and global Boolean/Double fold state.
+
+### Generic Tuple Signature Contract
+
+`params(tuple)`, `CudaDsl.paramsTuple(tuple)` and `KernelSignature.fromTuple(tuple)`
+are inline factories. They infer the tuple from the argument first, then resolve
+`KernelParamTuple[Params]` with `summonInline`. This avoids the Scala 3.8.1
+pre-expansion tree-check assertion caused by caller-side contextual evidence
+inference when composing a generic tuple factory directly with the quoted builder.
+The issue reproduced even with two parameters, independent of macro expansion.
+Neither `-Xcheck-macros` nor `-Ycheck:all` is disabled; no toolchain upgrade is needed.
+
+The exact `KernelArgumentsOf[Params]` and `Bindings = Params` contract is unchanged.
+Bindings evaluate once. The runtime implementation, descriptor order, packed bytes
+and native layout remain the same. Positional overloads through six parameters are
+unchanged; larger signatures use one tuple, not an untyped varargs parameter list.
+Empty tuples, `Tuple1` and arities 2/6/7/23 are checked by actual compiler programs,
+including separate callers and a seven-parameter tupled lambda on the GPU.
+`TupleSignatureCompilerSuite` adds 17 compiler-program tests covering all factory
+paths, generic helpers, exact launch arity/order/types and read-only access rejection.
+
+Source migration: generic inline factories no longer accept an explicit `(using tuple)`
+argument. For low-level supplied evidence and an already typed binding tuple, use
+`KernelSignature.fromTupleWithEvidence(bindings)(using tuple)`. Generic wrappers
+with a given `KernelParamTuple[P]` can still call the ordinary inline factories;
+the supplied given is found during expansion. This pre-release source API change
+does not change the CUDA kernel ABI. Existing compiled callers should be rebuilt.
+
+For Scala and equivalent CUDA C++, see the [tuple signature example](../README.md#tuple-signatures).
+The existing six-parameter flatMap fixture is retained unchanged; the new
+seven-parameter fixture exercises pointers, Int, Float, Boolean and Double arguments.
 
 ### Range Loop Contract
 
@@ -324,10 +354,9 @@ objects or intermediate collections. No parallel reassociation is introduced.
 Deferred: tuple/product elements and states, generator aliases/patterns, conditional
 plan factories, stored/helper callbacks, captures, expression blocks and eager
 Scala collection roots. The explicit DSL and annotation semantics are unchanged.
-During fixture development, seven-parameter tuple signatures exposed a Scala 3.8.1
-pre-expansion `-Ycheck:all` method-type assertion with both exported `params(tuple)`
-and direct `CudaDsl.paramsTuple(tuple)`. This checker issue is deferred; fixtures
-use existing six-parameter overloads. Neither checker flag was disabled.
+The generic tuple-signature checker issue found during fixture development is
+resolved by staged evidence lookup; see the generic signature contract above.
+The original six-parameter flatMap fixtures remain unchanged.
 
 ## Kernel Annotation Prototype
 

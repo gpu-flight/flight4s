@@ -138,10 +138,9 @@ object CudaDsl:
       : KernelSignature[EmptyTuple] { type Bindings = EmptyTuple } =
     KernelSignature.fromTuple(EmptyTuple)
 
-  def params[Params <: Tuple](
+  inline def params[Params <: Tuple](
       bindings: Params
-  )(using tuple: KernelParamTuple[Params])
-      : KernelSignature[KernelArgumentsOf[Params]] { type Bindings = Params } =
+  ): KernelSignature[KernelArgumentsOf[Params]] { type Bindings = Params } =
     KernelSignature.fromTuple(bindings)
 
   def params[P1 <: KernelParam](
@@ -256,10 +255,9 @@ object CudaDsl:
   } =
     KernelSignature.fromTuple(p1 *: p2 *: p3 *: p4 *: p5 *: p6 *: EmptyTuple)
 
-  def paramsTuple[Params <: Tuple](
+  inline def paramsTuple[Params <: Tuple](
       bindings: Params
-  )(using tuple: KernelParamTuple[Params])
-      : KernelSignature[KernelArgumentsOf[Params]] { type Bindings = Params } =
+  ): KernelSignature[KernelArgumentsOf[Params]] { type Bindings = Params } =
     params(bindings)
 
   def kernel[Args <: Tuple](
