@@ -87,9 +87,40 @@ void row_sum(const float* data, float* target, int rows, int columns) {
 ```
 
 Rows execute in parallel; each thread visits its columns sequentially. This
-does not insert a parallel reduction or allocate a Scala collection. Guarded
-comprehensions, `yield`, `to`, `by`, and `while` remain unsupported here; the
+does not insert a parallel reduction or allocate a Scala collection. `yield`,
+`to`, `by`, and `while` remain unsupported here; the
 existing explicit DSL already provides staged functional traversals.
+
+Range guards run lazily for each index, in source order:
+
+```scala
+for column <- -1 until columns + 1 if column >= 0 if column < columns if data(row * columns + column) > threshold do
+  total += data(row * columns + column)
+```
+
+Equivalent CUDA C++, with simplified names:
+
+```cpp
+const int start = -1;
+const int end = columns + 1;
+for (int column = start; column < end; ++column) {
+    if (column >= 0) {
+        if (column < columns) {
+            if (data[row * columns + column] > threshold) {
+                total += data[row * columns + column];
+            }
+        }
+    }
+}
+```
+
+An earlier failed guard suppresses later reads and the body. Guards may read
+enclosing device locals, observing updates on the next iteration; bounds still
+snapshot once on entry. Nested guarded generators and direct range
+`withFilter(...).foreach(...)` use the same lowering. Predicates must be literal,
+pure supported expressions: no assignments, expression blocks, host calls or
+captures. Eager `.filter`, stored ranges/predicates and generator aliases remain
+outside this quoted subset.
 
 ### Automatic Local Names
 

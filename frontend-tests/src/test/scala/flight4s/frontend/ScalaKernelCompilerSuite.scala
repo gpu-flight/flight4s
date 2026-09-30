@@ -69,6 +69,30 @@ class ScalaKernelCompilerSuite extends FunSuite:
       }
     }
 
+  test("ordinary Scala range guards compile to lazy nested branches inside valid loop IR"):
+    CompilerHarness.withDirectory { directory =>
+      val result = CompilerHarness.compile(directory, "GuardedRange", factory("""
+        var total = 0
+        for i <- -1 until p._3 + 1 if i >= 0 if i < p._3 if p._1(i) > 0 do
+          val before = total
+          total = before + p._1(i)
+        p._2(0) = total
+      """))
+      assertEquals(result.errors, Vector.empty)
+      CompilerHarness.withClasses(Seq(result.classes)) { loader =>
+        val definition = loader.loadClass("quotedfixture.Definitions")
+        val staged = definition.getMethod("definition").invoke(definition.getConstructor().newInstance())
+          .asInstanceOf[Kernel[(DeviceBuffer[Int], DeviceBuffer[Int], Int)]]
+        assert(KernelValidator.validate(staged).isValid)
+        val loop = staged.body.statements.collectFirst { case loop: ForLoop => loop }.get
+        val first = loop.body.statements.head.asInstanceOf[IfThen]
+        val second = first.thenBlock.statements.head.asInstanceOf[IfThen]
+        val third = second.thenBlock.statements.head.asInstanceOf[IfThen]
+        assertEquals(Vector(first, second, third).map(_.elseBlock), Vector(None, None, None))
+        assertEquals(third.thenBlock.statements.size, 2)
+      }
+    }
+
   test("named tuple parameters primitive locals aliases assignments and nested branches compile"):
     CompilerHarness.withDirectory { directory =>
       val result = CompilerHarness.compile(directory, "Named", """
@@ -130,10 +154,9 @@ class ScalaKernelCompilerSuite extends FunSuite:
       }
     }
 
-  test("range loops reject guards strides inclusive ranges aliases host factories and nonliteral callbacks"):
+  test("range loops reject strides inclusive ranges aliases host factories and nonliteral callbacks"):
     rejected(factory("for i <- 0 to p._3 do p._2(i) = i"), "range loops require")
     rejected(factory("for i <- (0 until p._3).by(2) do p._2(i) = i"), "range loops require")
-    rejected(factory("for i <- 0 until p._3 if i > 0 do p._2(i) = i"), "range loops")
     rejected(factory("val indices = 0 until p._3; for i <- indices do p._2(i) = i"), "primitive locals")
     rejected(factory("val values = for i <- 0 until p._3 yield i + 1; p._2(0) = 1"), "primitive locals")
     rejected(factory("for i <- Range(0, p._3) do p._2(i) = i"), "range loops require")
@@ -146,6 +169,47 @@ class ScalaKernelCompilerSuite extends FunSuite:
       class Pretend:
         def until(end: Int): Range = 0 until end
       def intWrapper(start: Int): Pretend = new Pretend
+    """), "range loops require")
+
+  test("range guards support nested generators direct withFilter and distinct predicate indices"):
+    CompilerHarness.withDirectory { directory =>
+      val result = CompilerHarness.compile(directory, "NestedGuards", factory("""
+        var total = 0
+        for i <- 0 until p._3 if i % 2 == 0; j <- 0 until i if j > 0 if j < i do
+          val before = total
+          total = before + i + j
+        for i <- 0 until p._3 if i > 0 do
+          for i <- 0 until i if i % 2 == 0 do total += i
+        (0 until p._3).withFilter(first => first >= 0).withFilter(second => second < p._3)
+          .foreach { third => p._2(third) = total }
+      """))
+      assertEquals(result.errors, Vector.empty)
+      CompilerHarness.withClasses(Seq(result.classes)) { loader =>
+        val definition = loader.loadClass("quotedfixture.Definitions")
+        val staged = definition.getMethod("definition").invoke(definition.getConstructor().newInstance()).asInstanceOf[Kernel[Tuple]]
+        assert(KernelValidator.validate(staged).isValid)
+      }
+    }
+
+  test("range guards reject host captures calls effects nonliteral predicates and unsupported range roots"):
+    rejected(factory("for i <- 0 until p._3 if i < host do p._2(i) = i", "val host = 3"), "captures")
+    rejected(factory("for i <- 0 until p._3 if accepts(i) do p._2(i) = i", "def accepts(i: Int): Boolean = true"), "captures")
+    rejected(factory("var total = 0; for i <- 0 until p._3 if { total += 1; true } do p._2(i) = i"), "expression blocks")
+    rejected(factory("for i <- 0 until p._3 if { println(i); true } do p._2(i) = i"), "expression blocks")
+    rejected(factory("(0 until p._3).withFilter(predicate).foreach(i => p._2(i) = i)",
+      "val predicate: Int => Boolean = _ => true"), "literal Int predicate lambda")
+    rejected(factory("(0 until p._3).withFilter(predicate).foreach(i => p._2(i) = i)",
+      "def predicate(i: Int): Boolean = true"), "captures")
+    rejected(factory("for i <- 0 to p._3 if i > 0 do p._2(i) = i"), "range loops require")
+    rejected(factory("for i <- (0 until p._3).by(2) if i > 0 do p._2(i) = i"), "range loops require")
+    rejected(factory("for i <- Range(0, p._3) if i > 0 do p._2(i) = i"), "range loops require")
+    rejected(factory("val filtered = (0 until p._3).withFilter(i => i > 0); filtered.foreach(i => p._2(i) = i)"), "primitive locals")
+    rejected(factory("(0 until p._3).filter(i => i > 0).foreach(i => p._2(i) = i)"), "host effects")
+    rejected(factory("for i <- 0 until p._3; alias = i + 1 if alias > 0 do p._2(i) = alias"), "ScalaKernel")
+    rejected(factory("for case i: Int <- 0 until p._3 if i > 0 do p._2(i) = i"), "ScalaKernel")
+    rejected(factory("for i <- pretend.withFilter(i => i > 0) do p._2(i) = i", """
+      object pretend:
+        def withFilter(predicate: Int => Boolean): Range = 0 until 3
     """), "range loops require")
 
   test("primitive parameter and local type matrix compiles and validates"):

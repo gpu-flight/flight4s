@@ -197,6 +197,94 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("quoted chained guards protect tight row inputs and retain ordered Float sums"):
+    val definition = ScalaKernels.guardedRows
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for rows <- counts; columns <- Vector(0, 1, 3, 17, 65) do
+          val initial = Array.tabulate(math.max(1, rows * columns))(i => (i % 17 - 8).toFloat * 0.25f)
+          val data = context.allocate[Float](initial.length).toOption.get
+          val target = context.allocate[Float](rows + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for threshold <- Vector(-4.0f, 0.0f, 4.0f); explicit <- Vector(false, true) do
+              val expected = Vector.tabulate(rows)(row =>
+                (0 until columns).foldLeft(0.0f) { (sum, column) =>
+                  val item = initial(row * columns + column)
+                  if item > threshold then sum + item else sum
+                })
+              assertEquals(target.copyFrom(Array.fill(rows + 32)(-999f)), Right(()))
+              launch(context, function, definition.bind((data, target, rows, columns, threshold)), config(rows), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted withFilter guards refresh mutable state without changing captured bounds"):
+    val definition = ScalaKernels.guardedState
+    val bounds = Vector((0, 0), (2, 2), (4, 1), (-3, 2), (-3, 7), (0, 8), (2, 7))
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => i % 7 - 3)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val target = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for (from, until) <- bounds; explicit <- Vector(false, true) do
+              val expected = initial.take(count).map { item =>
+                var total = item
+                for index <- from until until do
+                  if index >= total && index % 2 == 0 then total = total + index + 1
+                total
+              }.toVector
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, count, from, until)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted guarded nested generators preserve dependent bounds snapshots and shadowed indices"):
+    val definition = ScalaKernels.nestedGuards
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => i % 7 - 3)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val target = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for rounds <- Vector(0, 1, 2, 4, 7); explicit <- Vector(false, true) do
+              val expected = initial.take(count).map { item =>
+                var total = item
+                for outer <- 0 until rounds do
+                  if outer % 2 == 0 then
+                    for inner <- 0 until outer do total = total + outer + inner
+                for outer <- 1 until rounds do
+                  for inner <- 0 until outer do
+                    if inner % 2 == 0 then total += inner
+                total
+              }.toVector
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, count, rounds)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))
