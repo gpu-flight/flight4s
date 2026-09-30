@@ -301,11 +301,103 @@ class ScalaKernelIrSuite extends FunSuite:
     assert(names.isEmpty)
     assertReference(actual, reference)
 
+  test("staged yield guards and map snapshots exactly match independent ordered DSL loops"):
+    val actual = ScalaKernels.yieldRows
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"),
+        value[Int]("rows"), value[Int]("columns"), value[Float]("threshold"))) { p =>
+      val row = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(row < p._3) {
+        val total = declare(literal(0.0f))
+        val start = declare(literal(-1)).read
+        val end = declare(p._4 + literal(1)).read
+        gpuFor(names.dequeue(), start, end) { column =>
+          when(column >= literal(0)) {
+            when(column < p._4) {
+              val item = declare(p._1(row * p._4 + column).read).read
+              when(item > p._5) {
+                val doubled = declare(item * literal(2.0f)).read
+                total := total.read + doubled
+              }
+            }
+          }
+        }
+        p._2(row) := total.read
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
+  test("reused yield plans retain construction bounds and snapshot each mapped item before stores"):
+    val actual = ScalaKernels.yieldReuse
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(inOut[Int]("data"), output[Int]("target"),
+        value[Int]("count"), value[Int]("from"), value[Int]("until"))) { p =>
+      val lane = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(lane < p._3) {
+        val begin = declare(p._4)
+        val end = declare(p._5)
+        val bias = declare(literal(0))
+        val total = declare(literal(0))
+        val capturedStart = declare(begin.read).read
+        val capturedEnd = declare(end.read).read
+        begin := literal(0)
+        end := literal(0)
+        bias := literal(1)
+        def visit()(using BlockBuilder): Unit =
+          gpuFor(names.dequeue(), capturedStart, capturedEnd) { index =>
+            when(index % literal(2) === literal(0)) {
+              val item = declare(p._1(lane).read + index + bias.read).read
+              p._1(lane) := item + literal(1)
+              total := total.read + (item + item)
+            }
+          }
+        visit()
+        bias := literal(3)
+        visit()
+        p._2(lane) := total.read
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
+  test("nested traversal plans preserve lexical map captures live guards and terminal shadows"):
+    val actual = ScalaKernels.yieldNested
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), output[Int]("target"),
+        value[Int]("count"), value[Int]("rounds"))) { p =>
+      val lane = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(lane < p._3) {
+        val total = declare(p._1(lane).read)
+        val start = declare(literal(0)).read
+        val end = declare(p._4).read
+        gpuFor(names.dequeue(), start, end) { outer =>
+          val before = declare(total.read).read
+          val innerStart = declare(literal(0)).read
+          val innerEnd = declare(outer).read
+          gpuFor(names.dequeue(), innerStart, innerEnd) { index =>
+            val item = declare(index + before).read
+            when(item >= total.read) {
+              val mapped = declare(item + outer).read
+              total := total.read + mapped
+            }
+          }
+        }
+        p._2(lane) := total.read
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
   test("all fixtures preserve source maps scope unique names validation and deterministic CUDA"):
     val factories: Vector[() => Kernel[?]] = Vector(() => ScalaKernels.scale, () => ScalaKernels.branches,
       () => ScalaKernels.shortCircuit, () => ScalaKernels.doubles, () => ScalaKernels.rowSum,
       () => ScalaKernels.rangeBounds, () => ScalaKernels.nestedRanges, () => ScalaKernels.guardedRows,
-      () => ScalaKernels.guardedState, () => ScalaKernels.nestedGuards)
+      () => ScalaKernels.guardedState, () => ScalaKernels.nestedGuards, () => ScalaKernels.yieldRows,
+      () => ScalaKernels.yieldReuse, () => ScalaKernels.yieldNested)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)

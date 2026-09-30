@@ -285,6 +285,96 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("staged Float yield plans preserve lazy guarded reads map order and both stream paths"):
+    val definition = ScalaKernels.yieldRows
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for rows <- counts; columns <- Vector(0, 1, 3, 17, 65) do
+          val initial = Array.tabulate(math.max(1, rows * columns))(i => (i % 17 - 8).toFloat * 0.25f)
+          val data = context.allocate[Float](initial.length).toOption.get
+          val target = context.allocate[Float](rows + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for threshold <- Vector(-4.0f, 0.0f, 4.0f); explicit <- Vector(false, true) do
+              val expected = Vector.tabulate(rows)(row =>
+                (0 until columns).foldLeft(0.0f) { (sum, column) =>
+                  val item = initial(row * columns + column)
+                  if item > threshold then sum + item * 2.0f else sum
+                })
+              assertEquals(target.copyFrom(Array.fill(rows + 32)(-999f)), Right(()))
+              launch(context, function, definition.bind((data, target, rows, columns, threshold)), config(rows), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("reused yield plans refresh live captures but retain bounds and mapped values after buffer writes"):
+    val definition = ScalaKernels.yieldReuse
+    val bounds = Vector((0, 0), (2, 2), (4, 1), (-3, 2), (-3, 7), (0, 8), (2, 7))
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(count + 32)(i => i % 7 - 3)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val target = context.allocate[Int](initial.length).toOption.get
+          try
+            for (from, until) <- bounds; explicit <- Vector(false, true) do
+              val expected = initial.take(count).map { initial =>
+                var data = initial
+                var total = 0
+                for bias <- Vector(1, 3); index <- from until until if index % 2 == 0 do
+                  val item = data + index + bias
+                  data = item + 1
+                  total += item + item
+                (data, total)
+              }.toVector
+              assertEquals(data.copyFrom(initial), Right(()))
+              assertEquals(target.copyFrom(Array.fill(initial.length)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, count, from, until)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected.map(_._2) ++ Vector.fill(32)(-999))
+              assertEquals(data.copyToArray().toOption.get.toVector, expected.map(_._1) ++ initial.drop(count).toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("nested staged maps retain lexical captures live predicates and loop-local refresh"):
+    val definition = ScalaKernels.yieldNested
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => i % 7 - 3)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val target = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for rounds <- Vector(0, 1, 2, 4, 7); explicit <- Vector(false, true) do
+              val expected = initial.take(count).map { item =>
+                var total = item
+                for outer <- 0 until rounds do
+                  val before = total
+                  for index <- 0 until outer do
+                    val value = index + before
+                    if value >= total then total += value + outer
+                total
+              }.toVector
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, count, rounds)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))

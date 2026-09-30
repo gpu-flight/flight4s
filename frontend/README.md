@@ -41,15 +41,16 @@ parameters, arithmetic `+ - * /`, Int `% & | ^`, numeric comparisons,
 primitive `== !=`, unary `+`, Int unary `-`, Boolean `! && ||`, primitive
 `val` snapshots, initialized `var`, assignment/compound assignment, immutable
 buffer aliases, statement scopes, statement `if`/`else`, and pure expression
-`if`/`else`, and direct unit-stride `start until end` range loops with lazy guards. Short-circuit
+`if`/`else`, direct unit-stride `start until end` range loops with lazy guards,
+and explicit `deviceRange` scalar yield/map/withFilter/foreach plans. Short-circuit
 booleans lower to lazy `Conditional` IR. An input's
 `update` requires read-write evidence, and lowering independently requires an
 output parameter. Existing validation and CUDA generation remain authoritative.
 
 Deferred/rejected: other loops, eager range `.filter`, `to`/`by`, stored range values,
-`yield`, `match`/`try`/return, lazy/uninitialized bindings,
+eager Range `yield`, `match`/`try`/return, lazy/uninitialized bindings,
 local definitions, expression blocks, tuple/product local state, source-level
-functional traversals and collectives, captured host state/values/helper calls,
+folds, nested flatMap, richer functional traversals and collectives, captured host state/values/helper calls,
 numeric conversions, shifts, floating remainder, dynamic floating unary minus,
 vector/low-precision source types, signature inference, and Unit-style annotated
 methods. Dynamic floating negation is not approximated by `0 - x`, which would
@@ -57,13 +58,13 @@ mishandle signed zero. Negative floating literals remain supported. This is a
 documented compiler subset, not a sandbox. Host kernel names and signatures
 evaluate once in normal call order; that configuration is outside the body.
 
-`ScalaKernelCompilerSuite` contains 20 actual compiler-program tests,
+`ScalaKernelCompilerSuite` contains 23 actual compiler-program tests,
 including separate callers, negative admission, all intrinsic axes, supported
 operators, scopes and configuration evaluation order. `ScalaKernelIrSuite`
-contains nine tests: independent explicit-DSL branch/short-circuit/loop/guard references
+contains twelve tests: independent explicit-DSL branch/short-circuit/loop/guard/traversal references
 compare exact IR/effects/generated artifacts after aligning only source spans;
-all ten fixtures validate and retain source maps and deterministic CUDA.
-`ScalaKernelCudaJniSuite` has ten real GPU fixtures for Float scaling, mutable
+all thirteen fixtures validate and retain source maps and deterministic CUDA.
+`ScalaKernelCudaJniSuite` has thirteen real GPU fixtures for Float scaling, mutable
 Int snapshots/shadowing, tightly sized short-circuit inputs, and Double/Boolean
 branches. They cover counts 0/1/63/64/65/193/257, 32 output tails, both stream
 paths, disabled execution, unchanged read-only inputs, and in-place updates.
@@ -73,6 +74,10 @@ dependent nested bounds, shadowed loop indices and per-iteration snapshots.
 The guarded fixtures additionally check chained predicates protecting tight
 allocations, all/none/mixed matches, live mutable state, guarded nested generators
 and distinct/shadowed callback indices.
+Traversal fixtures verify tight guarded rows, aliases/repeated terminals, live
+captures after changed bounds, single-evaluation mapped values after buffer stores,
+and nested lexical plans. Compiler cases cover all four scalar map result types,
+literal-union widening, unused-plan purity and separate typed callers.
 
 ### Range Loop Contract
 
@@ -150,8 +155,63 @@ Multiple guards, guarded nested/multiple generators, and direct
 `(start until end).withFilter(i => condition).foreach { i => ... }` are supported.
 Predicates use the same pure primitive-expression subset as other conditions:
 no assignment/declaration blocks, host helpers/captures or stored callbacks.
-Eager `.filter`, materialized/stored ranges, generator aliases and `yield` remain
+Eager `.filter`, materialized/stored ranges, generator aliases and Range `yield` remain
 deferred. No JVM collection/filter object or parallel collective is introduced.
+
+### Staged Traversal Contract
+
+`deviceRange(from, until)` explicitly chooses lazy GPU traversal semantics. It
+is a marker returning `DeviceTraversal[Int]`, not a Scala Range or allocated buffer.
+Its half-open unit-stride bounds snapshot once, in start/end order, when execution
+reaches that device statement. Mappings and guards do not execute until a terminal.
+
+```scala
+val values = for column <- deviceRange(-1, columns + 1) if column >= 0 if column < columns
+  yield data(row * columns + column)
+values.withFilter(item => item > threshold).map(item => item * 2.0f)
+  .foreach(item => total += item)
+```
+
+Equivalent CUDA C++ with simplified names:
+
+```cpp
+const int start = -1;
+const int end = columns + 1;
+for (int column = start; column < end; ++column) {
+    if (column >= 0) {
+        if (column < columns) {
+            const float item = data[row * columns + column];
+            if (item > threshold) {
+                const float doubled = item * 2.0f;
+                total += doubled;
+            }
+        }
+    }
+}
+```
+
+Immutable plan vals and aliases are reusable; each `foreach`/`for ... do` generates
+a new serial loop over the same captured bounds. Mappings and guards read current
+enclosing locals/device memory at that terminal and each visited index. Lexical
+compiler symbols bind callbacks independently, including same-name shadows.
+Every map result uses a per-item local snapshot before subsequent guards/maps/body.
+Repeating or reading it after a terminal store never reevaluates that map. This
+snapshot rule is stronger than plain expression-tree composition in the explicit
+DSL; that DSL's existing behavior is unchanged.
+
+Callbacks must be literal lambdas with pure supported primitive expressions.
+Unused plans are checked too, but emit no mapping loop. No host lambda or traversal
+object is retained, and all traversal markers throw outside capture. Recognized
+symbols belong to `ScalaKernel`, so user-defined lookalike methods are not admitted.
+The checked inferred map type is retained through lowering, including conditional
+literal unions, without adding implicit numeric conversion.
+
+Deferred: folds/sums, flatMap/multiple yielded generators, tuple/product elements,
+generator aliases/patterns, stored callbacks, mutable plans, filter/materialization,
+inclusive/strided ranges, helpers/captures and expression blocks. Ordinary Scala
+Range `map`/`yield` remains rejected: it is eager and cannot silently mean this lazy
+plan. Existing core traversals, validation, effects, optimizers and CUDA backend
+remain unchanged; only the quoted frontend constructs their existing IR nodes.
 
 ## Kernel Annotation Prototype
 

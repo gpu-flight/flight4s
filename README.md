@@ -44,7 +44,7 @@ not copied device data. Vals snapshot, vars update device locals, and `if`/`else
 and short-circuit booleans retain device execution semantics. Typed launch
 arguments, validation, optimizers, inspectable CUDA C++, and NVRTC/PTX are reused.
 Explicit signatures remain required. This is an opt-in subset, not arbitrary
-Scala compilation: general loops, functional traversal, signature inference, host
+Scala compilation: general loops, richer functional traversal, signature inference, host
 captures/calls, numeric conversions, vectors, and low-precision source types
 are deferred in this frontend. The existing DSL and annotation remain available.
 See the [frontend contract](frontend/README.md#quoted-scala-syntax-prototype).
@@ -87,7 +87,7 @@ void row_sum(const float* data, float* target, int rows, int columns) {
 ```
 
 Rows execute in parallel; each thread visits its columns sequentially. This
-does not insert a parallel reduction or allocate a Scala collection. `yield`,
+does not insert a parallel reduction or allocate a Scala collection. Eager Range `yield`,
 `to`, `by`, and `while` remain unsupported here; the
 existing explicit DSL already provides staged functional traversals.
 
@@ -121,6 +121,40 @@ snapshot once on entry. Nested guarded generators and direct range
 pure supported expressions: no assignments, expression blocks, host calls or
 captures. Eager `.filter`, stored ranges/predicates and generator aliases remain
 outside this quoted subset.
+
+### Staged Yield And Maps
+
+Use `deviceRange` to explicitly build a lazy serial GPU traversal, not an eager
+Scala collection. Ordinary `for ... yield`, `map`, guards and `foreach` then compose:
+
+```scala
+val values = for column <- deviceRange(0, columns) if column % 2 == 0
+  yield data(row * columns + column)
+values.map(item => item * 2.0f).foreach(item => total += item)
+```
+
+Equivalent CUDA C++ with simplified names:
+
+```cpp
+const int start = 0;
+const int end = columns;
+for (int column = start; column < end; ++column) {
+    if (column % 2 == 0) {
+        const float item = data[row * columns + column];
+        const float doubled = item * 2.0f;
+        total += doubled;
+    }
+}
+```
+
+An immutable plan can be aliased and traversed again. Bounds snapshot once at
+`deviceRange` construction; each terminal reruns its pure mappings and ordered
+guards against current device state. Every mapped item snapshots once per visited
+element, so a terminal write cannot change that item. There is no intermediate
+JVM/GPU collection or implicit parallel reduction. Scalar `Int`/`Float`/`Double`/
+`Boolean` mappings are supported. Folds, nested `flatMap`, tuples and collectives
+in this quoted frontend remain separate slices; the explicit DSL already has
+those richer traversal APIs.
 
 ### Automatic Local Names
 
