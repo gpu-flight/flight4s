@@ -498,13 +498,142 @@ class ScalaKernelIrSuite extends FunSuite:
     assert(names.isEmpty)
     assertReference(actual, reference)
 
+  test("flatMap inner bounds and loads remain inside outer guards with one ordered Float state"):
+    val actual = ScalaKernels.flatMapRows
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), input[Int]("lengths"),
+        output[Float]("target"), value[Int]("rows"), value[Int]("columns"),
+        value[Float]("threshold"))) { p =>
+      val row = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(row < p._4) {
+        val start = declare(literal(-1)).read
+        val end = declare(p._5 + literal(1)).read
+        val state = declare(literal(7.0f))
+        gpuFor(names.dequeue(), start, end) { column =>
+          when(column >= literal(0)) {
+            when(column < p._5) {
+              val innerStart = declare(literal(0)).read
+              val innerEnd = declare(p._2(column).read).read
+              gpuFor(names.dequeue(), innerStart, innerEnd) { inner =>
+                when(inner % literal(2) === literal(0)) {
+                  val item = declare(p._1(row * p._5 + column).read +
+                    choose(inner === literal(0))(literal(0.0f))(literal(0.5f))).read
+                  when(item > p._6) {
+                    val doubled = declare(item * literal(2.0f)).read
+                    state := state.read - doubled
+                  }
+                }
+              }
+            }
+          }
+        }
+        val total = declare(state.read).read
+        p._3(row) := total
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
+  test("reused flatMap snapshots outer values and each inner bound while retaining live terminal captures"):
+    val actual = ScalaKernels.flatMapReuse
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(inOut[Int]("data"), output[Int]("target"),
+        value[Int]("count"), value[Int]("from"), value[Int]("until"))) { p =>
+      val lane = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(lane < p._3) {
+        val begin = declare(p._4)
+        val end = declare(p._5)
+        val limit = declare(literal(3))
+        val total = declare(literal(0))
+        val start = declare(begin.read).read
+        val stop = declare(end.read).read
+        begin := literal(0)
+        end := literal(0)
+        gpuFor(names.dequeue(), start, stop) { outer =>
+          when(outer % literal(2) === literal(0)) {
+            val mapped = declare(p._1(lane).read + outer).read
+            val innerStart = declare(literal(0)).read
+            val innerEnd = declare(limit.read).read
+            gpuFor(names.dequeue(), innerStart, innerEnd) { inner =>
+              val item = declare(mapped + inner).read
+              when(item >= literal(0)) {
+                p._1(lane) := item + literal(1)
+                total := total.read + (item + item)
+                limit := literal(1)
+              }
+            }
+          }
+        }
+        limit := literal(2)
+        val state = declare(total.read)
+        gpuFor(names.dequeue(), start, stop) { outer =>
+          when(outer % literal(2) === literal(0)) {
+            val mapped = declare(p._1(lane).read + outer).read
+            val innerStart = declare(literal(0)).read
+            val innerEnd = declare(limit.read).read
+            gpuFor(names.dequeue(), innerStart, innerEnd) { inner =>
+              val item = declare(mapped + inner).read
+              when(item >= literal(0)) { state := state.read - item }
+            }
+          }
+        }
+        val result = declare(state.read).read
+        p._2(lane) := result
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
+  test("chained flatMap reuses captured inner plans and keeps nested shadows and Boolean Double states"):
+    val actual = ScalaKernels.flatMapNested
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(input[Double]("data"), output[Double]("target"),
+        value[Int]("count"), value[Int]("rounds"), value[Boolean]("enabled"))) { p =>
+      val lane = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(lane < p._3) {
+        val start = declare(literal(0)).read
+        val end = declare(p._4).read
+        val fixedStart = declare(literal(0)).read
+        val fixedEnd = declare(literal(2)).read
+        def visit(consume: Expr[Boolean] => BlockBuilder ?=> Unit)(using BlockBuilder): Unit =
+          gpuFor(names.dequeue(), start, end) { outer =>
+            gpuFor(names.dequeue(), fixedStart, fixedEnd) { inner =>
+              val mapped = declare(outer + inner).read
+              val innerStart = declare(literal(0)).read
+              val innerEnd = declare(mapped).read
+              gpuFor(names.dequeue(), innerStart, innerEnd) { index =>
+                val item = declare(index + literal(1)).read
+                val flag = declare(choose(item % literal(2) === literal(0))(p._5)(!p._5)).read
+                consume(flag)
+              }
+            }
+          }
+        val foundState = declare(literal(false))
+        visit(flag => foundState := foundState.read || flag)
+        val found = declare(foundState.read).read
+        val totalState = declare(p._1(lane).read)
+        visit { flag =>
+          val mapped = declare(choose(flag)(literal(2.0))(literal(1.0))).read
+          totalState := totalState.read / literal(2.0) - mapped
+        }
+        val total = declare(totalState.read).read
+        p._2(lane) := choose(found)(total)(p._1(lane).read)
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
   test("all fixtures preserve source maps scope unique names validation and deterministic CUDA"):
     val factories: Vector[() => Kernel[?]] = Vector(() => ScalaKernels.scale, () => ScalaKernels.branches,
       () => ScalaKernels.shortCircuit, () => ScalaKernels.doubles, () => ScalaKernels.rowSum,
       () => ScalaKernels.rangeBounds, () => ScalaKernels.nestedRanges, () => ScalaKernels.guardedRows,
       () => ScalaKernels.guardedState, () => ScalaKernels.nestedGuards, () => ScalaKernels.yieldRows,
       () => ScalaKernels.yieldReuse, () => ScalaKernels.yieldNested, () => ScalaKernels.foldRows,
-      () => ScalaKernels.foldReuse, () => ScalaKernels.foldNested)
+      () => ScalaKernels.foldReuse, () => ScalaKernels.foldNested, () => ScalaKernels.flatMapRows,
+      () => ScalaKernels.flatMapReuse, () => ScalaKernels.flatMapNested)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)

@@ -122,6 +122,78 @@ class ScalaKernelCompilerSuite extends FunSuite:
       assertEquals(caller.errors, Vector.empty)
     }
 
+  test("scalar flatMap supports multiple generators aliases and ordered terminals"):
+    CompilerHarness.withDirectory { directory =>
+      val result = CompilerHarness.compile(directory, "FlatMap", factory("""
+        val values = for outer <- deviceRange(0, p._3) if outer % 2 == 0
+          inner <- deviceRange(0, outer) if inner > 0
+          third <- deviceRange(0, inner)
+        yield outer + inner + third
+        val alias = values
+        var total = alias.foldLeft(7)((sum, item) => sum - item)
+        values.foreach(item => total += item)
+        p._2(0) = total
+      """))
+      assertEquals(result.errors, Vector.empty)
+      CompilerHarness.withClasses(Seq(result.classes)) { loader =>
+        val definition = loader.loadClass("quotedfixture.Definitions")
+        val staged = definition.getMethod("definition").invoke(definition.getConstructor().newInstance()).asInstanceOf[Kernel[Tuple]]
+        assert(KernelValidator.validate(staged).isValid)
+        assertEquals(staged.body.statements.count(_.isInstanceOf[ForLoop]), 2)
+      }
+      val caller = CompilerHarness.compile(directory, "FlatMapCaller", """
+        package quotedfixture
+        import scala.annotation.experimental
+        import flight4s.core.ir.{DeviceBuffer, Kernel}
+        class Caller:
+          @experimental
+          def definition: Kernel[(DeviceBuffer[Int], DeviceBuffer[Int], Int)] = new Definitions().definition
+      """, dependencies = Seq(result.classes))
+      assertEquals(caller.errors, Vector.empty)
+    }
+
+  test("flatMap validates unused nested plans and admits primitive type changes"):
+    CompilerHarness.withDirectory { directory =>
+      val result = CompilerHarness.compile(directory, "FlatMapTypes", factory("""
+        val fixed = deviceRange(0, 2)
+        val floats = deviceRange(0, p._3).flatMap(i => fixed.map(j => if i > j then 2.0f else 1.0f))
+        val flags = floats.flatMap(f => fixed.map(j => f > 1.0f && j > 0))
+        val doubles = flags.flatMap(b => fixed.map(j => if b then 2.0 else 1.0))
+        val ints = doubles.flatMap(d => fixed.map(j => if d > 1.0 then 7 else 3))
+        val unused = ints.flatMap(i => deviceRange(0, i).flatMap(j => fixed.map(k => i + j + k)))
+        val total = ints.foldLeft(0)((sum, item) => sum - item)
+        p._2(0) = total
+      """))
+      assertEquals(result.errors, Vector.empty)
+      CompilerHarness.withClasses(Seq(result.classes)) { loader =>
+        val definition = loader.loadClass("quotedfixture.Definitions")
+        val staged = definition.getMethod("definition").invoke(definition.getConstructor().newInstance()).asInstanceOf[Kernel[Tuple]]
+        assert(KernelValidator.validate(staged).isValid)
+        assertEquals(staged.body.statements.count(_.isInstanceOf[ForLoop]), 1)
+      }
+    }
+
+  test("flatMap rejects impure factories captures structured elements and nonliteral callbacks"):
+    rejected(factory("val values = deviceRange(0, p._3).flatMap(callback)",
+      "val callback: Int => DeviceTraversal[Int] = i => deviceRange(0, i)"), "literal matching primitive callback")
+    rejected(factory("val values = deviceRange(0, p._3).flatMap(i => deviceRange(host, i))", "val host = 1"), "captures")
+    rejected(factory("val values = deviceRange(0, p._3).flatMap(i => captured)",
+      "val captured = deviceRange(0, 3)"), "captures")
+    rejected(factory("val values = deviceRange(0, p._3).flatMap(i => helper(i))",
+      "def helper(i: Int): DeviceTraversal[Int] = deviceRange(0, i)"), "must originate from deviceRange")
+    rejected(factory("var total = 0; val values = deviceRange(0, p._3).flatMap(i => { total += 1; deviceRange(0, i) })"), "must originate from deviceRange")
+    rejected(factory("val values = deviceRange(0, p._3).flatMap(i => { p._2(0) = i; deviceRange(0, i) })"), "must originate from deviceRange")
+    rejected(factory("val values = deviceRange(0, p._3).flatMap(i => { val inner = deviceRange(0, i); inner })"), "must originate from deviceRange")
+    rejected(factory("val values = deviceRange(0, p._3).flatMap(i => if i > 0 then deviceRange(0, i) else deviceRange(0, 0))"), "must originate from deviceRange")
+    rejected(factory("val values = deviceRange(0, p._3).flatMap(i => deviceRange(0, i).map(j => (i, j)))"), "pure primitive results")
+    rejected(factory("val values = deviceRange(0, p._3).flatMap(i => deviceRange(0, i).map(j => host))", "val host = 7"), "captures")
+    rejected(factory("val values = deviceRange(0, p._3).flatMap(i => deviceRange(0, i).flatMap(j => deviceRange(host, j)))", "val host = 1"), "captures")
+    rejected(factory("val values = deviceRange(0, p._3).flatMap(i => deviceRange(0, i).map(j => deviceRange(0, j).foldLeft(0)(_ + _)))"), "directly initialize")
+    rejected(factory("val values = deviceRange(0, p._3).flatMap(i => pretend.deviceRange(0, i))", """
+      object pretend:
+        def deviceRange(from: Int, until: Int): DeviceTraversal[Int] = flight4s.frontend.ScalaKernel.deviceRange(from, until)
+    """), "must originate from deviceRange")
+
   test("ordered scalar folds compile reuse plans and retain exact launch types"):
     CompilerHarness.withDirectory { directory =>
       val result = CompilerHarness.compile(directory, "OrderedFolds", factory("""
@@ -430,6 +502,7 @@ class ScalaKernelCompilerSuite extends FunSuite:
     intercept[IllegalStateException](ScalaKernel.deviceRange(0, 3))
     val traversal = new ScalaKernel.DeviceTraversal[Int]()
     intercept[IllegalStateException](traversal.map(_ + 1))
+    intercept[IllegalStateException](traversal.flatMap(i => ScalaKernel.deviceRange(0, i)))
     intercept[IllegalStateException](traversal.withFilter(_ > 0))
     intercept[IllegalStateException](traversal.foreach(_ => ()))
     intercept[IllegalStateException](traversal.foldLeft(0)(_ + _))

@@ -42,7 +42,7 @@ primitive `== !=`, unary `+`, Int unary `-`, Boolean `! && ||`, primitive
 `val` snapshots, initialized `var`, assignment/compound assignment, immutable
 buffer aliases, statement scopes, statement `if`/`else`, and pure expression
 `if`/`else`, direct unit-stride `start until end` range loops with lazy guards,
-and explicit `deviceRange` scalar yield/map/withFilter/foreach plans with ordered
+and explicit `deviceRange` scalar yield/map/flatMap/withFilter/foreach plans with ordered
 scalar `foldLeft` initializers. Short-circuit
 booleans lower to lazy `Conditional` IR. An input's
 `update` requires read-write evidence, and lowering independently requires an
@@ -51,7 +51,7 @@ output parameter. Existing validation and CUDA generation remain authoritative.
 Deferred/rejected: other loops, eager range `.filter`, `to`/`by`, stored range values,
 eager Range `yield`, `match`/`try`/return, lazy/uninitialized bindings,
 local definitions, expression blocks, tuple/product local state, source-level
-embedded folds, tuple/product fold state, nested flatMap, richer functional traversals and collectives, captured host state/values/helper calls,
+embedded folds, tuple/product fold state, structured traversals and collectives, captured host state/values/helper calls,
 numeric conversions, shifts, floating remainder, dynamic floating unary minus,
 vector/low-precision source types, signature inference, and Unit-style annotated
 methods. Dynamic floating negation is not approximated by `0 - x`, which would
@@ -59,13 +59,13 @@ mishandle signed zero. Negative floating literals remain supported. This is a
 documented compiler subset, not a sandbox. Host kernel names and signatures
 evaluate once in normal call order; that configuration is outside the body.
 
-`ScalaKernelCompilerSuite` contains 26 actual compiler-program tests,
+`ScalaKernelCompilerSuite` contains 29 actual compiler-program tests,
 including separate callers, negative admission, all intrinsic axes, supported
 operators, scopes and configuration evaluation order. `ScalaKernelIrSuite`
-contains fifteen tests: independent explicit-DSL branch/short-circuit/loop/guard/traversal/fold references
+contains eighteen tests: independent explicit-DSL branch/short-circuit/loop/guard/traversal/fold/flatMap references
 compare exact IR/effects/generated artifacts after aligning only source spans;
-all sixteen fixtures validate and retain source maps and deterministic CUDA.
-`ScalaKernelCudaJniSuite` has sixteen real GPU fixtures for Float scaling, mutable
+all nineteen fixtures validate and retain source maps and deterministic CUDA.
+`ScalaKernelCudaJniSuite` has nineteen real GPU fixtures for Float scaling, mutable
 Int snapshots/shadowing, tightly sized short-circuit inputs, and Double/Boolean
 branches. They cover counts 0/1/63/64/65/193/257, 32 output tails, both stream
 paths, disabled execution, unchanged read-only inputs, and in-place updates.
@@ -82,6 +82,9 @@ literal-union widening, unused-plan purity and separate typed callers.
 Fold fixtures verify Float cancellation order and seeds, filtered/empty traversals,
 Int plan reuse after changed memory/bias, and nested Boolean/Double state with
 distinct Int elements. Full buffers, tails and both stream paths are checked.
+FlatMap fixtures additionally verify guarded inner-bound loads, per-outer bounds,
+saved outer values across stores, reused inner aliases, three-level flattening,
+live terminal captures and global Boolean/Double fold state.
 
 ### Range Loop Contract
 
@@ -210,7 +213,7 @@ symbols belong to `ScalaKernel`, so user-defined lookalike methods are not admit
 The checked inferred map type is retained through lowering, including conditional
 literal unions, without adding implicit numeric conversion.
 
-Deferred: sums, flatMap/multiple yielded generators, tuple/product elements,
+Deferred: sums, tuple/product elements,
 generator aliases/patterns, stored callbacks, mutable plans, filter/materialization,
 inclusive/strided ranges, helpers/captures and expression blocks. Ordinary Scala
 Range `map`/`yield` remains rejected: it is eager and cannot silently mean this lazy
@@ -263,6 +266,68 @@ folds into lazy expression contexts needs a separate evaluation-order contract.
 Tuple/product state, numeric conversions, helper/stored callbacks, expression
 blocks, sums, parallel trees and collectives are deferred; no reassociation or new
 IR/backend/runtime behavior is implied.
+
+### Nested Scalar Traversal Contract
+
+```scala
+val values = for
+  outer <- deviceRange(0, rounds)
+  if outer % 2 == 0
+  inner <- deviceRange(0, outer)
+  if inner > 0
+yield outer + inner
+val total = values.foldLeft(7)((sum, item) => sum - item)
+```
+
+Equivalent CUDA C++ (simplified names):
+
+```cpp
+const int start = 0, end = rounds;
+int accumulator = 7;
+for (int outer = start; outer < end; ++outer) {
+    if (outer % 2 == 0) {
+        const int innerStart = 0, innerEnd = outer;
+        for (int inner = innerStart; inner < innerEnd; ++inner) {
+            if (inner > 0) {
+                const int item = outer + inner;
+                accumulator = accumulator - item;
+            }
+        }
+    }
+}
+const int total = accumulator;
+```
+
+`DeviceTraversal[T].flatMap[U](T => DeviceTraversal[U])` accepts a literal callback
+returning a supported scalar plan: a `deviceRange` chain or lexically bound plan
+alias, optionally mapped/guarded/flattened. All input/result types remain supported
+primitives. Canonical inferred types are retained; unused nested callbacks are
+recursively validated without emitting their device loops.
+
+An existing root plan keeps its construction-time bounds. A new inner range
+captures start/end once, in order, for each accepted outer element at each
+terminal. Earlier failed guards suppress inner-bound reads entirely. Subsequent
+stores can affect the next outer iteration, not the current inner loop's bounds.
+An existing inner alias uses its original captured bounds, not new snapshots.
+Outer map results remain saved across inner iterations and terminal writes.
+
+Recursive lowering uses existing nested `ForLoop`, `IfThen`, local snapshots and
+stores. Tail stages execute for each accepted inner item, including further
+flattening; callback symbols preserve outer captures and same-name shadows.
+`foreach` terminals may have statement bodies; flatMap/map/guard callbacks stay
+pure, with no declaration/assignment blocks or nested fold expressions. One
+ordered fold accumulator surrounds all nested loops, not one per inner range.
+Empty/reversed/rejected inner plans perform no updates. Reusing a plan emits a
+fresh nested traversal and independent fold state without retaining host lambdas,
+objects or intermediate collections. No parallel reassociation is introduced.
+
+Deferred: tuple/product elements and states, generator aliases/patterns, conditional
+plan factories, stored/helper callbacks, captures, expression blocks and eager
+Scala collection roots. The explicit DSL and annotation semantics are unchanged.
+During fixture development, seven-parameter tuple signatures exposed a Scala 3.8.1
+pre-expansion `-Ycheck:all` method-type assertion with both exported `params(tuple)`
+and direct `CudaDsl.paramsTuple(tuple)`. This checker issue is deferred; fixtures
+use existing six-parameter overloads. Neither checker flag was disabled.
 
 ## Kernel Annotation Prototype
 
