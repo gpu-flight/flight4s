@@ -465,6 +465,116 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("flatMap guards protect inner bound loads and preserve ordered Float cancellation on both streams"):
+    val definition = ScalaKernels.flatMapRows
+    val pattern = Vector(1.0e20f, 1.0f, -1.0e20f, 3.0f, -2.0f, 0.25f, -0.5f)
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for rows <- counts; columns <- Vector(0, 1, 3, 17); empty <- Vector(false, true) do
+          val initial = Array.tabulate(math.max(1, rows * columns))(i => pattern(i % pattern.size))
+          val lengths = Array.tabulate(math.max(1, columns))(i => if empty then 0 else Vector(-1, 0, 1, 3, 5)(i % 5))
+          val data = context.allocate[Float](initial.length).toOption.get
+          val sizes = context.allocate[Int](lengths.length).toOption.get
+          val target = context.allocate[Float](rows + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            assertEquals(sizes.copyFrom(lengths), Right(()))
+            for threshold <- Vector(-2.0e20f, 0.0f, 2.0e20f); explicit <- Vector(false, true) do
+              val expected = Vector.tabulate(rows) { row =>
+                var total = 7.0f
+                for column <- 0 until columns; inner <- 0 until lengths(column) if inner % 2 == 0 do
+                  val item = initial(row * columns + column) + (if inner == 0 then 0.0f else 0.5f)
+                  if item > threshold then total = total - item * 2.0f
+                total
+              }
+              assertEquals(target.copyFrom(Array.fill(rows + 32)(-999f)), Right(()))
+              launch(context, function, definition.bind((data, sizes, target, rows, columns, threshold)), config(rows), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+              assertEquals(sizes.copyToArray().toOption.get.toVector, lengths.toVector)
+          finally
+            target.close()
+            sizes.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("reused flatMap refreshes inner bounds per outer item without rereading saved outer values"):
+    val definition = ScalaKernels.flatMapReuse
+    val bounds = Vector((0, 0), (2, 2), (4, 1), (-3, 2), (-3, 7), (0, 8), (2, 7))
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(count + 32)(i => i % 7 - 3)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val target = context.allocate[Int](initial.length).toOption.get
+          try
+            for (from, until) <- bounds; explicit <- Vector(false, true) do
+              val expected = initial.take(count).map { original =>
+                var data = original
+                var limit = 3
+                var total = 0
+                for outer <- from until until if outer % 2 == 0 do
+                  val mapped = data + outer
+                  val end = limit
+                  for inner <- 0 until end do
+                    val item = mapped + inner
+                    if item >= 0 then
+                      data = item + 1
+                      total += item + item
+                      limit = 1
+                for outer <- from until until if outer % 2 == 0 do
+                  val mapped = data + outer
+                  for inner <- 0 until 2 do
+                    val item = mapped + inner
+                    if item >= 0 then total -= item
+                (data, total)
+              }.toVector
+              assertEquals(data.copyFrom(initial), Right(()))
+              assertEquals(target.copyFrom(Array.fill(initial.length)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, count, from, until)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected.map(_._2) ++ Vector.fill(32)(-999))
+              assertEquals(data.copyToArray().toOption.get.toVector, expected.map(_._1) ++ initial.drop(count).toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("chained flatMap executes aliased inner plans with Boolean elements and global Double fold state"):
+    val definition = ScalaKernels.flatMapNested
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 17 - 8).toDouble * 0.25)
+          val data = context.allocate[Double](initial.length).toOption.get
+          val target = context.allocate[Double](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for rounds <- Vector(0, 1, 2, 4, 7); enabled <- Vector(false, true); explicit <- Vector(false, true) do
+              val expected = initial.take(count).map { original =>
+                var found = false
+                var total = original
+                for outer <- 0 until rounds; inner <- 0 until 2; index <- 0 until outer + inner do
+                  val item = index + 1
+                  val flag = if item % 2 == 0 then enabled else !enabled
+                  found = found || flag
+                  total = total / 2.0 - (if flag then 2.0 else 1.0)
+                if found then total else original
+              }.toVector
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999.0)), Right(()))
+              launch(context, function, definition.bind((data, target, count, rounds, enabled)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999.0))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))

@@ -214,6 +214,59 @@ object ScalaKernels:
       p._2(lane) = total
   }
 
+  def flatMapRows = kernel("quotedFlatMapRows", params(input[Float]("data"), input[Int]("lengths"),
+      output[Float]("target"), value[Int]("rows"), value[Int]("columns"),
+      value[Float]("threshold"))) { p =>
+    val row = blockIdx.x * blockDim.x + threadIdx.x
+    if row < p._4 then
+      val values = for column <- deviceRange(-1, p._5 + 1) if column >= 0 if column < p._5
+        inner <- deviceRange(0, p._2(column)) if inner % 2 == 0
+      yield p._1(row * p._5 + column) + (if inner == 0 then 0.0f else 0.5f)
+      val total = values.withFilter(item => item > p._6).map(item => item * 2.0f)
+        .foldLeft(7.0f)((sum, item) => sum - item)
+      p._3(row) = total
+  }
+
+  def flatMapReuse = kernel("quotedFlatMapReuse", params(inOut[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("from"), value[Int]("until"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var begin = p._4
+      var end = p._5
+      var limit = 3
+      var total = 0
+      val values = deviceRange(begin, end).withFilter(outer => outer % 2 == 0)
+        .map(outer => p._1(lane) + outer)
+        .flatMap(outer => deviceRange(0, limit).map(inner => outer + inner))
+        .withFilter(item => item >= 0)
+      val alias = values
+      begin = 0
+      end = 0
+      alias.foreach { item =>
+        p._1(lane) = item + 1
+        total += item + item
+        limit = 1
+      }
+      limit = 2
+      val result = values.foldLeft(total)((sum, item) => sum - item)
+      p._2(lane) = result
+  }
+
+  def flatMapNested = kernel("quotedFlatMapNested", params(input[Double]("data"), output[Double]("target"),
+      value[Int]("count"), value[Int]("rounds"), value[Boolean]("enabled"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      val base = deviceRange(0, p._4)
+      val fixed = deviceRange(0, 2)
+      val values = base.flatMap(outer => fixed.map(inner => outer + inner))
+        .flatMap(index => deviceRange(0, index).map(index => index + 1))
+        .map(item => if item % 2 == 0 then p._5 else !p._5)
+      val found = values.foldLeft(false)((found, item) => found || item)
+      val total = values.map(flag => if flag then 2.0 else 1.0)
+        .foldLeft(p._1(lane))((sum, item) => sum / 2.0 - item)
+      p._2(lane) = if found then total else p._1(lane)
+  }
+
   def yieldNested = kernel("quotedYieldNested", params(input[Int]("data"), output[Int]("target"),
       value[Int]("count"), value[Int]("rounds"))) { p =>
     val lane = blockIdx.x * blockDim.x + threadIdx.x

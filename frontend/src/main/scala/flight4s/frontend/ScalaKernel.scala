@@ -23,6 +23,7 @@ object ScalaKernel:
   /** Lazy serial device traversal syntax, not a materialized Scala collection. */
   final class DeviceTraversal[T] private[frontend] ():
     def map[U](transform: T => U): DeviceTraversal[U] = markerOnly()
+    def flatMap[U](transform: T => DeviceTraversal[U]): DeviceTraversal[U] = markerOnly()
     def withFilter(predicate: T => Boolean): DeviceTraversal[T] = markerOnly()
     def foreach(body: T => Unit): Unit = markerOnly()
     def foldLeft[A](initial: A)(step: (A, T) => A): A = markerOnly()

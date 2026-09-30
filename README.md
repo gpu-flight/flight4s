@@ -152,7 +152,7 @@ An immutable plan can be aliased and traversed again. Bounds snapshot once at
 guards against current device state. Every mapped item snapshots once per visited
 element, so a terminal write cannot change that item. There is no intermediate
 JVM/GPU collection or implicit parallel reduction. Scalar `Int`/`Float`/`Double`/
-`Boolean` mappings are supported. Nested `flatMap`, tuples and collectives
+`Boolean` mappings are supported. Scalar nested `flatMap` is supported; tuples and collectives
 in this quoted frontend remain separate slices; the explicit DSL already has
 those richer traversal APIs.
 
@@ -192,6 +192,46 @@ No implicit numeric conversion or parallel reassociation is introduced.
 Embedded folds, assignment RHS folds, tuple/product accumulators, helper callbacks,
 and expression blocks remain rejected. Bind a fold to a local first, then use that
 result in other expressions. See the [fold contract](frontend/README.md#ordered-scalar-fold-contract).
+
+### Nested Scalar Traversals
+
+Multiple `deviceRange` generators compose through `flatMap`:
+
+```scala
+val values = for
+  outer <- deviceRange(0, rounds)
+  if outer % 2 == 0
+  inner <- deviceRange(0, outer)
+yield outer + inner
+val total = values.foldLeft(7)((sum, item) => sum - item)
+```
+
+Equivalent CUDA C++ with simplified names:
+
+```cpp
+const int start = 0, end = rounds;
+int accumulator = 7;
+for (int outer = start; outer < end; ++outer) {
+    if (outer % 2 == 0) {
+        const int innerStart = 0, innerEnd = outer;
+        for (int inner = innerStart; inner < innerEnd; ++inner) {
+            const int item = outer + inner;
+            accumulator = accumulator - item;
+        }
+    }
+}
+const int total = accumulator;
+```
+
+Outer guards suppress inner construction. New inner bounds snapshot once per
+accepted outer element, after earlier maps/guards; stores cannot change that
+iteration's captured bounds or saved outer mapped value. Returning an existing
+aliased plan reuses its original bounds. Each terminal runs the nested loops in
+outer-first order, with one fold state across all accepted inner elements.
+Further maps, guards, `flatMap`, `foreach` and folds compose without allocating
+intermediate collections. Callback blocks, tuples/products, pattern generators
+and generator value bindings remain deferred. See the
+[nested traversal contract](frontend/README.md#nested-scalar-traversal-contract).
 
 ### Automatic Local Names
 
