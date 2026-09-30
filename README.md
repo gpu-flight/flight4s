@@ -152,9 +152,46 @@ An immutable plan can be aliased and traversed again. Bounds snapshot once at
 guards against current device state. Every mapped item snapshots once per visited
 element, so a terminal write cannot change that item. There is no intermediate
 JVM/GPU collection or implicit parallel reduction. Scalar `Int`/`Float`/`Double`/
-`Boolean` mappings are supported. Folds, nested `flatMap`, tuples and collectives
+`Boolean` mappings are supported. Nested `flatMap`, tuples and collectives
 in this quoted frontend remain separate slices; the explicit DSL already has
 those richer traversal APIs.
+
+### Ordered Scalar Folds
+
+Staged plans also support `foldLeft`, directly initializing a primitive `val` or
+`var`. For example, inside a quoted row kernel:
+
+```scala
+val values = for column <- deviceRange(0, columns) yield data(row * columns + column)
+val total = values.foldLeft(0.0f)((sum, item) => sum + item)
+target(row) = total
+```
+
+Equivalent CUDA C++ with simplified names:
+
+```cpp
+const int start = 0;
+const int end = columns;
+float accumulator = 0.0f;
+for (int column = start; column < end; ++column) {
+    const float item = data[row * columns + column];
+    accumulator = accumulator + item;
+}
+const float total = accumulator;
+target[row] = total;
+```
+
+Each thread folds its elements in ascending traversal order. The initial state
+is evaluated once, after receiver construction; empty or fully filtered traversals
+return that state. Guards remain lazy, and every accepted map result snapshots
+before the pure two-parameter step. Each repeated terminal uses fresh state and
+current device reads; earlier results remain saved. All four primitive accumulator
+types are supported, including a state type different from the element type.
+No implicit numeric conversion or parallel reassociation is introduced.
+
+Embedded folds, assignment RHS folds, tuple/product accumulators, helper callbacks,
+and expression blocks remain rejected. Bind a fold to a local first, then use that
+result in other expressions. See the [fold contract](frontend/README.md#ordered-scalar-fold-contract).
 
 ### Automatic Local Names
 

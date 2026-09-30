@@ -167,6 +167,53 @@ object ScalaKernels:
       p._2(lane) = total
   }
 
+  def foldRows = kernel("quotedFoldRows", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("rows"), value[Int]("columns"), value[Float]("threshold"), value[Float]("seed"))) { p =>
+    val row = blockIdx.x * blockDim.x + threadIdx.x
+    if row < p._3 then
+      val values = for column <- deviceRange(-1, p._4 + 1) if column >= 0 if column < p._4
+        yield p._1(row * p._4 + column)
+      val total = values.withFilter(item => item > p._5).map(item => item * 2.0f)
+        .foldLeft(p._6)((sum, item) => sum - item)
+      p._2(row) = total
+  }
+
+  def foldReuse = kernel("quotedFoldReuse", params(inOut[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("from"), value[Int]("until"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var begin = p._4
+      var end = p._5
+      var bias = 0
+      val values = for index <- deviceRange(begin, end) if index % 2 == 0
+        yield p._1(lane) + index + bias
+      val alias = values
+      begin = 0
+      end = 0
+      bias = 1
+      val first = alias.foldLeft(p._1(lane))((sum, item) => sum - item - item)
+      p._1(lane) = first
+      bias = 3
+      var second = values.foldLeft(first + 1)((sum, item) => if item > sum then item else sum - item)
+      second += first
+      p._2(lane) = second
+  }
+
+  def foldNested = kernel("quotedFoldNested", params(input[Double]("data"), output[Double]("target"),
+      value[Int]("count"), value[Int]("rounds"), value[Boolean]("enabled"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var total = p._1(lane)
+      for index <- 0 until p._4 do
+        val before = total
+        val values = deviceRange(0, index).map(index => index + 1)
+        val accepted = values.foldLeft(p._5)((accepted, item) => accepted || item % 2 == 0)
+        var next = values.foldLeft(before)((before, item) => if accepted then before / 2.0 else before - 1.0)
+        next += 0.25
+        total = next
+      p._2(lane) = total
+  }
+
   def yieldNested = kernel("quotedYieldNested", params(input[Int]("data"), output[Int]("target"),
       value[Int]("count"), value[Int]("rounds"))) { p =>
     val lane = blockIdx.x * blockDim.x + threadIdx.x

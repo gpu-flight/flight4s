@@ -122,6 +122,77 @@ class ScalaKernelCompilerSuite extends FunSuite:
       assertEquals(caller.errors, Vector.empty)
     }
 
+  test("ordered scalar folds compile reuse plans and retain exact launch types"):
+    CompilerHarness.withDirectory { directory =>
+      val result = CompilerHarness.compile(directory, "OrderedFolds", factory("""
+        val values = for i <- deviceRange(0, p._3) if i % 2 == 0 yield p._1(i)
+        val alias = values
+        val first = alias.foldLeft(7)((sum, item) => sum - item)
+        var second = values.foldLeft(first)((sum, item) => sum + item + item)
+        second += 1
+        val direct = deviceRange(0, p._3).foldLeft(first)((sum, item) => sum - item)
+        p._2(0) = first + second + direct
+      """))
+      assertEquals(result.errors, Vector.empty)
+      CompilerHarness.withClasses(Seq(result.classes)) { loader =>
+        val definition = loader.loadClass("quotedfixture.Definitions")
+        val staged = definition.getMethod("definition").invoke(definition.getConstructor().newInstance()).asInstanceOf[Kernel[Tuple]]
+        assert(KernelValidator.validate(staged).isValid)
+        assertEquals(staged.body.statements.count(_.isInstanceOf[ForLoop]), 3)
+      }
+      val caller = CompilerHarness.compile(directory, "FoldCaller", """
+        package quotedfixture
+        import scala.annotation.experimental
+        import flight4s.core.ir.{DeviceBuffer, Kernel}
+        class Caller:
+          @experimental
+          def definition: Kernel[(DeviceBuffer[Int], DeviceBuffer[Int], Int)] = new Definitions().definition
+      """, dependencies = Seq(result.classes))
+      assertEquals(caller.errors, Vector.empty)
+    }
+
+  test("ordered folds support every primitive state and distinct element types"):
+    CompilerHarness.withDirectory { directory =>
+      val result = CompilerHarness.compile(directory, "FoldTypes", factory("""
+        val values = deviceRange(0, p._3)
+        val floats = values.map(i => if i > 0 then 2.0f else 1.0f)
+        val f = floats.foldLeft(0.0f)((sum, item) => sum - item)
+        val flags = floats.map(x => x > f)
+        val b = flags.foldLeft(false)((found, item) => found || item)
+        val d = values.foldLeft(1.0)((sum, item) => if item > 0 then sum / 2.0 else sum - 1.0)
+        val i = flags.foldLeft(7)((sum, item) => if item then sum + 1 else sum - 2)
+        val conditional = values.foldLeft(0)((sum, item) => if b then 1 else 2)
+        p._2(0) = if d > 0.0 then i + conditional else 0
+      """))
+      assertEquals(result.errors, Vector.empty)
+      CompilerHarness.withClasses(Seq(result.classes)) { loader =>
+        val definition = loader.loadClass("quotedfixture.Definitions")
+        val staged = definition.getMethod("definition").invoke(definition.getConstructor().newInstance()).asInstanceOf[Kernel[Tuple]]
+        assert(KernelValidator.validate(staged).isValid)
+        val states = staged.body.statements.collect { case d: LocalDeclaration[?] => d.local.valueType }
+        assertEquals(states, Vector[CudaType[?]](I32, I32, F32, F32, Bool, Bool, F64, F64, I32, I32, I32, I32))
+      }
+    }
+
+  test("ordered folds reject impure steps captures structured states and embedded terminals"):
+    rejected(factory("val result = deviceRange(0, p._3).foldLeft(host)((sum, item) => sum + item)", "val host = 7"), "captures")
+    rejected(factory("val result = deviceRange(0, p._3).foldLeft(0)((sum, item) => helper(sum, item))",
+      "def helper(sum: Int, item: Int): Int = sum + item"), "captures")
+    rejected(factory("var total = 0; val result = deviceRange(0, p._3).foldLeft(0)((sum, item) => { total += 1; sum + item })"), "expression blocks")
+    rejected(factory("val result = deviceRange(0, p._3).foldLeft(0)((sum, item) => { p._2(0) = item; sum })"), "expression blocks")
+    rejected(factory("val result = deviceRange(0, p._3).foldLeft(0)(callback)",
+      "val callback: (Int, Int) => Int = _ + _"), "literal matching two-parameter")
+    rejected(factory("val result = deviceRange(0, p._3).foldLeft((0, 1))((sum, item) => sum)"), "primitive locals")
+    rejected(factory("val result: Double = deviceRange(0, p._3).foldLeft(0)((sum, item) => sum + item)"), "captures")
+    rejected(factory("val result = (0 until p._3).foldLeft(0)((sum, item) => sum + item)"), "captures")
+    rejected(factory("p._2(0) = deviceRange(0, p._3).foldLeft(0)((sum, item) => sum + item)"), "directly initialize")
+    rejected(factory("val result = 1 + deviceRange(0, p._3).foldLeft(0)((sum, item) => sum + item)"), "directly initialize")
+    rejected(factory("val result = if p._3 > 0 then deviceRange(0, p._3).foldLeft(0)((sum, item) => sum + item) else 0"), "directly initialize")
+    rejected(factory("var result = 0; result = deviceRange(0, p._3).foldLeft(0)((sum, item) => sum + item)"), "directly initialize")
+    rejected(factory("val values = deviceRange(0, p._3).map(i => deviceRange(0, i).foldLeft(0)((sum, item) => sum + item))"), "directly initialize")
+    rejected(factory("val values = deviceRange(0, p._3).withFilter(i => deviceRange(0, i).foldLeft(false)((found, item) => found || item > 0))"), "directly initialize")
+    rejected(factory("val result = deviceRange(0, p._3).foldLeft(0)((sum, item) => deviceRange(0, item).foldLeft(sum)((a, b) => a + b))"), "directly initialize")
+
   test("named tuple parameters primitive locals aliases assignments and nested branches compile"):
     CompilerHarness.withDirectory { directory =>
       val result = CompilerHarness.compile(directory, "Named", """
@@ -361,6 +432,7 @@ class ScalaKernelCompilerSuite extends FunSuite:
     intercept[IllegalStateException](traversal.map(_ + 1))
     intercept[IllegalStateException](traversal.withFilter(_ > 0))
     intercept[IllegalStateException](traversal.foreach(_ => ()))
+    intercept[IllegalStateException](traversal.foldLeft(0)(_ + _))
 
   test("literal-valued conditional expressions and empty signatures compile"):
     CompilerHarness.withDirectory { directory =>

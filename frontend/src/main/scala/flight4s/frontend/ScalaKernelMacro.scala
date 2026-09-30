@@ -86,6 +86,7 @@ private[frontend] object ScalaKernelMacro:
     val traversalMapMethods = traversalSymbol.methodMember("map")
     val traversalGuardMethods = traversalSymbol.methodMember("withFilter")
     val traversalForeachMethods = traversalSymbol.methodMember("foreach")
+    val traversalFoldMethods = traversalSymbol.methodMember("foldLeft")
     val intrinsicSymbols = List(
       TypeRepr.of[ScalaKernel.threadIdx.type], TypeRepr.of[ScalaKernel.blockIdx.type],
       TypeRepr.of[ScalaKernel.blockDim.type], TypeRepr.of[ScalaKernel.gridDim.type])
@@ -144,6 +145,8 @@ private[frontend] object ScalaKernelMacro:
             val no = expression[T](conditional.elsep, env, bindings)
             '{ Conditional($condition, $yes, $no, $cudaType, $location) }
           case _ => invocation(source) match
+            case Some((selection, _)) if traversalFoldMethods.contains(selection.symbol) =>
+              report.errorAndAbort("ScalaKernel foldLeft must directly initialize a primitive val or var; embedded folds are not supported yet", source.pos)
             case Some((selection, Nil)) if intrinsicSymbols.contains(selection.symbol) =>
               '{ Intrinsic(${Expr(intrinsicSymbols(selection.symbol))}, I32, $location) }.asExprOf[DeviceExpr[T]]
             case Some((selection, List(List(index)))) if readMethods.contains(selection.symbol) =>
@@ -282,6 +285,35 @@ private[frontend] object ScalaKernelMacro:
               ${traversalElement(tail, '{ Load(handle, ${span(stage.body.pos)}) }.asTerm, bindings, builder)(consume)}
             }
 
+    def initializer[T: Type](term: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(
+        consume: Quotes ?=> Expr[DeviceExpr[T]] => Expr[Unit])(using Quotes): Expr[Unit] =
+      val source = unwrapped(term)
+      invocation(source) match
+        case Some((selection, List(List(initial), List(callback)))) if traversalFoldMethods.contains(selection.symbol) =>
+          if !(source.tpe.widen.dealias =:= TypeRepr.of[T]) then
+            report.errorAndAbort("ScalaKernel foldLeft requires a matching primitive accumulator type", source.pos)
+          traversal(selection.qualifier, env, bindings, builder) { plan =>
+            val (state, input, step) = unwrapped(callback) match
+              case Lambda(List(state, input), step) if state.tpt.tpe.widen.dealias =:= TypeRepr.of[T] &&
+                  input.tpt.tpe.widen.dealias =:= plan.elementType => (state.symbol, input.symbol, step)
+              case _ => report.errorAndAbort("ScalaKernel foldLeft requires a literal matching two-parameter primitive step lambda", callback.pos)
+            val seed = expression[T](initial, env, bindings)
+            // Bounds are captured before the seed; each terminal gets its own ordered state.
+            '{
+              val accumulator = CudaDsl.local($seed)(using ${valueType[T]}, $builder, ${position(initial)})
+              CudaDsl.gpuFor(${plan.from}, ${plan.until}) {
+                (index: DeviceExpr[Int]) => (nested: CudaDsl.BlockBuilder) ?=>
+                  ${traversalElement(plan.stages, 'index.asTerm, bindings, 'nested) { (element, active) =>
+                    val current = env.updated(state, Binding('accumulator.asTerm)).updated(input, Binding(element))
+                    val updated = expression[T](step, current, bindings)
+                    '{ CudaDsl.:=[T, Local](accumulator)($updated)(using $active, ${position(step)}) }
+                  }}
+              }(using $builder, ${position(source)})
+              ${consume('{ Load(accumulator, ${span(source.pos)}) })}
+            }
+          }
+        case _ => consume(expression[T](source, env, bindings))
+
     def statement(term: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[Unit] =
       val source = unwrapped(term)
       val location = span(source.pos)
@@ -407,11 +439,11 @@ private[frontend] object ScalaKernelMacro:
             if !primitive(declaredType) then report.errorAndAbort("ScalaKernel supports primitive locals and immutable buffer aliases only", value.pos)
             declaredType.asType match
               case '[t] =>
-                val initial = expression[t](rhs, current, bindings)
-                val valuePosition = position(value)
-                '{
-                  val handle = CudaDsl.local($initial)(using ${valueType[t]}, $builder, $valuePosition)
-                  ${next(tail, result, current.updated(value.symbol, Binding('handle.asTerm, mutable)))}
+                initializer[t](rhs, current, bindings, builder) { initial =>
+                  '{
+                    val handle = CudaDsl.local($initial)(using ${valueType[t]}, $builder, ${position(value)})
+                    ${next(tail, result, current.updated(value.symbol, Binding('handle.asTerm, mutable)))}
+                  }
                 }
         case (term: Term) :: tail =>
           '{ ${statement(term, current, bindings, builder)}; ${next(tail, result, current)} }
