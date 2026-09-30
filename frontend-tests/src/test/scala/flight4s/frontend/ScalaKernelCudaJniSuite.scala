@@ -118,6 +118,85 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("quoted row sums execute serial column loops with empty work tails and unchanged inputs"):
+    val definition = ScalaKernels.rowSum
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for rows <- counts; columns <- Vector(0, 1, 3, 17, 65) do
+          val initial = Array.tabulate(math.max(1, rows * columns))(i => (i % 17 - 8).toFloat * 0.25f)
+          val data = context.allocate[Float](initial.length).toOption.get
+          val target = context.allocate[Float](rows + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(rows)(row =>
+              (0 until columns).foldLeft(0.0f)((sum, column) => sum + initial(row * columns + column)))
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(rows + 32)(-999f)), Right(()))
+              launch(context, function, definition.bind((data, target, rows, columns)), config(rows), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted ranges snapshot mutable bounds and preserve negative empty reversed and Int-edge ranges"):
+    val definition = ScalaKernels.rangeBounds
+    val bounds = Vector((0, 0), (2, 2), (4, 1), (-3, 2), (2, 7),
+      (Int.MinValue, Int.MinValue + 3), (Int.MaxValue - 3, Int.MaxValue), (Int.MaxValue, Int.MaxValue))
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val visits = context.allocate[Int](count + 32).toOption.get
+          val last = context.allocate[Int](count + 32).toOption.get
+          try
+            for (from, until) <- bounds; explicit <- Vector(false, true) do
+              assertEquals(visits.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              assertEquals(last.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((visits, last, count, from, until)), config(count), stream, explicit)
+              val iterations = math.max(0L, until.toLong - from.toLong).toInt
+              assertEquals(visits.copyToArray().toOption.get.toVector,
+                Vector.fill(count)(iterations) ++ Vector.fill(32)(-999))
+              assertEquals(last.copyToArray().toOption.get.toVector,
+                Vector.fill(count)(if iterations == 0 then 123 else until - 1) ++ Vector.fill(32)(-999))
+          finally
+            last.close()
+            visits.close()
+      finally stream.close()
+    }
+
+  test("quoted nested loops resolve shadowed indices and refresh snapshots each outer iteration"):
+    val definition = ScalaKernels.nestedRanges
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => i % 7 - 3)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val target = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for rounds <- Vector(0, 1, 2, 4); explicit <- Vector(false, true) do
+              val expected = initial.take(count).map { item =>
+                var total = item
+                for outer <- 0 until rounds do
+                  val before = total
+                  for inner <- 0 until outer do total = total + before + inner
+                total
+              }.toVector
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, count, rounds)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))
