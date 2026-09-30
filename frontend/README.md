@@ -41,11 +41,13 @@ parameters, arithmetic `+ - * /`, Int `% & | ^`, numeric comparisons,
 primitive `== !=`, unary `+`, Int unary `-`, Boolean `! && ||`, primitive
 `val` snapshots, initialized `var`, assignment/compound assignment, immutable
 buffer aliases, statement scopes, statement `if`/`else`, and pure expression
-`if`/`else`. Short-circuit booleans lower to lazy `Conditional` IR. An input's
+`if`/`else`, and direct unit-stride `start until end` range loops. Short-circuit
+booleans lower to lazy `Conditional` IR. An input's
 `update` requires read-write evidence, and lowering independently requires an
 output parameter. Existing validation and CUDA generation remain authoritative.
 
-Deferred/rejected: loops, `match`/`try`/return, lazy/uninitialized bindings,
+Deferred/rejected: other loops, range guards, `to`/`by`, stored range values,
+`yield`, `match`/`try`/return, lazy/uninitialized bindings,
 local definitions, expression blocks, tuple/product local state, source-level
 functional traversals and collectives, captured host state/values/helper calls,
 numeric conversions, shifts, floating remainder, dynamic floating unary minus,
@@ -55,16 +57,58 @@ mishandle signed zero. Negative floating literals remain supported. This is a
 documented compiler subset, not a sandbox. Host kernel names and signatures
 evaluate once in normal call order; that configuration is outside the body.
 
-`ScalaKernelCompilerSuite` contains 14 actual compiler-program tests,
+`ScalaKernelCompilerSuite` contains 17 actual compiler-program tests,
 including separate callers, negative admission, all intrinsic axes, supported
 operators, scopes and configuration evaluation order. `ScalaKernelIrSuite`
-contains three tests: independent explicit-DSL branch/short-circuit references
+contains six tests: independent explicit-DSL branch/short-circuit/loop references
 compare exact IR/effects/generated artifacts after aligning only source spans;
-all four fixtures validate and retain source maps and deterministic CUDA.
-`ScalaKernelCudaJniSuite` has four real GPU fixtures for Float scaling, mutable
+all seven fixtures validate and retain source maps and deterministic CUDA.
+`ScalaKernelCudaJniSuite` has seven real GPU fixtures for Float scaling, mutable
 Int snapshots/shadowing, tightly sized short-circuit inputs, and Double/Boolean
 branches. They cover counts 0/1/63/64/65/193/257, 32 output tails, both stream
 paths, disabled execution, unchanged read-only inputs, and in-place updates.
+The loop fixtures additionally cover Float row sums with 0/1/3/17/65 columns,
+mutable bound snapshots, negative/empty/reversed ranges and signed Int edges,
+dependent nested bounds, shadowed loop indices and per-iteration snapshots.
+
+### Range Loop Contract
+
+Inside a quoted kernel, ordinary constants need no `literal` wrapper:
+
+```scala
+var total = 0.0f
+for column <- 0 until columns do
+  val item = data(row * columns + column)
+  total += item
+target(row) = total
+```
+
+Equivalent CUDA C++ with simplified names:
+
+```cpp
+float total = 0.0f;
+const int start = 0;
+const int end = columns;
+for (int column = start; column < end; ++column) {
+    const float item = data[row * columns + column];
+    total = total + item;
+}
+target[row] = total;
+```
+
+The typed tree is checked against the actual standard-library symbols for
+`Predef.intWrapper`, `RichInt.until` and `Range.foreach`, not method spellings.
+The macro constructs existing `ForLoop` IR through `gpuFor`, never a JVM Range.
+Both bounds snapshot once, in start/end order, each time the range is entered.
+This differs deliberately from explicitly passing a live mutable bound to
+the existing `gpuFor` API, whose contract remains unchanged. A nested range
+captures its bounds each outer iteration. Loop locals initialize each iteration;
+enclosing vars update existing handles; same-name indices use lexical symbols.
+Explicit nested loops, multiple-generator `for ... do`, and direct range
+`.foreach` use this same lowering. No parallel reassociation is introduced.
+Guards, pattern generators, generator aliases, `yield`, inclusive/strided ranges,
+stored/host-produced ranges and nonliteral callback values remain outside this
+subset. Host-method eta expansion still fails when its body makes a host call.
 
 ## Kernel Annotation Prototype
 

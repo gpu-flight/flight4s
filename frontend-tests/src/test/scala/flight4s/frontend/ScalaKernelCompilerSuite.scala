@@ -50,6 +50,25 @@ class ScalaKernelCompilerSuite extends FunSuite:
       }
     }
 
+  test("ordinary Scala until loops compile without literal wrappers and construct valid loop IR"):
+    CompilerHarness.withDirectory { directory =>
+      val result = CompilerHarness.compile(directory, "RangeLoop", factory("""
+        var total = 0
+        for i <- 0 until p._3 do
+          val before = total
+          total = before + p._1(i)
+        p._2(0) = total
+      """))
+      assertEquals(result.errors, Vector.empty)
+      CompilerHarness.withClasses(Seq(result.classes)) { loader =>
+        val definition = loader.loadClass("quotedfixture.Definitions")
+        val staged = definition.getMethod("definition").invoke(definition.getConstructor().newInstance())
+          .asInstanceOf[Kernel[(DeviceBuffer[Int], DeviceBuffer[Int], Int)]]
+        assert(KernelValidator.validate(staged).isValid)
+        assertEquals(staged.body.statements.count(_.isInstanceOf[ForLoop]), 1)
+      }
+    }
+
   test("named tuple parameters primitive locals aliases assignments and nested branches compile"):
     CompilerHarness.withDirectory { directory =>
       val result = CompilerHarness.compile(directory, "Named", """
@@ -83,6 +102,51 @@ class ScalaKernelCompilerSuite extends FunSuite:
         assert(KernelValidator.validate(staged).isValid)
       }
     }
+
+  test("range foreach nested generators loop shadows and compound stores compile and validate"):
+    CompilerHarness.withDirectory { directory =>
+      val result = CompilerHarness.compile(directory, "NestedRanges", factory("""
+        var total = 0
+        for i <- 0 until p._3 do
+          val before = total
+          for i <- 0 until i do total += before + i
+        for i <- 0 until p._3; j <- 0 until i do
+          if j % 2 == 0 then total += j
+        (0 until p._3).foreach { i => p._2(i) = total }
+      """))
+      assertEquals(result.errors, Vector.empty)
+      CompilerHarness.withClasses(Seq(result.classes)) { loader =>
+        val definition = loader.loadClass("quotedfixture.Definitions")
+        val staged = definition.getMethod("definition").invoke(definition.getConstructor().newInstance()).asInstanceOf[Kernel[Tuple]]
+        assert(KernelValidator.validate(staged).isValid)
+        def loops(block: Block): Vector[ForLoop] = block.statements.flatMap {
+          case loop: ForLoop => Vector(loop) ++ loops(loop.body)
+          case branch: IfThen => loops(branch.thenBlock) ++ branch.elseBlock.toVector.flatMap(loops)
+          case _ => Vector.empty
+        }
+        val collected = loops(staged.body)
+        assertEquals(collected.size, 5)
+        assertEquals(collected.map(_.index.name).distinct.size, 5)
+      }
+    }
+
+  test("range loops reject guards strides inclusive ranges aliases host factories and nonliteral callbacks"):
+    rejected(factory("for i <- 0 to p._3 do p._2(i) = i"), "range loops require")
+    rejected(factory("for i <- (0 until p._3).by(2) do p._2(i) = i"), "range loops require")
+    rejected(factory("for i <- 0 until p._3 if i > 0 do p._2(i) = i"), "range loops")
+    rejected(factory("val indices = 0 until p._3; for i <- indices do p._2(i) = i"), "primitive locals")
+    rejected(factory("val values = for i <- 0 until p._3 yield i + 1; p._2(0) = 1"), "primitive locals")
+    rejected(factory("for i <- Range(0, p._3) do p._2(i) = i"), "range loops require")
+    rejected(factory("for i <- 0 until host do p._2(i) = i", "def host: Int = 3"), "captures")
+    rejected(factory("for i <- host until p._3 do p._2(i) = i", "val host = 3"), "captures")
+    rejected(factory("for i <- 0 until p._3 do println(i)"), "host effects")
+    rejected(factory("(0 until p._3).foreach(callback)", "val callback: Int => Unit = _ => ()"), "literal Int loop-body lambda")
+    rejected(factory("(0 until p._3).foreach(callback)", "def callback(i: Int): Unit = ()"), "host effects")
+    rejected(factory("for i <- intWrapper(0).until(p._3) do p._2(i) = i", """
+      class Pretend:
+        def until(end: Int): Range = 0 until end
+      def intWrapper(start: Int): Pretend = new Pretend
+    """), "range loops require")
 
   test("primitive parameter and local type matrix compiles and validates"):
     val cases = Vector(("Int", "2", "3"), ("Float", "2.0f", "3.0f"),

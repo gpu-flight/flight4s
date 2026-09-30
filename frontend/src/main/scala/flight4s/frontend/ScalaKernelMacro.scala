@@ -68,6 +68,9 @@ private[frontend] object ScalaKernelMacro:
     val arraySymbol = TypeRepr.of[ScalaKernel.DeviceArray[Any, ReadOnly]].typeSymbol
     val readMethods = arraySymbol.methodMember("apply")
     val writeMethods = arraySymbol.methodMember("update")
+    val rangeForeachMethods = TypeRepr.of[scala.collection.immutable.Range].typeSymbol.methodMember("foreach")
+    val untilMethods = TypeRepr.of[scala.runtime.RichInt].typeSymbol.methodMember("until")
+    val intWrapperMethods = Symbol.requiredModule("scala.Predef").methodMember("intWrapper")
     val intrinsicSymbols = List(
       TypeRepr.of[ScalaKernel.threadIdx.type], TypeRepr.of[ScalaKernel.blockIdx.type],
       TypeRepr.of[ScalaKernel.blockDim.type], TypeRepr.of[ScalaKernel.gridDim.type])
@@ -112,6 +115,7 @@ private[frontend] object ScalaKernelMacro:
             val handle = bound.handle.asExprOf[LocalVariable[T]]
             '{ Load($handle, $location) }
           case '[ScalarParam[t]] => bound.handle.asExprOf[DeviceExpr[T]]
+          case '[DeviceExpr[t]] => bound.handle.asExprOf[DeviceExpr[T]]
           case _ => report.errorAndAbort("a device buffer is not a scalar value", source.pos)
         case None => source match
           case _: Block => report.errorAndAbort(
@@ -232,6 +236,28 @@ private[frontend] object ScalaKernelMacro:
                 '{ CudaDsl.:=[t, Local]($handle)($value)(using $builder, ${position(source)}) }
           case _ => report.errorAndAbort("ScalaKernel assignments must target a device local; host mutation is not supported", source.pos)
         case _ => invocation(source) match
+          case Some((selection, List(List(callback)))) if rangeForeachMethods.contains(selection.symbol) =>
+            val (from, until) = invocation(selection.qualifier) match
+              case Some((range, List(List(end)))) if untilMethods.contains(range.symbol) =>
+                unwrapped(range.qualifier) match
+                  case Apply(wrapper, List(start)) if intWrapperMethods.contains(wrapper.symbol) => (start, end)
+                  case _ => report.errorAndAbort("ScalaKernel range loops require Scala Int start until end", range.pos)
+              case _ => report.errorAndAbort(
+                "ScalaKernel range loops require direct start until end with unit stride; other range forms are not supported yet", source.pos)
+            val (index, loopBody) = unwrapped(callback) match
+              case Lambda(List(index), loopBody) if index.tpt.tpe =:= TypeRepr.of[Int] => (index.symbol, loopBody)
+              case _ => report.errorAndAbort("ScalaKernel range loops require a literal Int loop-body lambda", callback.pos)
+            val initial = expression[Int](from, env, bindings)
+            val limit = expression[Int](until, env, bindings)
+            // Scala constructs its Range before foreach; body stores must not change its bounds.
+            '{
+              val start = CudaDsl.local($initial)(using I32, $builder, ${position(from)})
+              val end = CudaDsl.local($limit)(using I32, $builder, ${position(until)})
+              CudaDsl.gpuFor(Load(start, ${span(from.pos)}), Load(end, ${span(until.pos)})) {
+                (loopIndex: DeviceExpr[Int]) => (nested: CudaDsl.BlockBuilder) ?=>
+                  ${statements(loopBody, env.updated(index, Binding('loopIndex.asTerm)), bindings, 'nested)}
+              }(using $builder, ${position(source)})
+            }
           case Some((selection, List(List(index, value), _))) if writeMethods.contains(selection.symbol) =>
             val array = binding(selection.qualifier, env, bindings).getOrElse(
               report.errorAndAbort("device array writes must reference a kernel parameter", selection.pos))
@@ -243,7 +269,7 @@ private[frontend] object ScalaKernelMacro:
                 '{ CudaDsl.:=[t, Global](BufferElement[t, ReadWrite]($handle.name, $offset,
                     $handle.valueType, $location))($initial)(using $builder, ${position(source)}) }
               case _ => report.errorAndAbort("ScalaKernel writes require an output buffer", source.pos)
-          case _ => report.errorAndAbort("ScalaKernel supports assignments and if statements only; loops and host effects are not supported yet", source.pos)
+          case _ => report.errorAndAbort("ScalaKernel supports assignments, if statements and direct until range loops only; other loops and host effects are not supported yet", source.pos)
 
     def statements(term: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[Unit] =
       def next(pending: List[Statement], result: Term, current: Environment)(using Quotes): Expr[Unit] = pending match

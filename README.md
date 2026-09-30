@@ -44,10 +44,52 @@ not copied device data. Vals snapshot, vars update device locals, and `if`/`else
 and short-circuit booleans retain device execution semantics. Typed launch
 arguments, validation, optimizers, inspectable CUDA C++, and NVRTC/PTX are reused.
 Explicit signatures remain required. This is an opt-in subset, not arbitrary
-Scala compilation: loops, functional traversal, signature inference, host
+Scala compilation: general loops, functional traversal, signature inference, host
 captures/calls, numeric conversions, vectors, and low-precision source types
 are deferred in this frontend. The existing DSL and annotation remain available.
 See the [frontend contract](frontend/README.md#quoted-scala-syntax-prototype).
+
+Direct half-open `Int` ranges now support ordinary `for ... do` loops, with
+unit stride and bounds captured once on entry. Nested loops and equivalent
+multiple-generator `for ... do` forms preserve lexical locals and serial order:
+
+```scala
+@experimental
+def rowSum = kernel("row_sum", params(input[Float]("data"), output[Float]("target"),
+    value[Int]("rows"), value[Int]("columns"))) { (data, target, rows, columns) =>
+  val row = blockIdx.x * blockDim.x + threadIdx.x
+  if row < rows then
+    var total = 0.0f
+    for column <- 0 until columns do
+      val item = data(row * columns + column)
+      total += item
+    target(row) = total
+}
+```
+
+Equivalent CUDA C++ below uses simplified names; generated names are automatic:
+
+```cpp
+extern "C" __global__
+void row_sum(const float* data, float* target, int rows, int columns) {
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {
+        float total = 0.0f;
+        const int start = 0;
+        const int end = columns;
+        for (int column = start; column < end; ++column) {
+            const float item = data[row * columns + column];
+            total = total + item;
+        }
+        target[row] = total;
+    }
+}
+```
+
+Rows execute in parallel; each thread visits its columns sequentially. This
+does not insert a parallel reduction or allocate a Scala collection. Guarded
+comprehensions, `yield`, `to`, `by`, and `while` remain unsupported here; the
+existing explicit DSL already provides staged functional traversals.
 
 ### Automatic Local Names
 

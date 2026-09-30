@@ -46,3 +46,45 @@ object ScalaKernels:
       total += p._5
       p._2(i) = if old < 0.0 then total * 2.0 else total / 2.0
   }
+
+  def rowSum = kernel("quotedRowSum", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("rows"), value[Int]("columns"))) { (data, target, rows, columns) =>
+    val row = blockIdx.x * blockDim.x + threadIdx.x
+    if row < rows then
+      var total = 0.0f
+      for column <- 0 until columns do
+        val item = data(row * columns + column)
+        total += item
+      target(row) = total
+  }
+
+  def rangeBounds = kernel("quotedRangeBounds", params(output[Int]("visits"), output[Int]("last"),
+      value[Int]("count"), value[Int]("from"), value[Int]("until"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var begin = p._4
+      var end = p._5
+      var visits = 0
+      var last = 123
+      for index <- begin until end do
+        val snapshot = index
+        visits += 1
+        last = snapshot
+        begin = 0
+        end = 0
+      p._1(lane) = visits
+      p._2(lane) = last
+  }
+
+  def nestedRanges = kernel("quotedNestedRanges", params(input[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("rounds"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var total = p._1(lane)
+      for index <- 0 until p._4 do
+        val before = total
+        for index <- 0 until index do
+          val previous = total
+          total = previous + before + index
+      p._2(lane) = total
+  }
