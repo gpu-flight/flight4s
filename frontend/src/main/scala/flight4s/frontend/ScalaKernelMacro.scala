@@ -58,6 +58,7 @@ private[frontend] object ScalaKernelMacro:
 
     sealed trait ScopedBinding
     final case class Binding(handle: Term, mutable: Boolean = false) extends ScopedBinding
+    final case class TupleBinding(fields: List[Binding]) extends ScopedBinding
     final case class TraversalBinding(plan: TraversalPlan) extends ScopedBinding
     type Environment = Map[Symbol, ScopedBinding]
     enum TraversalOperation:
@@ -90,6 +91,8 @@ private[frontend] object ScalaKernelMacro:
     val traversalGuardMethods = traversalSymbol.methodMember("withFilter")
     val traversalForeachMethods = traversalSymbol.methodMember("foreach")
     val traversalFoldMethods = traversalSymbol.methodMember("foldLeft")
+    val tupleConstructors = (1 to 22).flatMap(arity =>
+      Symbol.requiredModule(s"scala.Tuple$arity").methodMember("apply")).toSet
     val intrinsicSymbols = List(
       TypeRepr.of[ScalaKernel.threadIdx.type], TypeRepr.of[ScalaKernel.blockIdx.type],
       TypeRepr.of[ScalaKernel.blockDim.type], TypeRepr.of[ScalaKernel.gridDim.type])
@@ -105,6 +108,11 @@ private[frontend] object ScalaKernelMacro:
 
     def binding(term: Term, env: Environment, bindings: Expr[Params])(using Quotes): Option[Binding] = unwrapped(term) match
       case reference: Ident => env.get(reference.symbol).collect { case bound: Binding => bound }
+      case selection @ Select(reference: Ident, name) if name.matches("_[1-9][0-9]*") &&
+          selection.symbol.owner.fullName.startsWith("scala.Tuple") &&
+          env.get(reference.symbol).exists(_.isInstanceOf[TupleBinding]) => env.get(reference.symbol) match
+        case Some(TupleBinding(fields)) => fields.lift(name.drop(1).toInt - 1)
+        case _ => None
       case selection @ Select(qualifier, name) if parameterReference(qualifier) &&
           name.matches("_[1-9][0-9]*") && selection.symbol.owner.fullName.startsWith("scala.Tuple") =>
         val index = name.drop(1).toInt - 1
@@ -112,14 +120,100 @@ private[frontend] object ScalaKernelMacro:
         parameterTypes(index).asType match
           case '[p] => Some(Binding('{ $bindings.productElement(${Expr(index)}).asInstanceOf[p] }.asTerm))
       // Tupled lambdas use the standard library's inlined Tuple.apply(index).
-      case Inlined(Some(call: Term), List(alias: ValDef), _) if alias.rhs.exists(parameterReference) => invocation(call) match
+      case Inlined(Some(call: Term), List(alias: ValDef), _) => invocation(call) match
         case Some((selection, List(List(Literal(IntConstant(index)))))) if
-            selection.symbol.owner.fullName == "scala.Tuple" && selection.name == "apply" &&
-            index >= 0 && index < parameterTypes.size =>
-          parameterTypes(index).asType match
-            case '[p] => Some(Binding('{ $bindings.productElement(${Expr(index)}).asInstanceOf[p] }.asTerm))
+            selection.symbol.owner.fullName == "scala.Tuple" && selection.name == "apply" =>
+          alias.rhs.map(unwrapped) match
+            case Some(reference: Ident) if env.get(reference.symbol).exists(_.isInstanceOf[TupleBinding]) =>
+              env(reference.symbol).asInstanceOf[TupleBinding].fields.lift(index)
+            case Some(rhs) if parameterReference(rhs) && index >= 0 && index < parameterTypes.size =>
+              parameterTypes(index).asType match
+                case '[p] => Some(Binding('{ $bindings.productElement(${Expr(index)}).asInstanceOf[p] }.asTerm))
+            case _ => None
         case _ => None
       case _ => None
+
+    def readBinding[T: Type](bound: Binding, location: Expr[SourceSpan])(using Quotes): Expr[DeviceExpr[T]] =
+      bound.handle.tpe.widen.asType match
+        case '[LocalVariable[t]] =>
+          val handle = bound.handle.asExprOf[LocalVariable[T]]
+          '{ Load($handle, $location) }
+        case '[ScalarParam[t]] => bound.handle.asExprOf[DeviceExpr[T]]
+        case '[DeviceExpr[t]] => bound.handle.asExprOf[DeviceExpr[T]]
+        case _ => report.errorAndAbort("a device buffer is not a scalar value", body)
+
+    def elementTypes(tpe: TypeRepr, source: Term): List[TypeRepr] =
+      if primitive(tpe) then List(tpe)
+      else if tpe <:< TypeRepr.of[Tuple] then
+        val fields = tupleElements(tpe)
+        if fields.nonEmpty && fields.size <= 22 && fields.forall(primitive) then fields
+        else report.errorAndAbort("ScalaKernel traversal callbacks require pure primitive results or flat nonempty primitive tuples of at most 22 fields", source.pos)
+      else report.errorAndAbort("ScalaKernel traversal callbacks require pure primitive results or flat nonempty primitive tuples of at most 22 fields", source.pos)
+
+    def placeholderElement(tpe: TypeRepr, source: Term)(using Quotes): ScopedBinding =
+      val fields = elementTypes(tpe, source).map { field => field.asType match
+        case '[t] => Binding('{ Intrinsic("traversal_callback", ${valueType[t]}, ${span(source.pos)}): DeviceExpr[t] }.asTerm)
+      }
+      if primitive(tpe) then fields.head else TupleBinding(fields)
+
+    def callbackBody(term: Term, env: Environment, bindings: Expr[Params])(using Quotes): (Term, Environment) =
+      unwrapped(term) match
+        case Block(pending, result) if pending.nonEmpty =>
+          // Auto-tupling introduces immutable field projections before a pure callback body.
+          val projections = pending.foldLeft(Option(env)) { (current, statement) =>
+            for
+              scope <- current
+              value <- statement match
+                case value: ValDef if !value.symbol.flags.is(Flags.Mutable) && !value.symbol.flags.is(Flags.Lazy) => Some(value)
+                case _ => None
+              rhs <- value.rhs
+              bound <- binding(rhs, scope, bindings)
+              if primitive(value.tpt.tpe.widen.dealias)
+              if scope.values.exists {
+                case TupleBinding(fields) => fields.contains(bound)
+                case _ => false
+              }
+            yield scope.updated(value.symbol, bound)
+          }
+          projections.map(result -> _).getOrElse(term -> env)
+        case _ => term -> env
+
+    def elementValues(term: Term, tpe: TypeRepr, env: Environment, bindings: Expr[Params])(
+        using Quotes): List[(TypeRepr, Term)] =
+      val source = unwrapped(term)
+      val types = elementTypes(tpe, source)
+      val (translated, current) = callbackBody(source, env, bindings)
+      if primitive(tpe) then tpe.asType match
+        case '[t] => List(tpe -> expression[t](translated, current, bindings).asTerm)
+      else
+        val existing = unwrapped(translated) match
+          case reference: Ident => current.get(reference.symbol).collect { case tuple: TupleBinding => tuple }
+          case _ => None
+        existing match
+          case Some(tuple) => types.zip(tuple.fields).map { (field, bound) => field.asType match
+            case '[t] => field -> readBinding[t](bound, span(source.pos)).asTerm
+          }
+          case None => invocation(translated) match
+            case Some((selection, List(arguments))) if tupleConstructors.contains(selection.symbol) && arguments.size == types.size =>
+              types.zip(arguments).map { (field, argument) => field.asType match
+                case '[t] => field -> expression[t](argument, current, bindings).asTerm
+              }
+            case _ => report.errorAndAbort("ScalaKernel tuple maps require a direct standard tuple constructor or a traversal tuple binding", source.pos)
+
+    def snapshotElement(term: Term, tpe: TypeRepr, env: Environment, bindings: Expr[Params],
+        builder: Expr[CudaDsl.BlockBuilder])(consume: Quotes ?=> ScopedBinding => Expr[Unit])(
+        using Quotes): Expr[Unit] =
+      def next(pending: List[(TypeRepr, Term)], fields: List[Binding])(using Quotes): Expr[Unit] = pending match
+        case Nil => consume(if primitive(tpe) then fields.head else TupleBinding(fields))
+        case (field, value) :: tail => field.asType match
+          case '[t] =>
+            val initial = value.asExprOf[DeviceExpr[t]]
+            '{
+              val handle = CudaDsl.local($initial)(using ${valueType[t]}, $builder, ${position(term)})
+              ${next(tail, fields :+ Binding('handle.asTerm))}
+            }
+      // Snapshot fields left to right before guards or terminal stores can observe them.
+      next(elementValues(term, tpe, env, bindings), Nil)
 
     def expression[T: Type](term: Term, env: Environment, bindings: Expr[Params])(using Quotes): Expr[DeviceExpr[T]] =
       val source = unwrapped(term)
@@ -129,13 +223,7 @@ private[frontend] object ScalaKernelMacro:
       val location = span(source.pos)
       val cudaType = valueType[T]
       binding(source, env, bindings) match
-        case Some(bound) => bound.handle.tpe.widen.asType match
-          case '[LocalVariable[t]] =>
-            val handle = bound.handle.asExprOf[LocalVariable[T]]
-            '{ Load($handle, $location) }
-          case '[ScalarParam[t]] => bound.handle.asExprOf[DeviceExpr[T]]
-          case '[DeviceExpr[t]] => bound.handle.asExprOf[DeviceExpr[T]]
-          case _ => report.errorAndAbort("a device buffer is not a scalar value", source.pos)
+        case Some(bound) => readBinding[T](bound, location)
         case None => source match
           case _: Block => report.errorAndAbort(
             "ScalaKernel expression blocks are not supported yet; branches must remain pure", source.pos)
@@ -257,21 +345,17 @@ private[frontend] object ScalaKernelMacro:
               val resultType = if guard then TypeRepr.of[Boolean] else source.tpe.widen.baseType(traversalSymbol) match
                 case AppliedType(_, List(element)) => element.widen.dealias
                 case _ => report.errorAndAbort("ScalaKernel requires a concrete traversal element type", source.pos)
-              if !primitive(resultType) then
-                report.errorAndAbort("ScalaKernel traversal callbacks require pure primitive results", body.pos)
+              elementTypes(resultType, body)
               // Validate even an unused plan, without staging or executing its device mapping.
-              plan.elementType.asType match
-                case '[t] => resultType.asType match
-                  case '[u] =>
-                    val placeholder = '{ Intrinsic("traversal_callback", ${valueType[t]}, ${span(callback.pos)}): DeviceExpr[t] }
-                    val current = env.updated(input, Binding(placeholder.asTerm))
-                    if flatten then
-                      traversal(body, current, bindings, builder) { inner =>
-                        if !(inner.elementType =:= resultType) then
-                          report.errorAndAbort("ScalaKernel flatMap requires a matching primitive traversal result", body.pos)
-                        '{ () }
-                      }
-                    else expression[u](body, current, bindings)
+              val current = env.updated(input, placeholderElement(plan.elementType, callback))
+              if flatten then
+                val (factory, factoryEnv) = callbackBody(body, current, bindings)
+                traversal(factory, factoryEnv, bindings, builder) { inner =>
+                  if !(inner.elementType =:= resultType) then
+                    report.errorAndAbort("ScalaKernel flatMap requires a matching traversal result", body.pos)
+                  '{ () }
+                }
+              else elementValues(body, resultType, current, bindings)
               val operation = if guard then TraversalOperation.Guard
                 else if flatten then TraversalOperation.Flattening else TraversalOperation.Mapping
               consume(plan.copy(stages = plan.stages :+ TraversalStage(input, body, env, resultType, operation),
@@ -279,39 +363,36 @@ private[frontend] object ScalaKernelMacro:
             }
           case _ => report.errorAndAbort("ScalaKernel traversal plans must originate from deviceRange; host collections and captures are not supported", source.pos)
 
-    def traversalElement(stages: List[TraversalStage], element: Term, bindings: Expr[Params],
-        builder: Expr[CudaDsl.BlockBuilder])(consume: Quotes ?=> (Term, Expr[CudaDsl.BlockBuilder]) => Expr[Unit])(
+    def traversalElement(stages: List[TraversalStage], element: ScopedBinding, bindings: Expr[Params],
+        builder: Expr[CudaDsl.BlockBuilder])(consume: Quotes ?=> (ScopedBinding, Expr[CudaDsl.BlockBuilder]) => Expr[Unit])(
         using Quotes): Expr[Unit] = stages match
       case Nil => consume(element, builder)
       case stage :: tail =>
-        val current = stage.environment.updated(stage.input, Binding(element))
+        val current = stage.environment.updated(stage.input, element)
         if stage.operation == TraversalOperation.Guard then
-          val condition = expression[Boolean](stage.body, current, bindings)
+          val (predicate, predicateEnv) = callbackBody(stage.body, current, bindings)
+          val condition = expression[Boolean](predicate, predicateEnv, bindings)
           val guarded: Expr[CudaDsl.BlockBuilder ?=> Unit] = '{ (nested: CudaDsl.BlockBuilder) ?=>
             ${traversalElement(tail, element, bindings, 'nested)(consume)} }
           '{ CudaDsl.when($condition)($guarded)(using $builder, ${position(stage.body)}) }
         else if stage.operation == TraversalOperation.Flattening then
           // Construct the inner plan after outer guards, once per accepted outer item.
-          traversal(stage.body, current, bindings, builder) { inner =>
+          val (factory, factoryEnv) = callbackBody(stage.body, current, bindings)
+          traversal(factory, factoryEnv, bindings, builder) { inner =>
             traverse(inner, bindings, builder, stage.body) { (item, active) =>
               traversalElement(tail, item, bindings, active)(consume)
             }
           }
-        else stage.resultType.asType match
-          case '[t] =>
-            val mapped = expression[t](stage.body, current, bindings)
-            // A map result is evaluated once per visited item, even if its consumer repeats it.
-            '{
-              val handle = CudaDsl.local($mapped)(using ${valueType[t]}, $builder, ${position(stage.body)})
-              ${traversalElement(tail, '{ Load(handle, ${span(stage.body.pos)}) }.asTerm, bindings, builder)(consume)}
-            }
+        else snapshotElement(stage.body, stage.resultType, current, bindings, builder) { mapped =>
+          traversalElement(tail, mapped, bindings, builder)(consume)
+        }
 
     def traverse(plan: TraversalPlan, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder], source: Term)(
-        consume: Quotes ?=> (Term, Expr[CudaDsl.BlockBuilder]) => Expr[Unit])(using Quotes): Expr[Unit] =
+        consume: Quotes ?=> (ScopedBinding, Expr[CudaDsl.BlockBuilder]) => Expr[Unit])(using Quotes): Expr[Unit] =
       '{
         CudaDsl.gpuFor(${plan.from}, ${plan.until}) {
           (index: DeviceExpr[Int]) => (nested: CudaDsl.BlockBuilder) ?=>
-            ${traversalElement(plan.stages, 'index.asTerm, bindings, 'nested)(consume)}
+            ${traversalElement(plan.stages, Binding('index.asTerm), bindings, 'nested)(consume)}
         }(using $builder, ${position(source)})
       }
 
@@ -332,8 +413,9 @@ private[frontend] object ScalaKernelMacro:
             '{
               val accumulator = CudaDsl.local($seed)(using ${valueType[T]}, $builder, ${position(initial)})
               ${traverse(plan, bindings, builder, source) { (element, active) =>
-                val current = env.updated(state, Binding('accumulator.asTerm)).updated(input, Binding(element))
-                val updated = expression[T](step, current, bindings)
+                val current = env.updated(state, Binding('accumulator.asTerm)).updated(input, element)
+                val (stepBody, stepEnv) = callbackBody(step, current, bindings)
+                val updated = expression[T](stepBody, stepEnv, bindings)
                 '{ CudaDsl.:=[T, Local](accumulator)($updated)(using $active, ${position(step)}) }
               }}
               ${consume('{ Load(accumulator, ${span(source.pos)}) })}
@@ -378,7 +460,7 @@ private[frontend] object ScalaKernelMacro:
                 case Lambda(List(input), loopBody) if input.tpt.tpe.widen.dealias =:= plan.elementType => (input.symbol, loopBody)
                 case _ => report.errorAndAbort("ScalaKernel traversals require a literal matching primitive callback lambda", callback.pos)
               traverse(plan, bindings, builder, source) { (element, active) =>
-                statements(loopBody, env.updated(input, Binding(element)), bindings, active)
+                statements(loopBody, env.updated(input, element), bindings, active)
               }
             }
           case Some((selection, List(List(callback)))) if
@@ -441,13 +523,18 @@ private[frontend] object ScalaKernelMacro:
             report.errorAndAbort("ScalaKernel locals must be initialized and cannot be lazy", value.pos)
           val rhs = value.rhs.get
           val mutable = value.symbol.flags.is(Flags.Mutable)
+          val tupleAlias = unwrapped(rhs) match
+            case reference: Ident => current.get(reference.symbol).collect { case tuple: TupleBinding => tuple }
+            case _ => None
           val isBuffer = value.tpt.tpe.widen.baseType(arraySymbol) match
             case AppliedType(_, _) => true
             case _ => false
           val isTraversal = value.tpt.tpe.widen.baseType(traversalSymbol) match
             case AppliedType(_, _) => true
             case _ => false
-          if isTraversal then
+          if tupleAlias.isDefined && !mutable then
+            next(tail, result, current.updated(value.symbol, tupleAlias.get))
+          else if isTraversal then
             if mutable then report.errorAndAbort("ScalaKernel traversal plans must be immutable", value.pos)
             traversal(rhs, current, bindings, builder) { plan =>
               next(tail, result, current.updated(value.symbol, TraversalBinding(plan)))
