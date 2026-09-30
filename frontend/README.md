@@ -1,4 +1,72 @@
-# Kernel Annotation Prototype
+# Scala Kernel Frontend Prototypes
+
+## Quoted Scala Syntax Prototype
+
+`ScalaKernel.kernel` is a separate inline quoted entry point, not another
+rewrite of the annotation. Import its namespace instead of the explicit DSL's
+wildcard in the source file using this frontend:
+
+```scala
+import scala.annotation.experimental
+import flight4s.frontend.ScalaKernel.*
+
+@experimental
+def scale = kernel("scale", params(input[Float]("data"), output[Float]("target"),
+    value[Int]("count"), value[Float]("factor"))) { (data, target, count, factor) =>
+  val i = blockIdx.x * blockDim.x + threadIdx.x
+  if i < count then
+    val old = data(i)
+    var total = old
+    total += factor
+    target(i) = if old < 0.0f then total else old
+}
+```
+
+The factory returns `Kernel[(DeviceBuffer[Float], DeviceBuffer[Float], Int, Float)]`.
+Separately compiled callers retain this exact launch type and opt in when using
+an experimental factory. Imports do not require global experimental flags;
+the kernel entry point is annotated, not its namespace. Do not add `@kernel`
+to these factories: the existing annotation has a different contract below.
+
+`threadIdx`/`blockIdx`/`blockDim`/`gridDim` expose all three axes as `Int`.
+Mapped scalar parameters expose their primitive types; buffer parameters expose
+typed `DeviceArray[T, Mode]` markers whose reads return `T`. These markers are
+source syntax only, never JVM reads of GPU values or host arrays. Calling a
+marker outside the captured body throws. The macro generates existing IR
+construction code and does not retain or execute the source lambda.
+
+Supported: literal lambdas with named tuple parameters or `p._N`, explicit
+typed signatures (including empty), `Int`/`Float`/`Double`/`Boolean` literals and
+parameters, arithmetic `+ - * /`, Int `% & | ^`, numeric comparisons,
+primitive `== !=`, unary `+`, Int unary `-`, Boolean `! && ||`, primitive
+`val` snapshots, initialized `var`, assignment/compound assignment, immutable
+buffer aliases, statement scopes, statement `if`/`else`, and pure expression
+`if`/`else`. Short-circuit booleans lower to lazy `Conditional` IR. An input's
+`update` requires read-write evidence, and lowering independently requires an
+output parameter. Existing validation and CUDA generation remain authoritative.
+
+Deferred/rejected: loops, `match`/`try`/return, lazy/uninitialized bindings,
+local definitions, expression blocks, tuple/product local state, source-level
+functional traversals and collectives, captured host state/values/helper calls,
+numeric conversions, shifts, floating remainder, dynamic floating unary minus,
+vector/low-precision source types, signature inference, and Unit-style annotated
+methods. Dynamic floating negation is not approximated by `0 - x`, which would
+mishandle signed zero. Negative floating literals remain supported. This is a
+documented compiler subset, not a sandbox. Host kernel names and signatures
+evaluate once in normal call order; that configuration is outside the body.
+
+`ScalaKernelCompilerSuite` contains 14 actual compiler-program tests,
+including separate callers, negative admission, all intrinsic axes, supported
+operators, scopes and configuration evaluation order. `ScalaKernelIrSuite`
+contains three tests: independent explicit-DSL branch/short-circuit references
+compare exact IR/effects/generated artifacts after aligning only source spans;
+all four fixtures validate and retain source maps and deterministic CUDA.
+`ScalaKernelCudaJniSuite` has four real GPU fixtures for Float scaling, mutable
+Int snapshots/shadowing, tightly sized short-circuit inputs, and Double/Boolean
+branches. They cover counts 0/1/63/64/65/193/257, 32 output tails, both stream
+paths, disabled execution, unchanged read-only inputs, and in-place updates.
+
+## Kernel Annotation Prototype
 
 This optional Scala 3.8.1 module implements `flight4s.frontend.kernel` using
 Scala's experimental `MacroAnnotation` API. It annotates an existing typed
@@ -149,8 +217,9 @@ The method's signature and kernel name are normal host-side DSL construction.
 
 The annotation runs after Scala type checking. It cannot make ordinary
 `if (Expr[Boolean])` type-check. A Unit-returning CUDA-looking method with typed
-parameters, automatic signature inference,
-and ordinary device control flow remain future frontend work.
+parameters and automatic signature inference remain future frontend work.
+Ordinary device control flow is implemented in the
+separate quoted subset above, not by changing this annotation's Expr types.
 
 ## Verification
 
@@ -186,6 +255,8 @@ test project. The published frontend depends on the stable core.
 ## References
 
 - [Scala experimental definitions](https://docs.scala-lang.org/scala3/reference/other-new-features/experimental-defs.html)
+- [Scala quoted code](https://docs.scala-lang.org/scala3/guides/macros/quotes.html)
+- [Scala macro reflection](https://docs.scala-lang.org/scala3/guides/macros/reflection.html)
 - [Scala 3 quoted reflection](https://docs.scala-lang.org/scala3/reference/metaprogramming/reflection.html)
 - [Pinned Scala 3.8.1 annotation API](https://www.scala-lang.org/api/3.8.1/scala/annotation.html)
 

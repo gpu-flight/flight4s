@@ -16,6 +16,39 @@ path alongside the Scala DSL.
 
 ## Scala-style CUDA
 
+### Ordinary Scala Syntax Prototype
+
+The optional frontend also provides a separate quoted kernel builder. With
+`ScalaKernel` imported, a bounded subset uses ordinary Scala values and control
+flow, without `device.`, `literal`, `.read`, or `:=` inside the body:
+
+```scala
+import scala.annotation.experimental
+import flight4s.frontend.ScalaKernel.*
+
+@experimental
+def scale = kernel("scale", params(input[Float]("data"), output[Float]("target"),
+    value[Int]("count"), value[Float]("factor"))) { (data, target, count, factor) =>
+  val i = blockIdx.x * blockDim.x + threadIdx.x
+  if i < count then
+    val original = data(i)
+    var total = original
+    total *= factor
+    target(i) = total
+}
+```
+
+The inline macro translates the body; it never runs that body on the JVM.
+Source-visible `Int`/`Float`/`Double`/`Boolean` markers represent GPU operations,
+not copied device data. Vals snapshot, vars update device locals, and `if`/`else`
+and short-circuit booleans retain device execution semantics. Typed launch
+arguments, validation, optimizers, inspectable CUDA C++, and NVRTC/PTX are reused.
+Explicit signatures remain required. This is an opt-in subset, not arbitrary
+Scala compilation: loops, functional traversal, signature inference, host
+captures/calls, numeric conversions, vectors, and low-precision source types
+are deferred in this frontend. The existing DSL and annotation remain available.
+See the [frontend contract](frontend/README.md#quoted-scala-syntax-prototype).
+
 ### Automatic Local Names
 
 Kernel-local bindings no longer need a CUDA variable name. Scala identifiers
