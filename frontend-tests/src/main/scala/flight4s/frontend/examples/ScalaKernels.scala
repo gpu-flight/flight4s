@@ -88,3 +88,45 @@ object ScalaKernels:
           total = previous + before + index
       p._2(lane) = total
   }
+
+  def guardedRows = kernel("quotedGuardedRows", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("rows"), value[Int]("columns"), value[Float]("threshold"))) { p =>
+    val row = blockIdx.x * blockDim.x + threadIdx.x
+    if row < p._3 then
+      var total = 0.0f
+      for column <- -1 until p._4 + 1 if column >= 0 if column < p._4 if p._1(row * p._4 + column) > p._5 do
+        val item = p._1(row * p._4 + column)
+        total += item
+      p._2(row) = total
+  }
+
+  def guardedState = kernel("quotedGuardedState", params(input[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("from"), value[Int]("until"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var total = p._1(lane)
+      var begin = p._4
+      var end = p._5
+      (begin until end).withFilter(first => first >= total).withFilter(second => second % 2 == 0)
+        .foreach { third =>
+          val before = total
+          total = before + third + 1
+          begin = 0
+          end = 0
+        }
+      p._2(lane) = total
+  }
+
+  def nestedGuards = kernel("quotedNestedGuards", params(input[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("rounds"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var total = p._1(lane)
+      for outer <- 0 until p._4 if outer % 2 == 0; inner <- -1 until outer + 1 if inner >= 0 if inner < outer do
+        val before = total
+        total = before + outer + inner
+      for index <- 0 until p._4 if index > 0 do
+        for index <- 0 until index if index % 2 == 0 do
+          total += index
+      p._2(lane) = total
+  }

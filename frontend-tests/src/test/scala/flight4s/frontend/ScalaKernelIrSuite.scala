@@ -203,10 +203,109 @@ class ScalaKernelIrSuite extends FunSuite:
     assert(names.isEmpty)
     assertReference(actual, reference)
 
+  test("quoted range guards exactly match lazy nested branches without speculative loads"):
+    val actual = ScalaKernels.guardedRows
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"),
+        value[Int]("rows"), value[Int]("columns"), value[Float]("threshold"))) { p =>
+      val row = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(row < p._3) {
+        val total = declare(literal(0.0f))
+        val start = declare(literal(-1)).read
+        val end = declare(p._4 + literal(1)).read
+        gpuFor(names.dequeue(), start, end) { column =>
+          when(column >= literal(0)) {
+            when(column < p._4) {
+              when(p._1(row * p._4 + column).read > p._5) {
+                val item = declare(p._1(row * p._4 + column).read).read
+                total := total.read + item
+              }
+            }
+          }
+        }
+        p._2(row) := total.read
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
+  test("quoted withFilter guards read live state while loop bounds remain captured"):
+    val actual = ScalaKernels.guardedState
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), output[Int]("target"),
+        value[Int]("count"), value[Int]("from"), value[Int]("until"))) { p =>
+      val lane = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(lane < p._3) {
+        val total = declare(p._1(lane).read)
+        val begin = declare(p._4)
+        val end = declare(p._5)
+        val capturedBegin = declare(begin.read).read
+        val capturedEnd = declare(end.read).read
+        gpuFor(names.dequeue(), capturedBegin, capturedEnd) { index =>
+          when(index >= total.read) {
+            when(index % literal(2) === literal(0)) {
+              val before = declare(total.read).read
+              total := before + index + literal(1)
+              begin := literal(0)
+              end := literal(0)
+            }
+          }
+        }
+        p._2(lane) := total.read
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
+  test("quoted guarded nested generators and index shadows exactly match lexical loop structure"):
+    val actual = ScalaKernels.nestedGuards
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), output[Int]("target"),
+        value[Int]("count"), value[Int]("rounds"))) { p =>
+      val lane = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(lane < p._3) {
+        val total = declare(p._1(lane).read)
+        val start = declare(literal(0)).read
+        val end = declare(p._4).read
+        gpuFor(names.dequeue(), start, end) { outer =>
+          when(outer % literal(2) === literal(0)) {
+            val innerStart = declare(literal(-1)).read
+            val innerEnd = declare(outer + literal(1)).read
+            gpuFor(names.dequeue(), innerStart, innerEnd) { inner =>
+              when(inner >= literal(0)) {
+                when(inner < outer) {
+                  val before = declare(total.read).read
+                  total := before + outer + inner
+                }
+              }
+            }
+          }
+        }
+        val secondStart = declare(literal(0)).read
+        val secondEnd = declare(p._4).read
+        gpuFor(names.dequeue(), secondStart, secondEnd) { outer =>
+          when(outer > literal(0)) {
+            val innerStart = declare(literal(0)).read
+            val innerEnd = declare(outer).read
+            gpuFor(names.dequeue(), innerStart, innerEnd) { inner =>
+              when(inner % literal(2) === literal(0)) { total := total.read + inner }
+            }
+          }
+        }
+        p._2(lane) := total.read
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
   test("all fixtures preserve source maps scope unique names validation and deterministic CUDA"):
     val factories: Vector[() => Kernel[?]] = Vector(() => ScalaKernels.scale, () => ScalaKernels.branches,
       () => ScalaKernels.shortCircuit, () => ScalaKernels.doubles, () => ScalaKernels.rowSum,
-      () => ScalaKernels.rangeBounds, () => ScalaKernels.nestedRanges)
+      () => ScalaKernels.rangeBounds, () => ScalaKernels.nestedRanges, () => ScalaKernels.guardedRows,
+      () => ScalaKernels.guardedState, () => ScalaKernels.nestedGuards)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)
