@@ -375,6 +375,96 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("ordered Float folds preserve cancellation order seeds and lazy guarded tight reads"):
+    val definition = ScalaKernels.foldRows
+    val pattern = Vector(1.0e20f, 1.0f, -1.0e20f, 3.0f, -2.0f, 0.25f, -0.5f)
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for rows <- counts; columns <- Vector(0, 1, 3, 17, 65) do
+          val initial = Array.tabulate(math.max(1, rows * columns))(i => pattern(i % pattern.size))
+          val data = context.allocate[Float](initial.length).toOption.get
+          val target = context.allocate[Float](rows + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for threshold <- Vector(-2.0e20f, 0.0f, 2.0e20f); seed <- Vector(0.0f, 7.0f); explicit <- Vector(false, true) do
+              val expected = Vector.tabulate(rows)(row =>
+                (0 until columns).foldLeft(seed) { (sum, column) =>
+                  val item = initial(row * columns + column)
+                  if item > threshold then sum - item * 2.0f else sum
+                })
+              assertEquals(target.copyFrom(Array.fill(rows + 32)(-999f)), Right(()))
+              launch(context, function, definition.bind((data, target, rows, columns, threshold, seed)), config(rows), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("ordered reused Int folds retain fixed bounds fresh seeds live data and independent results"):
+    val definition = ScalaKernels.foldReuse
+    val bounds = Vector((0, 0), (2, 2), (4, 1), (-3, 2), (-3, 7), (0, 8), (2, 7))
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(count + 32)(i => i % 7 - 3)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val target = context.allocate[Int](initial.length).toOption.get
+          try
+            for (from, until) <- bounds; explicit <- Vector(false, true) do
+              val expected = initial.take(count).map { original =>
+                val first = (from until until).filter(_ % 2 == 0)
+                  .foldLeft(original)((sum, index) => sum - (original + index + 1) - (original + index + 1))
+                val second = (from until until).filter(_ % 2 == 0).foldLeft(first + 1) { (sum, index) =>
+                  val item = first + index + 3
+                  if item > sum then item else sum - item
+                }
+                (first, second + first)
+              }.toVector
+              assertEquals(data.copyFrom(initial), Right(()))
+              assertEquals(target.copyFrom(Array.fill(initial.length)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, count, from, until)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected.map(_._2) ++ Vector.fill(32)(-999))
+              assertEquals(data.copyToArray().toOption.get.toVector, expected.map(_._1) ++ initial.drop(count).toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("ordered nested Boolean and Double folds refresh each iteration and preserve shadows"):
+    val definition = ScalaKernels.foldNested
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 17 - 8).toDouble * 0.25)
+          val data = context.allocate[Double](initial.length).toOption.get
+          val target = context.allocate[Double](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for rounds <- Vector(0, 1, 2, 4, 7); enabled <- Vector(false, true); explicit <- Vector(false, true) do
+              val expected = initial.take(count).map { item =>
+                var total = item
+                for outer <- 0 until rounds do
+                  val values = (0 until outer).map(_ + 1)
+                  val accepted = values.foldLeft(enabled)((found, item) => found || item % 2 == 0)
+                  total = values.foldLeft(total)((state, item) => if accepted then state / 2.0 else state - 1.0) + 0.25
+                total
+              }.toVector
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999.0)), Right(()))
+              launch(context, function, definition.bind((data, target, count, rounds, enabled)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999.0))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))

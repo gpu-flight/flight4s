@@ -25,6 +25,7 @@ object ScalaKernel:
     def map[U](transform: T => U): DeviceTraversal[U] = markerOnly()
     def withFilter(predicate: T => Boolean): DeviceTraversal[T] = markerOnly()
     def foreach(body: T => Unit): Unit = markerOnly()
+    def foldLeft[A](initial: A)(step: (A, T) => A): A = markerOnly()
 
   /** Captures half-open unit-stride bounds at this device statement. */
   def deviceRange(from: Int, until: Int): DeviceTraversal[Int] = markerOnly()

@@ -392,12 +392,119 @@ class ScalaKernelIrSuite extends FunSuite:
     assert(names.isEmpty)
     assertReference(actual, reference)
 
+  test("ordered guarded Float folds exactly match seed snapshots and serial updates"):
+    val actual = ScalaKernels.foldRows
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"),
+        value[Int]("rows"), value[Int]("columns"), value[Float]("threshold"), value[Float]("seed"))) { p =>
+      val row = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(row < p._3) {
+        val start = declare(literal(-1)).read
+        val end = declare(p._4 + literal(1)).read
+        val accumulator = declare(p._6)
+        gpuFor(names.dequeue(), start, end) { column =>
+          when(column >= literal(0)) {
+            when(column < p._4) {
+              val item = declare(p._1(row * p._4 + column).read).read
+              when(item > p._5) {
+                val doubled = declare(item * literal(2.0f)).read
+                accumulator := accumulator.read - doubled
+              }
+            }
+          }
+        }
+        val total = declare(accumulator.read).read
+        p._2(row) := total
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
+  test("reused ordered folds independently capture seeds live maps and saved earlier results"):
+    val actual = ScalaKernels.foldReuse
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(inOut[Int]("data"), output[Int]("target"),
+        value[Int]("count"), value[Int]("from"), value[Int]("until"))) { p =>
+      val lane = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(lane < p._3) {
+        val begin = declare(p._4)
+        val end = declare(p._5)
+        val bias = declare(literal(0))
+        val capturedStart = declare(begin.read).read
+        val capturedEnd = declare(end.read).read
+        begin := literal(0)
+        end := literal(0)
+        bias := literal(1)
+        val firstState = declare(p._1(lane).read)
+        gpuFor(names.dequeue(), capturedStart, capturedEnd) { index =>
+          when(index % literal(2) === literal(0)) {
+            val item = declare(p._1(lane).read + index + bias.read).read
+            firstState := firstState.read - item - item
+          }
+        }
+        val first = declare(firstState.read).read
+        p._1(lane) := first
+        bias := literal(3)
+        val secondState = declare(first + literal(1))
+        gpuFor(names.dequeue(), capturedStart, capturedEnd) { index =>
+          when(index % literal(2) === literal(0)) {
+            val item = declare(p._1(lane).read + index + bias.read).read
+            secondState := choose(item > secondState.read)(item)(secondState.read - item)
+          }
+        }
+        val second = declare(secondState.read)
+        second := second.read + first
+        p._2(lane) := second.read
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
+  test("nested Boolean and Double folds preserve independent primitive states lexical shadows and refresh"):
+    val actual = ScalaKernels.foldNested
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(input[Double]("data"), output[Double]("target"),
+        value[Int]("count"), value[Int]("rounds"), value[Boolean]("enabled"))) { p =>
+      val lane = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(lane < p._3) {
+        val total = declare(p._1(lane).read)
+        val start = declare(literal(0)).read
+        val end = declare(p._4).read
+        gpuFor(names.dequeue(), start, end) { outer =>
+          val before = declare(total.read).read
+          val innerStart = declare(literal(0)).read
+          val innerEnd = declare(outer).read
+          val acceptedState = declare(p._5)
+          gpuFor(names.dequeue(), innerStart, innerEnd) { index =>
+            val item = declare(index + literal(1)).read
+            acceptedState := acceptedState.read || (item % literal(2) === literal(0))
+          }
+          val accepted = declare(acceptedState.read).read
+          val nextState = declare(before)
+          gpuFor(names.dequeue(), innerStart, innerEnd) { index =>
+            val item = declare(index + literal(1)).read
+            nextState := choose(accepted)(nextState.read / literal(2.0))(nextState.read - literal(1.0))
+          }
+          val next = declare(nextState.read)
+          next := next.read + literal(0.25)
+          total := next.read
+        }
+        p._2(lane) := total.read
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
   test("all fixtures preserve source maps scope unique names validation and deterministic CUDA"):
     val factories: Vector[() => Kernel[?]] = Vector(() => ScalaKernels.scale, () => ScalaKernels.branches,
       () => ScalaKernels.shortCircuit, () => ScalaKernels.doubles, () => ScalaKernels.rowSum,
       () => ScalaKernels.rangeBounds, () => ScalaKernels.nestedRanges, () => ScalaKernels.guardedRows,
       () => ScalaKernels.guardedState, () => ScalaKernels.nestedGuards, () => ScalaKernels.yieldRows,
-      () => ScalaKernels.yieldReuse, () => ScalaKernels.yieldNested)
+      () => ScalaKernels.yieldReuse, () => ScalaKernels.yieldNested, () => ScalaKernels.foldRows,
+      () => ScalaKernels.foldReuse, () => ScalaKernels.foldNested)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)
