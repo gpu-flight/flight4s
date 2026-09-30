@@ -2,6 +2,7 @@ package flight4s.frontend
 
 import munit.FunSuite
 import flight4s.core.ir.*
+import flight4s.core.types.{CudaType, F32, Bool, F64, I32}
 
 class ScalaKernelCompilerSuite extends FunSuite:
   private def factory(body: String, setup: String = "", parameters: String =
@@ -93,6 +94,34 @@ class ScalaKernelCompilerSuite extends FunSuite:
       }
     }
 
+  test("staged scalar yield plans compose and reuse without executing device markers"):
+    CompilerHarness.withDirectory { directory =>
+      val result = CompilerHarness.compile(directory, "YieldPlans", factory("""
+        var total = 0
+        val values = for i <- deviceRange(0, p._3) if i % 2 == 0 yield p._1(i)
+        val alias = values
+        alias.map(x => x + 1).withFilter(x => x > 0).foreach { x => total += x }
+        for x <- values do total += x
+        p._2(0) = total
+      """))
+      assertEquals(result.errors, Vector.empty)
+      CompilerHarness.withClasses(Seq(result.classes)) { loader =>
+        val definition = loader.loadClass("quotedfixture.Definitions")
+        val staged = definition.getMethod("definition").invoke(definition.getConstructor().newInstance()).asInstanceOf[Kernel[Tuple]]
+        assert(KernelValidator.validate(staged).isValid)
+        assertEquals(staged.body.statements.count(_.isInstanceOf[ForLoop]), 2)
+      }
+      val caller = CompilerHarness.compile(directory, "YieldCaller", """
+        package quotedfixture
+        import scala.annotation.experimental
+        import flight4s.core.ir.{DeviceBuffer, Kernel}
+        class Caller:
+          @experimental
+          def definition: Kernel[(DeviceBuffer[Int], DeviceBuffer[Int], Int)] = new Definitions().definition
+      """, dependencies = Seq(result.classes))
+      assertEquals(caller.errors, Vector.empty)
+    }
+
   test("named tuple parameters primitive locals aliases assignments and nested branches compile"):
     CompilerHarness.withDirectory { directory =>
       val result = CompilerHarness.compile(directory, "Named", """
@@ -126,6 +155,45 @@ class ScalaKernelCompilerSuite extends FunSuite:
         assert(KernelValidator.validate(staged).isValid)
       }
     }
+
+  test("staged maps support primitive type changes and validate unused pure plans"):
+    CompilerHarness.withDirectory { directory =>
+      val result = CompilerHarness.compile(directory, "TraversalTypes", factory("""
+        val floats = deviceRange(0, p._3).map(i => if i > 0 then 2.0f else 1.0f)
+        val flags = floats.map(x => x > 1.0f)
+        val doubles = flags.map(x => if x then 2.0 else 1.0)
+        val ints = doubles.map(x => if x > 1.0 then 7 else 3)
+        val unused = ints.map(x => x + 1)
+        ints.foreach(x => p._2(0) = x)
+      """))
+      assertEquals(result.errors, Vector.empty)
+      CompilerHarness.withClasses(Seq(result.classes)) { loader =>
+        val definition = loader.loadClass("quotedfixture.Definitions")
+        val staged = definition.getMethod("definition").invoke(definition.getConstructor().newInstance()).asInstanceOf[Kernel[Tuple]]
+        assert(KernelValidator.validate(staged).isValid)
+        val loop = staged.body.statements.collectFirst { case loop: ForLoop => loop }.get
+        assertEquals(loop.body.statements.collect { case d: LocalDeclaration[?] => d.local.valueType },
+          Vector[CudaType[?]](F32, Bool, F64, I32))
+      }
+    }
+
+  test("staged plans reject mutation captures impure callbacks and materialized collections"):
+    rejected(factory("var values = deviceRange(0, p._3); values.foreach(x => p._2(x) = x)"), "must be immutable")
+    rejected(factory("val values = deviceRange(0, p._3).map(x => host)", "val host = 7"), "captures")
+    rejected(factory("val values = deviceRange(0, p._3).map(x => host(x))", "def host(x: Int): Int = x"), "captures")
+    rejected(factory("val values = deviceRange(host, p._3)", "val host = 1"), "captures")
+    rejected(factory("val values = deviceRange(0, p._3).map(x => { println(x); x })"), "expression blocks")
+    rejected(factory("var total = 0; val values = deviceRange(0, p._3).withFilter(x => { total += 1; true })"), "expression blocks")
+    rejected(factory("val values = deviceRange(0, p._3).map(x => (x, x))"), "pure primitive results")
+    rejected(factory("val values = deviceRange(0, p._3).map(callback)", "val callback: Int => Int = x => x"), "literal matching primitive callback")
+    rejected(factory("deviceRange(0, p._3).foreach(callback)", "val callback: Int => Unit = _ => ()"), "literal matching primitive callback")
+    rejected(factory("val values = captured", "val captured = deviceRange(0, 3)"), "captures")
+    rejected(factory("val values = for i <- 0 until p._3 yield i"), "primitive locals")
+    rejected(factory("(0 until p._3).map(i => i + 1).foreach(i => p._2(i) = i)"), "host effects")
+    rejected(factory("val values = pretend.deviceRange(0, p._3)", """
+      object pretend:
+        def deviceRange(from: Int, until: Int): DeviceTraversal[Int] = flight4s.frontend.ScalaKernel.deviceRange(from, until)
+    """), "must originate from deviceRange")
 
   test("range foreach nested generators loop shadows and compound stores compile and validate"):
     CompilerHarness.withDirectory { directory =>
@@ -288,6 +356,11 @@ class ScalaKernelCompilerSuite extends FunSuite:
       .replace("{ p =>\n        ()\n      }", "(body)"), "literal kernel-body lambda")
     val error = intercept[IllegalStateException](ScalaKernel.threadIdx.x)
     assert(error.getMessage.contains("inside ScalaKernel.kernel"))
+    intercept[IllegalStateException](ScalaKernel.deviceRange(0, 3))
+    val traversal = new ScalaKernel.DeviceTraversal[Int]()
+    intercept[IllegalStateException](traversal.map(_ + 1))
+    intercept[IllegalStateException](traversal.withFilter(_ > 0))
+    intercept[IllegalStateException](traversal.foreach(_ => ()))
 
   test("literal-valued conditional expressions and empty signatures compile"):
     CompilerHarness.withDirectory { directory =>

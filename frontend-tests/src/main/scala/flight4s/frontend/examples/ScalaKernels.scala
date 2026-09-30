@@ -130,3 +130,52 @@ object ScalaKernels:
           total += index
       p._2(lane) = total
   }
+
+  def yieldRows = kernel("quotedYieldRows", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("rows"), value[Int]("columns"), value[Float]("threshold"))) { p =>
+    val row = blockIdx.x * blockDim.x + threadIdx.x
+    if row < p._3 then
+      var total = 0.0f
+      val values = for column <- deviceRange(-1, p._4 + 1) if column >= 0 if column < p._4
+        yield p._1(row * p._4 + column)
+      values.withFilter(item => item > p._5).map(item => item * 2.0f).foreach { item => total += item }
+      p._2(row) = total
+  }
+
+  def yieldReuse = kernel("quotedYieldReuse", params(inOut[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("from"), value[Int]("until"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var begin = p._4
+      var end = p._5
+      var bias = 0
+      var total = 0
+      val values = for index <- deviceRange(begin, end) if index % 2 == 0
+        yield p._1(lane) + index + bias
+      val alias = values
+      begin = 0
+      end = 0
+      bias = 1
+      alias.foreach { item =>
+        p._1(lane) = item + 1
+        total += item + item
+      }
+      bias = 3
+      for item <- values do
+        p._1(lane) = item + 1
+        total += item + item
+      p._2(lane) = total
+  }
+
+  def yieldNested = kernel("quotedYieldNested", params(input[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("rounds"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var total = p._1(lane)
+      for outer <- 0 until p._4 do
+        val before = total
+        val values = deviceRange(0, outer).map(index => index + before)
+          .withFilter(item => item >= total).map(item => item + outer)
+        for before <- values do total += before
+      p._2(lane) = total
+  }

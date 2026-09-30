@@ -20,6 +20,15 @@ object ScalaKernel:
     def apply(index: Int): T = markerOnly()
     def update(index: Int, value: T)(using Mode =:= ReadWrite): Unit = markerOnly()
 
+  /** Lazy serial device traversal syntax, not a materialized Scala collection. */
+  final class DeviceTraversal[T] private[frontend] ():
+    def map[U](transform: T => U): DeviceTraversal[U] = markerOnly()
+    def withFilter(predicate: T => Boolean): DeviceTraversal[T] = markerOnly()
+    def foreach(body: T => Unit): Unit = markerOnly()
+
+  /** Captures half-open unit-stride bounds at this device statement. */
+  def deviceRange(from: Int, until: Int): DeviceTraversal[Int] = markerOnly()
+
   private def markerOnly[T](): T =
     throw IllegalStateException("ScalaKernel device markers can only be used inside ScalaKernel.kernel")
 
