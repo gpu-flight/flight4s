@@ -116,8 +116,8 @@ class ScalaKernelTupleCompilerSuite extends FunSuite:
     rejected("val values = deviceRange(0, p._3).map(i => (i, i)); values.foreach(pair => p._2(0) = pair.productElement(0).asInstanceOf[Int])", "ScalaKernel")
     rejected("val values = deviceRange(0, p._3).map(i => host); values.foreach(pair => p._2(0) = pair._1)", "direct standard tuple constructor", "val host = (1, 2)")
 
-  test("tuple states tuple local construction and mutable tuple aliases remain deferred"):
-    rejected("val values = deviceRange(0, p._3).map(i => (i, i)); val result = values.foldLeft((0, 0))((sum, pair) => sum)", "primitive locals")
+  test("nested tuple states tuple local construction and mutable tuple aliases remain deferred"):
+    rejected("val values = deviceRange(0, p._3).map(i => (i, i)); val result = values.foldLeft((0, (0, 0)))((sum, pair) => sum)", "flat nonempty primitive tuples")
     rejected("val pair = (1, 2); p._2(0) = pair._1", "primitive locals")
     rejected("val values = deviceRange(0, p._3).map(i => (i, i)); values.foreach { pair => var alias = pair; p._2(0) = alias._1 }", "primitive locals")
 

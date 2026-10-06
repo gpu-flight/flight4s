@@ -192,7 +192,7 @@ guards against current device state. Every mapped item snapshots once per visite
 element, so a terminal write cannot change that item. There is no intermediate
 JVM/GPU collection or implicit parallel reduction. Scalar `Int`/`Float`/`Double`/
 `Boolean` mappings and flat primitive tuple elements are supported, including
-nested `flatMap`. Tuple accumulators, case-class elements and collectives remain
+nested `flatMap` and immutable tuple accumulators. Case-class elements and collectives remain
 separate quoted frontend slices; the explicit DSL already has those richer APIs.
 
 ### Tuple Traversal Elements
@@ -231,9 +231,10 @@ Every field snapshots left to right before later guards or terminal writes. A
 reused plan reruns mappings with fresh reads, over its original captured bounds.
 Fields retain their Scala types; no CUDA tuple/struct or collection is allocated.
 `_N`, literal `pair(0)`, tupled callbacks, immutable tuple aliases and scalar/tuple
-map/flatMap transitions compose. Fold state remains scalar and ordered.
+map/flatMap transitions compose. Fold state may be scalar or a flat primitive tuple;
+updates retain traversal order.
 This quoted subset supports standard `Tuple1` through `Tuple22`; larger traversal
-tuples, nested tuples, case classes and tuple accumulators are deferred. The
+tuples, nested tuples and case classes are deferred. The
 explicit DSL and arbitrary-arity kernel signatures are unaffected. See the
 [tuple traversal contract](frontend/README.md#flat-tuple-traversal-contract).
 
@@ -270,9 +271,43 @@ current device reads; earlier results remain saved. All four primitive accumulat
 types are supported, including a state type different from the element type.
 No implicit numeric conversion or parallel reassociation is introduced.
 
-Embedded folds, assignment RHS folds, tuple/product accumulators, helper callbacks,
+Embedded folds, assignment RHS folds, named product accumulators, helper callbacks,
 and expression blocks remain rejected. Bind a fold to a local first, then use that
 result in other expressions. See the [fold contract](frontend/README.md#ordered-scalar-fold-contract).
+
+### Tuple Accumulator States
+
+A quoted fold can carry several primitive values in an immutable tuple result:
+
+```scala
+val result = deviceRange(0, count).foldLeft((1, 2)) { (state, i) =>
+  (state._2, state._1 + i)
+}
+target(0) = result._1 + result._2
+```
+
+Equivalent CUDA C++ with simplified names:
+
+```cpp
+const int start = 0, end = count;
+int first = 1, second = 2;
+for (int i = start; i < end; ++i) {
+    const int nextFirst = second;
+    const int nextSecond = first + i;
+    first = nextFirst;
+    second = nextSecond;
+}
+target[0] = first + second;
+```
+
+Every next-state field reads the previous state. Fields snapshot left to right
+before any accumulator assignment, so swaps and dependent updates work correctly.
+Empty traversals return the seed; each later fold copies its seed into independent
+state. Results support typed projections, immutable aliases and reuse as seeds or
+traversal values. `Tuple1`..`Tuple22` may mix `Int`, `Float`, `Double` and `Boolean`.
+Tuple fold results must be `val`s; general tuple construction, mutable tuple locals,
+nested tuples and named products remain deferred. See the
+[tuple fold contract](frontend/README.md#tuple-fold-contract).
 
 ### Nested Scalar Traversals
 

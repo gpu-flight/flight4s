@@ -696,6 +696,98 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("tuple Float Int folds retain ordered sums counts lazy reads and empty seeds on the GPU"):
+    val definition = ScalaKernels.tupleFoldRows
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for rows <- counts; columns <- Vector(0, 1, 3, 7, 17) do
+          val initial = Array.tabulate(math.max(1, rows * columns))(i => Vector(1.0e8f, 0.0f, 1.0f, -0.5f, -1.0e8f, 0.0f, 2.0f)(i % 7))
+          val data = context.allocate[Float](initial.length).toOption.get
+          val target = context.allocate[Float](rows + 32).toOption.get
+          val visits = context.allocate[Int](rows + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for seed <- Vector(0.0f, 7.0f, -3.0f); explicit <- Vector(false, true) do
+              val expected = Vector.tabulate(rows) { row =>
+                (0 until columns).filter(column => column % 2 == 0 && initial(row * columns + column) != 0.0f)
+                  .foldLeft((seed, 0)) { (state, column) =>
+                    (state._1 - initial(row * columns + column) - (if state._2 % 2 == 0 then 0.5f else 0.0f), state._2 + 1)
+                  }
+              }
+              assertEquals(target.copyFrom(Array.fill(rows + 32)(-999f)), Right(()))
+              assertEquals(visits.copyFrom(Array.fill(rows + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, visits, rows, columns, seed)), config(rows), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected.map(_._1) ++ Vector.fill(32)(-999f))
+              assertEquals(visits.copyToArray().toOption.get.toVector, expected.map(_._2) ++ Vector.fill(32)(-999))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            visits.close()
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("tuple Int swaps and reused seeds preserve previous fields saved results and captured bounds"):
+    val definition = ScalaKernels.tupleFoldReuse
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(count + 32)(i => i % 11 - 5)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val target = context.allocate[Int](initial.length).toOption.get
+          try
+            for (from, until) <- Vector((0, 0), (3, 1), (-3, 2), (0, 1), (0, 7), (2, 9)); explicit <- Vector(false, true) do
+              val expected = initial.take(count).map { original =>
+                val indices = (from until until).filter(_ % 2 == 0)
+                val first = indices.foldLeft((original, original + 1))((state, i) => (state._2, state._1 - (original + i)))
+                val second = indices.foldLeft(first)((state, i) => (state._2 + (first._1 + i), state._1))
+                (first._1 + second._2, first._2 + second._1)
+              }.toVector
+              assertEquals(data.copyFrom(initial), Right(()))
+              assertEquals(target.copyFrom(Array.fill(initial.length)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, count, from, until)), config(count), stream, explicit)
+              assertEquals(data.copyToArray().toOption.get.toVector, expected.map(_._1) ++ initial.drop(count).toVector)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected.map(_._2) ++ Vector.fill(32)(-999))
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("nested Double Boolean tuple folds refresh seeds and use previous state across flatMap"):
+    val definition = ScalaKernels.tupleFoldNested
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 17 - 8).toDouble * 0.25)
+          val data = context.allocate[Double](initial.length).toOption.get
+          val target = context.allocate[Double](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for rounds <- Vector(0, 1, 2, 4, 7); enabled <- Vector(false, true); explicit <- Vector(false, true) do
+              val expected = initial.take(count).map { original =>
+                var total = original
+                for round <- 0 until rounds do
+                  val indices = for i <- 0 until round; j <- 0 until i if enabled yield j
+                  val result = indices.foldLeft((total, false)) { (state, _) =>
+                    (if state._2 then state._1 / 2.0 - original else state._1 - original, (state._1 > 0.0) != state._2)
+                  }
+                  total = result._1 + (if result._2 then 0.25 else 0.5)
+                total
+              }.toVector
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999.0)), Right(()))
+              launch(context, function, definition.bind((data, target, count, rounds, enabled)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999.0))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))

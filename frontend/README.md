@@ -43,15 +43,15 @@ primitive `== !=`, unary `+`, Int unary `-`, Boolean `! && ||`, primitive
 buffer aliases, statement scopes, statement `if`/`else`, and pure expression
 `if`/`else`, direct unit-stride `start until end` range loops with lazy guards,
 and explicit `deviceRange` scalar/flat-tuple yield/map/flatMap/withFilter/foreach plans with ordered
-scalar `foldLeft` initializers. Short-circuit
+scalar and immutable flat-tuple `foldLeft` initializers. Short-circuit
 booleans lower to lazy `Conditional` IR. An input's
 `update` requires read-write evidence, and lowering independently requires an
 output parameter. Existing validation and CUDA generation remain authoritative.
 
 Deferred/rejected: other loops, eager range `.filter`, `to`/`by`, stored range values,
 eager Range `yield`, `match`/`try`/return, lazy/uninitialized bindings,
-local definitions, expression blocks, tuple/product local state, source-level
-embedded folds, tuple/product fold state, case-class traversals and collectives, captured host state/values/helper calls,
+local definitions, general expression blocks, arbitrary tuple/product local state, source-level
+embedded folds, named product fold state, case-class traversals and collectives, captured host state/values/helper calls,
 numeric conversions, shifts, floating remainder, dynamic floating unary minus,
 vector/low-precision source types, signature inference, and Unit-style annotated
 methods. Dynamic floating negation is not approximated by `0 - x`, which would
@@ -62,13 +62,15 @@ evaluate once in normal call order; that configuration is outside the body.
 `ScalaKernelCompilerSuite` contains 29 actual compiler-program tests,
 including separate callers, negative admission, all intrinsic axes, supported
 operators, scopes and configuration evaluation order. `ScalaKernelIrSuite`
-contains twenty-two tests: independent explicit-DSL branch/short-circuit/loop/guard/traversal/fold/flatMap/signature references
+contains twenty-five tests: independent explicit-DSL branch/short-circuit/loop/guard/traversal/fold/flatMap/signature references
 compare exact IR/effects/generated artifacts after aligning only source spans;
-all twenty-three fixtures validate and retain source maps and deterministic CUDA.
+all twenty-six fixtures validate and retain source maps and deterministic CUDA.
 `ScalaKernelTupleCompilerSuite` adds twelve real compiler-program tests for flat
 tuple admission, field types, tupled callbacks, nested plans and rejected effects.
 `TupleSignatureCompilerSuite` retains seventeen signature compiler-program tests.
-`ScalaKernelCudaJniSuite` has twenty-three real GPU fixtures for Float scaling, mutable
+`ScalaKernelTupleFoldCompilerSuite` adds thirteen real compiler-program tests for
+typed tuple states, seed/result aliases, dependent fields and rejected effects.
+`ScalaKernelCudaJniSuite` has twenty-six real GPU fixtures for Float scaling, mutable
 Int snapshots/shadowing, tightly sized short-circuit inputs, and Double/Boolean
 branches. They cover counts 0/1/63/64/65/193/257, 32 output tails, both stream
 paths, disabled execution, unchanged read-only inputs, and in-place updates.
@@ -287,7 +289,8 @@ filtered traversals return the seed. The source local snapshots the completed
 result, so reused plans get independent accumulators and earlier results persist.
 
 Elements may be supported primitives or flat primitive tuples. The accumulator
-must remain primitive; its type may differ without an implicit conversion.
+is primitive in this contract; its type may differ without an implicit conversion.
+Immutable tuple states follow the [tuple fold contract](#tuple-fold-contract).
 Source `var` results can be assigned afterward.
 Captured device locals/memory remain live at each terminal, and existing per-item
 map snapshots remain intact. Actual library symbols identify folds; no host step
@@ -297,7 +300,7 @@ spans are retained through existing local/ForLoop/Store/Load IR.
 Folds in buffer stores, assignments, arithmetic, conditional expressions, seeds,
 maps, predicates or fold steps remain rejected. Introducing statement-producing
 folds into lazy expression contexts needs a separate evaluation-order contract.
-Tuple/product state, numeric conversions, helper/stored callbacks, expression
+Named product state, numeric conversions, helper/stored callbacks, general expression
 blocks, sums, parallel trees and collectives are deferred; no reassociation or new
 IR/backend/runtime behavior is implied.
 
@@ -356,7 +359,7 @@ Empty/reversed/rejected inner plans perform no updates. Reusing a plan emits a
 fresh nested traversal and independent fold state without retaining host lambdas,
 objects or intermediate collections. No parallel reassociation is introduced.
 
-Deferred: case-class elements, tuple/product states, generator aliases/patterns, conditional
+Deferred: case-class elements, named product states, generator aliases/patterns, conditional
 plan factories, stored/helper callbacks, captures, expression blocks and eager
 Scala collection roots. The explicit DSL and annotation semantics are unchanged.
 The generic tuple-signature checker issue found during fixture development is
@@ -403,7 +406,7 @@ an earlier field read. Unused plans still validate all fields without emitting l
 Fields use typed `_N` and literal `tuple(index)` access. Tupled callback projection
 bindings and immutable aliases of existing tuple bindings are recognized without
 admitting arbitrary host products or effects. Map/flatMap can change scalar/tuple
-shape, and a tuple source can feed guards, foreach and a primitive-state fold.
+shape, and a tuple source can feed guards, foreach and a scalar or tuple-state fold.
 Outer tuple snapshots survive inner iterations and stores; new inner bounds still
 capture once per accepted outer item. Plan aliases/reuse retain the scalar contract.
 
@@ -413,12 +416,64 @@ existing primitive locals/loads. This is stricter than the explicit DSL's plain
 expression-tree tuple traversal: quoted maps automatically snapshot each field.
 
 Deferred/rejected: empty/nested/host-valued tuples, tuples above 22 fields,
-case-class products, tuple accumulators, arbitrary tuple-valued locals, mutable
+case-class products, arbitrary tuple-valued locals, mutable
 tuple aliases, conditional tuple constructors, dynamic indexing, casts/productElement,
 stored/helper callbacks, implicit numeric conversions, embedded folds and effectful
 blocks. The 22-field boundary is a constructor-admission slice, not a CUDA or Scala
 tuple limitation; larger tuples require separately tested compiler tree handling.
 Kernel signature tuples and the explicit DSL continue supporting arities above 22.
+
+### Tuple Fold Contract
+
+```scala
+val pairs = deviceRange(0, count).map(i => (i, data(i)))
+val result = pairs.foldLeft((0.0f, 0)) { (state, pair) =>
+  (state._1 + pair._2, state._2 + 1)
+}
+val saved = result
+val next = pairs.foldLeft(saved)((state, pair) => (state._1 - pair._2, state._2 + 1))
+target(0) = result._1 + next._1
+```
+
+The first fold lowers to scalar CUDA state (simplified names):
+
+```cpp
+float sum = 0.0f;
+int visits = 0;
+for (int i = start; i < end; ++i) {
+    const int index = i;
+    const float item = data[i];
+    const float nextSum = sum + item;
+    const int nextVisits = visits + 1;
+    sum = nextSum;
+    visits = nextVisits;
+}
+```
+
+`foldLeft` must directly initialize an immutable tuple `val`. State is a flat,
+nonempty standard `Tuple1`..`Tuple22` of `Int`/`Float`/`Double`/`Boolean` fields.
+Seeds and steps use direct standard tuple constructors or existing tuple bindings,
+including an earlier fold result or a traversal element. A step returning `state`
+is valid. Pure conditional expressions may occur within individual fields.
+
+Receiver bounds are captured before seed fields, which evaluate once left to right.
+Each accepted traversal element computes all next fields against the previous
+state, snapshots them left to right, then assigns accumulator fields in order.
+The accumulator surrounds the complete flatMap nest. An empty or fully rejected
+traversal returns its seed. Ordered arithmetic is never reassociated implicitly.
+
+The completed accumulator fields become an immutable result binding. Aliases use
+these stable fields; a later fold snapshots its seed into separate locals, so it
+cannot modify earlier results. Projections keep exact field types and may feed
+later scalar expressions, maps and folds. Every seed and step field is validated,
+even when the result is unused or the range is empty.
+
+No tuple object, aggregate IR, CUDA struct or ABI type is introduced. Existing
+scalar folds retain their original IR. Mutable tuple results/aliases, arbitrary
+tuple locals, named/nested products, tuples above 22 fields, conditional tuple
+constructors, pattern bindings, helper/stored callbacks, host captures, effects,
+conversions and embedded fold expressions remain rejected. Projection-only
+immutable callback aliases follow the existing tuple traversal rule.
 
 ## Kernel Annotation Prototype
 
