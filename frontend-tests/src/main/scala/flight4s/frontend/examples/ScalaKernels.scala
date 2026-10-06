@@ -287,3 +287,51 @@ object ScalaKernels:
         for before <- values do total += before
       p._2(lane) = total
   }
+
+  def tupleRows = kernel("quotedTupleRows", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("rows"), value[Int]("columns"), value[Float]("threshold"), value[Float]("initial"))) { p =>
+    val row = blockIdx.x * blockDim.x + threadIdx.x
+    if row < p._3 then
+      val pairs = for column <- deviceRange(-1, p._4 + 1) if column >= 0 if column < p._4
+        yield (column, p._1(row * p._4 + column), column % 2 == 0)
+      val total = pairs.withFilter(pair => pair._3 && pair._2 > p._5)
+        .map(pair => (pair._2 * 2.0f, pair._1))
+        .foldLeft(p._6)((sum, pair) => sum - pair._1 - (if pair._2 == 0 then 0.5f else 0.0f))
+      p._2(row) = total
+  }
+
+  def tupleReuse = kernel("quotedTupleReuse", params(inOut[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("from"), value[Int]("until"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var begin = p._4
+      var end = p._5
+      var total = 0
+      val pairs = deviceRange(begin, end).map(i => (p._1(lane) + i, p._1(lane), i))
+        .withFilter(pair => pair._1 >= 0)
+      val alias = pairs
+      begin = 0
+      end = 0
+      alias.foreach { pair =>
+        val saved = pair
+        p._1(lane) = saved._1 + 1
+        total += saved._2 + saved._2 + saved._3
+      }
+      val result = pairs.foldLeft(total)((sum, pair) => sum - pair._1 - pair._2)
+      p._2(lane) = result
+  }
+
+  def tupleNested = kernel("quotedTupleNested", params(input[Double]("data"), output[Double]("target"),
+      value[Int]("count"), value[Int]("rounds"), value[Boolean]("enabled"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      val fixed = deviceRange(0, 2)
+      val pairs = deviceRange(0, p._4).map(i => (i, p._1(lane), p._5))
+      val values = pairs.flatMap(pair => deviceRange(0, pair._1).withFilter(i => i % 2 == 0)
+        .map(i => (pair._2 / 2.0, pair._3, i + pair._1)))
+        .withFilter(pair => pair._2 && pair._3 > 0)
+        .map(pair => pair)
+        .flatMap(pair => fixed.map(k => if k == 0 then pair._1 else pair._1 + 1.0))
+      val result = values.foldLeft(p._1(lane))((sum, item) => sum / 2.0 - item)
+      p._2(lane) = result
+  }

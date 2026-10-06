@@ -650,6 +650,119 @@ class ScalaKernelIrSuite extends FunSuite:
     assertEquals(actual.params, reference.params)
     assertEquals(actual.signature.abiDescriptors, reference.signature.abiDescriptors)
 
+  test("tuple row fields guards and ordered scalar folds exactly match primitive explicit IR"):
+    val actual = ScalaKernels.tupleRows
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"),
+        value[Int]("rows"), value[Int]("columns"), value[Float]("threshold"), value[Float]("initial"))) { p =>
+      val row = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(row < p._3) {
+        val start = declare(literal(-1)).read
+        val end = declare(p._4 + literal(1)).read
+        val state = declare(p._6)
+        gpuFor(names.dequeue(), start, end) { column =>
+          when(column >= literal(0)) {
+            when(column < p._4) {
+              val index = declare(column).read
+              val item = declare(p._1(row * p._4 + column).read).read
+              val even = declare(column % literal(2) === literal(0)).read
+              when(even && item > p._5) {
+                val scaled = declare(item * literal(2.0f)).read
+                val copiedIndex = declare(index).read
+                state := state.read - scaled - choose(copiedIndex === literal(0))(literal(0.5f))(literal(0.0f))
+              }
+            }
+          }
+        }
+        val result = declare(state.read).read
+        p._2(row) := result
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
+  test("tuple reuse snapshots every field before terminal stores and recaptures only mapping values"):
+    val actual = ScalaKernels.tupleReuse
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(inOut[Int]("data"), output[Int]("target"),
+        value[Int]("count"), value[Int]("from"), value[Int]("until"))) { p =>
+      val lane = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(lane < p._3) {
+        val begin = declare(p._4)
+        val end = declare(p._5)
+        val total = declare(literal(0))
+        val start = declare(begin.read).read
+        val limit = declare(end.read).read
+        begin := literal(0)
+        end := literal(0)
+        gpuFor(names.dequeue(), start, limit) { i =>
+          val first = declare(p._1(lane).read + i).read
+          val saved = declare(p._1(lane).read).read
+          val index = declare(i).read
+          when(first >= literal(0)) {
+            p._1(lane) := first + literal(1)
+            total := total.read + (saved + saved + index)
+          }
+        }
+        val state = declare(total.read)
+        gpuFor(names.dequeue(), start, limit) { i =>
+          val first = declare(p._1(lane).read + i).read
+          val saved = declare(p._1(lane).read).read
+          val index = declare(i).read
+          when(first >= literal(0)) { state := state.read - first - saved }
+        }
+        val result = declare(state.read).read
+        p._2(lane) := result
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
+  test("tuple flatMap keeps outer snapshots inner bounds identity fields and one scalar state"):
+    val actual = ScalaKernels.tupleNested
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(input[Double]("data"), output[Double]("target"),
+        value[Int]("count"), value[Int]("rounds"), value[Boolean]("enabled"))) { p =>
+      val lane = declare(blockIdx.x * blockDim.x + threadIdx.x).read
+      when(lane < p._3) {
+        val fixedStart = declare(literal(0)).read
+        val fixedEnd = declare(literal(2)).read
+        val start = declare(literal(0)).read
+        val end = declare(p._4).read
+        val state = declare(p._1(lane).read)
+        gpuFor(names.dequeue(), start, end) { outer =>
+          val index = declare(outer).read
+          val original = declare(p._1(lane).read).read
+          val enabled = declare(p._5).read
+          val innerStart = declare(literal(0)).read
+          val innerEnd = declare(index).read
+          gpuFor(names.dequeue(), innerStart, innerEnd) { inner =>
+            when(inner % literal(2) === literal(0)) {
+              val item = declare(original / literal(2.0)).read
+              val flag = declare(enabled).read
+              val combined = declare(inner + index).read
+              when(flag && combined > literal(0)) {
+                val copiedItem = declare(item).read
+                val copiedFlag = declare(flag).read
+                val copiedIndex = declare(combined).read
+                gpuFor(names.dequeue(), fixedStart, fixedEnd) { k =>
+                  val value = declare(choose(k === literal(0))(copiedItem)(copiedItem + literal(1.0))).read
+                  state := state.read / literal(2.0) - value
+                }
+              }
+            }
+          }
+        }
+        val result = declare(state.read).read
+        p._2(lane) := result
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+
   test("all fixtures preserve source maps scope unique names validation and deterministic CUDA"):
     val factories: Vector[() => Kernel[?]] = Vector(() => ScalaKernels.scale, () => ScalaKernels.branches,
       () => ScalaKernels.shortCircuit, () => ScalaKernels.doubles, () => ScalaKernels.rowSum,
@@ -657,7 +770,8 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.guardedState, () => ScalaKernels.nestedGuards, () => ScalaKernels.yieldRows,
       () => ScalaKernels.yieldReuse, () => ScalaKernels.yieldNested, () => ScalaKernels.foldRows,
       () => ScalaKernels.foldReuse, () => ScalaKernels.foldNested, () => ScalaKernels.flatMapRows,
-      () => ScalaKernels.flatMapReuse, () => ScalaKernels.flatMapNested, () => ScalaKernels.tupleScale)
+      () => ScalaKernels.flatMapReuse, () => ScalaKernels.flatMapNested, () => ScalaKernels.tupleScale,
+      () => ScalaKernels.tupleRows, () => ScalaKernels.tupleReuse, () => ScalaKernels.tupleNested)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)
