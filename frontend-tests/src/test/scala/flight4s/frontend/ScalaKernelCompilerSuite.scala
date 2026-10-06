@@ -254,7 +254,7 @@ class ScalaKernelCompilerSuite extends FunSuite:
     rejected(factory("val result = deviceRange(0, p._3).foldLeft(0)((sum, item) => { p._2(0) = item; sum })"), "expression blocks")
     rejected(factory("val result = deviceRange(0, p._3).foldLeft(0)(callback)",
       "val callback: (Int, Int) => Int = _ + _"), "literal matching two-parameter")
-    rejected(factory("val result = deviceRange(0, p._3).foldLeft((0, 1))((sum, item) => sum)"), "primitive locals")
+    rejected(factory("val result = deviceRange(0, p._3).foldLeft((0, (0, 1)))((sum, item) => sum)"), "flat nonempty primitive tuples")
     rejected(factory("val result: Double = deviceRange(0, p._3).foldLeft(0)((sum, item) => sum + item)"), "captures")
     rejected(factory("val result = (0 until p._3).foldLeft(0)((sum, item) => sum + item)"), "captures")
     rejected(factory("p._2(0) = deviceRange(0, p._3).foldLeft(0)((sum, item) => sum + item)"), "directly initialize")

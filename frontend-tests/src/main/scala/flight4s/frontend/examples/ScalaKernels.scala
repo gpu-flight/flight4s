@@ -335,3 +335,48 @@ object ScalaKernels:
       val result = values.foldLeft(p._1(lane))((sum, item) => sum / 2.0 - item)
       p._2(lane) = result
   }
+
+  def tupleFoldRows = kernel("quotedTupleFoldRows", params(input[Float]("data"), output[Float]("target"),
+      output[Int]("visits"), value[Int]("rows"), value[Int]("columns"), value[Float]("seed"))) { p =>
+    val row = blockIdx.x * blockDim.x + threadIdx.x
+    if row < p._4 then
+      val pairs = for column <- deviceRange(-1, p._5 + 1) if column >= 0 if column < p._5
+        yield (column, p._1(row * p._5 + column))
+      val result = pairs.withFilter(pair => pair._1 % 2 == 0 && pair._2 != 0.0f)
+        .foldLeft((p._6, 0))((state, pair) =>
+          (state._1 - pair._2 - (if state._2 % 2 == 0 then 0.5f else 0.0f), state._2 + 1))
+      p._2(row) = result._1
+      p._3(row) = result._2
+  }
+
+  def tupleFoldReuse = kernel("quotedTupleFoldReuse", params(inOut[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("from"), value[Int]("until"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var begin = p._4
+      var end = p._5
+      val values = deviceRange(begin, end).withFilter(i => i % 2 == 0).map(i => p._1(lane) + i)
+      begin = 0
+      end = 0
+      val first = values.foldLeft((p._1(lane), p._1(lane) + 1))((state, item) => (state._2, state._1 - item))
+      val saved = first
+      p._1(lane) = saved._1
+      val second = values.foldLeft(saved)((state, item) => (state._2 + item, state._1))
+      p._1(lane) = first._1 + second._2
+      p._2(lane) = saved._2 + second._1
+  }
+
+  def tupleFoldNested = kernel("quotedTupleFoldNested", params(input[Double]("data"), output[Double]("target"),
+      value[Int]("count"), value[Int]("rounds"), value[Boolean]("enabled"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var total = p._1(lane)
+      for round <- 0 until p._4 do
+        val pairs = deviceRange(0, round).map(i => (i, p._1(lane), p._5))
+          .flatMap(pair => deviceRange(0, pair._1).map(j => (j, pair._2, pair._3)))
+          .withFilter(pair => pair._3)
+        val result = pairs.foldLeft((total, false))((state, pair) =>
+          (if state._2 then state._1 / 2.0 - pair._2 else state._1 - pair._2, (state._1 > 0.0) != state._2))
+        total = result._1 + (if result._2 then 0.25 else 0.5)
+      p._2(lane) = total
+  }

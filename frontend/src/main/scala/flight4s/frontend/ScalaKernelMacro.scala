@@ -198,7 +198,7 @@ private[frontend] object ScalaKernelMacro:
               types.zip(arguments).map { (field, argument) => field.asType match
                 case '[t] => field -> expression[t](argument, current, bindings).asTerm
               }
-            case _ => report.errorAndAbort("ScalaKernel tuple maps require a direct standard tuple constructor or a traversal tuple binding", source.pos)
+            case _ => report.errorAndAbort("ScalaKernel tuple values require a direct standard tuple constructor or an existing tuple binding", source.pos)
 
     def snapshotElement(term: Term, tpe: TypeRepr, env: Environment, bindings: Expr[Params],
         builder: Expr[CudaDsl.BlockBuilder])(consume: Quotes ?=> ScopedBinding => Expr[Unit])(
@@ -237,7 +237,7 @@ private[frontend] object ScalaKernelMacro:
             '{ Conditional($condition, $yes, $no, $cudaType, $location) }
           case _ => invocation(source) match
             case Some((selection, _)) if traversalFoldMethods.contains(selection.symbol) =>
-              report.errorAndAbort("ScalaKernel foldLeft must directly initialize a primitive val or var; embedded folds are not supported yet", source.pos)
+              report.errorAndAbort("ScalaKernel foldLeft must directly initialize a primitive val or var, or an immutable tuple val; embedded folds are not supported yet", source.pos)
             case Some((selection, Nil)) if intrinsicSymbols.contains(selection.symbol) =>
               '{ Intrinsic(${Expr(intrinsicSymbols(selection.symbol))}, I32, $location) }.asExprOf[DeviceExpr[T]]
             case Some((selection, List(List(index)))) if readMethods.contains(selection.symbol) =>
@@ -423,6 +423,48 @@ private[frontend] object ScalaKernelMacro:
           }
         case _ => consume(expression[T](source, env, bindings))
 
+    def tupleInitializer(term: Term, stateType: TypeRepr, env: Environment,
+        bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(
+        consume: Quotes ?=> TupleBinding => Expr[Unit])(using Quotes): Expr[Unit] =
+      val source = unwrapped(term)
+      val fields = elementTypes(stateType, source)
+      invocation(source) match
+        case Some((selection, List(List(initial), List(callback)))) if traversalFoldMethods.contains(selection.symbol) =>
+          if !(source.tpe.widen.dealias =:= stateType) then
+            report.errorAndAbort("ScalaKernel foldLeft requires a matching tuple accumulator type", source.pos)
+          traversal(selection.qualifier, env, bindings, builder) { plan =>
+            val (state, input, step) = unwrapped(callback) match
+              case Lambda(List(state, input), step) if state.tpt.tpe.widen.dealias =:= stateType &&
+                  input.tpt.tpe.widen.dealias =:= plan.elementType => (state.symbol, input.symbol, step)
+              case _ => report.errorAndAbort("ScalaKernel foldLeft requires a literal matching two-parameter step lambda", callback.pos)
+            snapshotElement(initial, stateType, env, bindings, builder) {
+              case accumulator: TupleBinding =>
+                '{
+                  ${traverse(plan, bindings, builder, source) { (element, active) =>
+                    val current = env.updated(state, accumulator).updated(input, element)
+                    snapshotElement(step, stateType, current, bindings, active) {
+                      case updated: TupleBinding =>
+                        // Every next field must read the previous state before any field is assigned.
+                        fields.zip(accumulator.fields.zip(updated.fields)).foldRight('{ () }) {
+                          case ((field, (target, value)), remaining) => field.asType match
+                            case '[t] =>
+                              val local = target.handle.asExprOf[LocalVariable[t]]
+                              val next = readBinding[t](value, span(step.pos))
+                              '{
+                                CudaDsl.:=[t, Local]($local)($next)(using $active, ${position(step)})
+                                $remaining
+                              }
+                        }
+                      case _ => report.errorAndAbort("ScalaKernel foldLeft requires a tuple next state", step.pos)
+                    }
+                  }}
+                  ${consume(accumulator)}
+                }
+              case _ => report.errorAndAbort("ScalaKernel foldLeft requires a tuple seed", initial.pos)
+            }
+          }
+        case _ => report.errorAndAbort("ScalaKernel tuple locals must directly initialize an immutable foldLeft result", source.pos)
+
     def statement(term: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[Unit] =
       val source = unwrapped(term)
       val location = span(source.pos)
@@ -532,8 +574,17 @@ private[frontend] object ScalaKernelMacro:
           val isTraversal = value.tpt.tpe.widen.baseType(traversalSymbol) match
             case AppliedType(_, _) => true
             case _ => false
+          val declaredType = value.tpt.tpe.widen.dealias
+          val isTupleFold = declaredType <:< TypeRepr.of[Tuple] && invocation(rhs).exists {
+            (selection, _) => traversalFoldMethods.contains(selection.symbol)
+          }
           if tupleAlias.isDefined && !mutable then
             next(tail, result, current.updated(value.symbol, tupleAlias.get))
+          else if isTupleFold then
+            if mutable then report.errorAndAbort("ScalaKernel tuple fold results must be immutable", value.pos)
+            tupleInitializer(rhs, declaredType, current, bindings, builder) { initial =>
+              next(tail, result, current.updated(value.symbol, initial))
+            }
           else if isTraversal then
             if mutable then report.errorAndAbort("ScalaKernel traversal plans must be immutable", value.pos)
             traversal(rhs, current, bindings, builder) { plan =>
@@ -544,7 +595,6 @@ private[frontend] object ScalaKernelMacro:
               report.errorAndAbort(s"buffer aliases must reference kernel parameters: ${rhs.show}", rhs.pos))
             next(tail, result, current.updated(value.symbol, original))
           else
-            val declaredType = value.tpt.tpe.widen.dealias
             if !primitive(declaredType) then report.errorAndAbort("ScalaKernel supports primitive locals and immutable buffer aliases only", value.pos)
             declaredType.asType match
               case '[t] =>
