@@ -4,7 +4,7 @@ import scala.annotation.experimental
 import munit.FunSuite
 import flight4s.frontend.examples.ScalaKernels
 import flight4s.core.codegen.{CudaCodegen, GeneratedCudaModule}
-import flight4s.core.ir.{Kernel, KernelInvocation}
+import flight4s.core.ir.{DeviceBuffer, Kernel, KernelInvocation}
 import flight4s.core.launch.{Block as LaunchBlock, Grid, LaunchConfig}
 import flight4s.runtime.cuda.*
 
@@ -630,7 +630,12 @@ class ScalaKernelCudaJniSuite extends FunSuite:
     }
 
   test("tuple fields retain pre-store values while reused plans observe new data on the GPU"):
-    val definition = ScalaKernels.tupleReuse
+    checkTupleReuse(ScalaKernels.tupleReuse)
+
+  test("named tuple snapshots retain pre-store values on both GPU streams"):
+    checkTupleReuse(ScalaKernels.namedReuse)
+
+  private def checkTupleReuse(definition: Kernel[(DeviceBuffer[Int], DeviceBuffer[Int], Int, Int, Int)]): Unit =
     withKernel(definition) { (context, function) =>
       val stream = context.createStream().toOption.get
       try
@@ -697,7 +702,12 @@ class ScalaKernelCudaJniSuite extends FunSuite:
     }
 
   test("tuple Float Int folds retain ordered sums counts lazy reads and empty seeds on the GPU"):
-    val definition = ScalaKernels.tupleFoldRows
+    checkTupleFoldRows(ScalaKernels.tupleFoldRows)
+
+  test("named Float Int folds retain ordered sums counts lazy reads and empty seeds on the GPU"):
+    checkTupleFoldRows(ScalaKernels.namedFoldRows)
+
+  private def checkTupleFoldRows(definition: Kernel[(DeviceBuffer[Float], DeviceBuffer[Float], DeviceBuffer[Int], Int, Int, Float)]): Unit =
     withKernel(definition) { (context, function) =>
       val stream = context.createStream().toOption.get
       try
@@ -729,7 +739,12 @@ class ScalaKernelCudaJniSuite extends FunSuite:
     }
 
   test("tuple Int swaps and reused seeds preserve previous fields saved results and captured bounds"):
-    val definition = ScalaKernels.tupleFoldReuse
+    checkTupleFoldReuse(ScalaKernels.tupleFoldReuse)
+
+  test("named Int swaps and reused seeds preserve previous fields on the GPU"):
+    checkTupleFoldReuse(ScalaKernels.namedFoldReuse)
+
+  private def checkTupleFoldReuse(definition: Kernel[(DeviceBuffer[Int], DeviceBuffer[Int], Int, Int, Int)]): Unit =
     withKernel(definition) { (context, function) =>
       val stream = context.createStream().toOption.get
       try
@@ -757,7 +772,12 @@ class ScalaKernelCudaJniSuite extends FunSuite:
     }
 
   test("nested Double Boolean tuple folds refresh seeds and use previous state across flatMap"):
-    val definition = ScalaKernels.tupleFoldNested
+    checkTupleFoldNested(ScalaKernels.tupleFoldNested)
+
+  test("nested named Double Boolean folds preserve previous state across GPU flatMap"):
+    checkTupleFoldNested(ScalaKernels.namedFoldNested)
+
+  private def checkTupleFoldNested(definition: Kernel[(DeviceBuffer[Double], DeviceBuffer[Double], Int, Int, Boolean)]): Unit =
     withKernel(definition) { (context, function) =>
       val stream = context.createStream().toOption.get
       try
