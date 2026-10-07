@@ -82,6 +82,21 @@ private[frontend] object ScalaKernelMacro:
     val arraySymbol = TypeRepr.of[ScalaKernel.DeviceArray[Any, ReadOnly]].typeSymbol
     val readMethods = arraySymbol.methodMember("apply")
     val writeMethods = arraySymbol.methodMember("update")
+    val sharedSymbol = TypeRepr.of[ScalaKernel.DeviceSharedArray[Any]].typeSymbol
+    val sharedReadMethods = sharedSymbol.methodMember("apply")
+    val sharedWriteMethods = sharedSymbol.methodMember("update")
+    val sharedArrayMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("sharedArray")
+    val barrierMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("barrier")
+    val markerModule = Symbol.requiredModule("flight4s.frontend.ScalaKernel")
+
+    // Imported markers are Idents; qualified calls must not erase an effectful receiver.
+    def markerArguments(term: Term, methods: List[Symbol]): Option[List[List[Term]]] = unwrapped(term) match
+      case Apply(function, arguments) => markerArguments(function, methods).map(_ :+ arguments)
+      case TypeApply(function, _) => markerArguments(function, methods)
+      case reference: Ident if methods.contains(reference.symbol) => Some(Nil)
+      case selection: Select if methods.contains(selection.symbol) && selection.qualifier.symbol == markerModule => Some(Nil)
+      case _ => None
+
     val rangeForeachMethods = TypeRepr.of[scala.collection.immutable.Range].typeSymbol.methodMember("foreach")
     val filteredRangeType = TypeRepr.of[scala.collection.WithFilter[Int, Iterable]]
     val filteredForeachMethods = filteredRangeType.typeSymbol.methodMember("foreach")
@@ -283,6 +298,15 @@ private[frontend] object ScalaKernelMacro:
                   val handle = array.handle.asExprOf[BufferParam[T, mode]]
                   '{ Load(BufferElement[T, mode]($handle.name, $offset, $cudaType, $location), $location) }
                 case _ => report.errorAndAbort("device array access must reference a buffer parameter", selection.pos)
+            case Some((selection, List(List(index)))) if sharedReadMethods.contains(selection.symbol) =>
+              val array = binding(selection.qualifier, env, bindings).getOrElse(
+                report.errorAndAbort("shared array reads must reference a declared shared array or immutable alias", selection.pos))
+              array.handle.tpe.widen.asType match
+                case '[SharedArray[t, Rank1]] =>
+                  val handle = array.handle.asExprOf[SharedArray[T, Rank1]]
+                  val offset = expression[Int](index, env, bindings)
+                  '{ Load(SharedElement($handle.name, Vector($offset), $cudaType, $location), $location) }
+                case _ => report.errorAndAbort("shared array reads require shared storage", selection.pos)
             case Some((selection, arguments)) if
                 Set("scala.Int", "scala.Float", "scala.Double", "scala.Boolean", "scala.Any").contains(selection.symbol.owner.fullName) =>
               primitiveOperation[T](selection, arguments.flatten, source, env, bindings)
@@ -499,7 +523,8 @@ private[frontend] object ScalaKernelMacro:
           }
         case _ => report.errorAndAbort("ScalaKernel tuple locals must directly initialize an immutable foldLeft result", source.pos)
 
-    def statement(term: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[Unit] =
+    def statement(term: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder],
+        sharedRoot: Option[Expr[CudaDsl.BlockBuilder]] = None)(using Quotes): Expr[Unit] =
       val source = unwrapped(term)
       val location = span(source.pos)
       source match
@@ -518,8 +543,9 @@ private[frontend] object ScalaKernelMacro:
               ${statements(branch.elsep, env, bindings, 'nested)} }
             '{ CudaDsl.gpuIf($condition)($yes)($no)(using $builder, ${position(source)}) }
         case block: Block =>
+          // Unconditional scopes retain allocation ownership; branches and loops do not.
           val nestedBody: Expr[CudaDsl.BlockBuilder ?=> Unit] = '{ (nested: CudaDsl.BlockBuilder) ?=>
-            ${statements(block, env, bindings, 'nested)} }
+            ${statements(block, env, bindings, 'nested, sharedRoot)} }
           '{ CudaDsl.scoped($nestedBody)(using $builder, ${position(source)}) }
         case assignment: Assign => assignment.lhs match
           case reference: Ref if binding(reference, env, bindings).exists(_.mutable) =>
@@ -529,6 +555,8 @@ private[frontend] object ScalaKernelMacro:
                 val value = expression[t](assignment.rhs, env, bindings)
                 '{ CudaDsl.:=[t, Local]($handle)($value)(using $builder, ${position(source)}) }
           case _ => report.errorAndAbort("ScalaKernel assignments must target a device local; host mutation is not supported", source.pos)
+        case _ if markerArguments(source, barrierMethods).contains(List(Nil)) =>
+          '{ CudaDsl.barrier()(using $builder, ${position(source)}) }
         case _ => invocation(source) match
           case Some((selection, List(List(callback)))) if traversalForeachMethods.contains(selection.symbol) =>
             traversal(selection.qualifier, env, bindings, builder) { plan =>
@@ -589,11 +617,23 @@ private[frontend] object ScalaKernelMacro:
                 '{ CudaDsl.:=[t, Global](BufferElement[t, ReadWrite]($handle.name, $offset,
                     $handle.valueType, $location))($initial)(using $builder, ${position(source)}) }
               case _ => report.errorAndAbort("ScalaKernel writes require an output buffer", source.pos)
+          case Some((selection, List(List(index, value)))) if sharedWriteMethods.contains(selection.symbol) =>
+            val array = binding(selection.qualifier, env, bindings).getOrElse(
+              report.errorAndAbort("shared array writes must reference a declared shared array or immutable alias", selection.pos))
+            array.handle.tpe.widen.asType match
+              case '[SharedArray[t, Rank1]] =>
+                val handle = array.handle.asExprOf[SharedArray[t, Rank1]]
+                val offset = expression[Int](index, env, bindings)
+                val initial = expression[t](value, env, bindings)
+                '{ CudaDsl.:=[t, Shared](SharedElement($handle.name, Vector($offset),
+                    $handle.valueType, $location))($initial)(using $builder, ${position(source)}) }
+              case _ => report.errorAndAbort("shared array writes require shared storage", selection.pos)
           case _ => report.errorAndAbort("ScalaKernel supports assignments, if statements and direct until range loops with guards only; other loops and host effects are not supported yet", source.pos)
 
-    def statements(term: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[Unit] =
+    def statements(term: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder],
+        sharedRoot: Option[Expr[CudaDsl.BlockBuilder]] = None)(using Quotes): Expr[Unit] =
       def next(pending: List[Statement], result: Term, current: Environment)(using Quotes): Expr[Unit] = pending match
-        case Nil => statement(result, current, bindings, builder)
+        case Nil => statement(result, current, bindings, builder, sharedRoot)
         case (value: ValDef) :: tail =>
           if value.symbol.flags.is(Flags.Lazy) || value.rhs.isEmpty then
             report.errorAndAbort("ScalaKernel locals must be initialized and cannot be lazy", value.pos)
@@ -609,10 +649,32 @@ private[frontend] object ScalaKernelMacro:
             case AppliedType(_, _) => true
             case _ => false
           val declaredType = value.tpt.tpe.widen.dealias
+          val isShared = declaredType.baseType(sharedSymbol) match
+            case AppliedType(_, _) => true
+            case _ => false
           val isTupleFold = tupleValueType(declaredType) <:< TypeRepr.of[Tuple] && invocation(rhs).exists {
             (selection, _) => traversalFoldMethods.contains(selection.symbol)
           }
-          if tupleAlias.isDefined && !mutable then
+          if isShared then
+            if mutable then report.errorAndAbort("ScalaKernel shared array bindings must be immutable", value.pos)
+            binding(rhs, current, bindings) match
+              case Some(original) => next(tail, result, current.updated(value.symbol, original))
+              case None => markerArguments(rhs, sharedArrayMethods) match
+                case Some(List(List(size))) =>
+                  val root = sharedRoot.getOrElse(report.errorAndAbort(
+                    "ScalaKernel shared arrays must be declared outside branches and loops", value.pos))
+                  val count = unwrapped(size) match
+                    case Literal(IntConstant(count)) if count > 0 => count
+                    case _ => report.errorAndAbort("ScalaKernel shared array size must be a positive compile-time Int constant", size.pos)
+                  declaredType.asType match
+                    case '[ScalaKernel.DeviceSharedArray[t]] if primitive(TypeRepr.of[t]) =>
+                      '{
+                        val handle = CudaDsl.sharedArray[t](${Expr(count)})(using ${valueType[t]}, $root, ${position(value)})
+                        ${next(tail, result, current.updated(value.symbol, Binding('handle.asTerm)))}
+                      }
+                    case _ => report.errorAndAbort("ScalaKernel shared arrays support Int, Float, Double and Boolean elements only", value.pos)
+                case _ => report.errorAndAbort("ScalaKernel shared arrays require a direct sharedArray declaration or immutable alias", rhs.pos)
+          else if tupleAlias.isDefined && !mutable then
             next(tail, result, current.updated(value.symbol, tupleAlias.get))
           else if isTupleFold then
             if mutable then report.errorAndAbort("ScalaKernel tuple fold results must be immutable", value.pos)
@@ -639,16 +701,16 @@ private[frontend] object ScalaKernelMacro:
                   }
                 }
         case (term: Term) :: tail =>
-          '{ ${statement(term, current, bindings, builder)}; ${next(tail, result, current)} }
+          '{ ${statement(term, current, bindings, builder, sharedRoot)}; ${next(tail, result, current)} }
         case unsupported :: _ => report.errorAndAbort("ScalaKernel does not support local definitions or imports inside the body", unsupported.pos)
       unwrapped(term) match
         case Block(pending, result) => next(pending, result, env)
-        case other => statement(other, env, bindings, builder)
+        case other => statement(other, env, bindings, builder, sharedRoot)
 
     '{
       val kernelName = $name
       val kernelSignature = $signature
       CudaDsl.kernel(kernelName, kernelSignature) { bindings =>
-        (builder: CudaDsl.BlockBuilder) ?=> ${statements(sourceBody, Map.empty, 'bindings, 'builder)}
+        (builder: CudaDsl.BlockBuilder) ?=> ${statements(sourceBody, Map.empty, 'bindings, 'builder, Some('builder))}
       }
     }

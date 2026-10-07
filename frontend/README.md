@@ -40,7 +40,8 @@ typed signatures (including empty), `Int`/`Float`/`Double`/`Boolean` literals an
 parameters, arithmetic `+ - * /`, Int `% & | ^`, numeric comparisons,
 primitive `== !=`, unary `+`, Int unary `-`, Boolean `! && ||`, primitive
 `val` snapshots, initialized `var`, assignment/compound assignment, immutable
-buffer aliases, statement scopes, statement `if`/`else`, and pure expression
+buffer aliases, static 1-D shared arrays and aliases, explicit block `barrier()`,
+statement scopes, statement `if`/`else`, and pure expression
 `if`/`else`, direct unit-stride `start until end` range loops with lazy guards,
 and explicit `deviceRange` scalar/flat-tuple yield/map/flatMap/withFilter/foreach plans with ordered
 scalar and immutable flat-tuple `foldLeft` initializers, including named tuples. Short-circuit
@@ -62,9 +63,9 @@ evaluate once in normal call order; that configuration is outside the body.
 `ScalaKernelCompilerSuite` contains 29 actual compiler-program tests,
 including separate callers, negative admission, all intrinsic axes, supported
 operators, scopes and configuration evaluation order. `ScalaKernelIrSuite`
-contains twenty-nine tests: independent explicit-DSL branch/short-circuit/loop/guard/traversal/fold/flatMap/signature references
+contains thirty-two tests: independent explicit-DSL branch/short-circuit/loop/guard/traversal/fold/flatMap/signature/shared-memory references
 compare exact IR/effects/generated artifacts after aligning only source spans;
-all thirty fixtures validate and retain source maps and deterministic CUDA.
+all thirty-three fixtures validate and retain source maps and deterministic CUDA.
 `ScalaKernelTupleCompilerSuite` adds twelve real compiler-program tests for flat
 tuple admission, field types, tupled callbacks, nested plans and rejected effects.
 `TupleSignatureCompilerSuite` retains seventeen signature compiler-program tests.
@@ -74,7 +75,11 @@ typed tuple states, seed/result aliases, dependent fields and rejected effects.
 fields, mixed states, nesting, separate callers and rejected malformed/effectful inputs.
 Four named fixtures share independent primitive-DSL and CPU references with their
 unnamed counterparts, proving the field-label change preserves operations and order.
-`ScalaKernelCudaJniSuite` has thirty real GPU fixtures for Float scaling, mutable
+`ScalaKernelSharedCompilerSuite` adds twelve compiler/admission and host-marker
+tests for shared types, aliases, placements, sizes, purity and divergence warnings.
+Three independent shared-memory IR/GPU reference pairs cover cross-warp exchange,
+repeated reuse, Boolean/Double arrays and rejected mismatched block launches.
+`ScalaKernelCudaJniSuite` has thirty-three real GPU fixtures for Float scaling, mutable
 Int snapshots/shadowing, tightly sized short-circuit inputs, and Double/Boolean
 branches. They cover counts 0/1/63/64/65/193/257, 32 output tails, both stream
 paths, disabled execution, unchanged read-only inputs, and in-place updates.
@@ -94,6 +99,67 @@ distinct Int elements. Full buffers, tails and both stream paths are checked.
 FlatMap fixtures additionally verify guarded inner-bound loads, per-outer bounds,
 saved outer values across stores, reused inner aliases, three-level flattening,
 live terminal captures and global Boolean/Double fold state.
+
+### Shared Memory And Barrier Contract
+
+`sharedArray[T](elementCount)` returns a `DeviceSharedArray[T]` marker, distinct
+from the global `DeviceArray[T, Mode]` used by kernel arguments. It must directly
+initialize an immutable val. Elements are `Int`, `Float`, `Double` or `Boolean`;
+the size must be a positive compile-time Int constant in the typed tree. A normal
+device val, parameter or host capture is not a compile-time size.
+
+Declarations are admitted in the kernel body and unconditional lexical scopes,
+including the wrapper Scala emits for tupled parameters. They register static
+storage with the root kernel builder, while aliases remain lexically scoped.
+New declarations inside branches, loops, traversal callbacks or expressions are
+rejected, even when unused. Existing immutable aliases may be introduced inside
+statement branches/loops. Aliases share storage; they do not copy array elements.
+Actual marker symbols identify operations; similarly named host methods and
+effectful module receivers are rejected. Markers throw outside captured code.
+
+Reads and writes lower to existing `Load(SharedElement(...))` and `Store` IR.
+They retain the Shared address space and source spans through effects, validation,
+optimization and CUDA generation. Shared reads may occur in pure maps, guards and
+folds; writes and barriers cannot hide in expression callbacks, even unused plans.
+No buffer parameter, launch ABI, backend version, runtime or native change is needed.
+
+`barrier()` emits one `Barrier` at its exact statement position, producing
+`__syncthreads()`. There is no implicit entry/exit barrier or JVM synchronization.
+See the complete [Scala/CUDA exchange example](../README.md#shared-memory-and-barriers).
+For repeated cooperative reuse, synchronize after reads before overwriting:
+
+```scala
+for round <- deviceRange(0, rounds) do
+  val previous = tile((lane + 1) % 64)
+  barrier()
+  tile(lane) = previous + round
+  barrier()
+```
+
+Equivalent CUDA C++ after an initial tile fill and block barrier:
+
+```cpp
+const int start = 0, end = rounds;
+for (int round = start; round < end; ++round) {
+    const int previous = tile[(lane + 1) % 64];
+    __syncthreads();
+    tile[lane] = previous + round;
+    __syncthreads();
+}
+```
+
+Threads must participate uniformly in each block barrier; a lane-dependent branch
+or loop can be unsafe. Existing `BarrierMayDiverge` warnings retain source locations
+but are not a complete proof. The frontend does not initialize storage, insert
+barriers, prove bounds/capacity/race safety, or infer launch geometry from array size.
+Use an explicit `requiringBlock` contract when an algorithm requires a fixed shape.
+
+Deferred: quoted 2-D/3-D/dynamic shared arrays, local/constant arrays, warp barriers,
+fences, split arrival/wait, collective operations and phase helpers. Existing
+explicit-DSL APIs are unchanged. A future `block.phase { body }` would mean body
+followed by one block barrier, not mutual exclusion; it is not implemented here.
+Other synchronization functions require their own participation, scope and ordering
+contracts rather than automatically sharing that wrapper.
 
 ### Generic Tuple Signature Contract
 
@@ -719,6 +785,7 @@ test project. The published frontend depends on the stable core.
 
 ## References
 
+- [NVIDIA thread-block synchronization](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/cpp-language-extensions.html#thread-block-synchronization-functions)
 - [Scala named tuples](https://docs.scala-lang.org/scala3/reference/other-new-features/named-tuples.html)
 - [Scala experimental definitions](https://docs.scala-lang.org/scala3/reference/other-new-features/experimental-defs.html)
 - [Scala quoted code](https://docs.scala-lang.org/scala3/guides/macros/quotes.html)

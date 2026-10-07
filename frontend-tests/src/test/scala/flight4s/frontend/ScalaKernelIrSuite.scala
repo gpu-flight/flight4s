@@ -8,6 +8,7 @@ import flight4s.core.dsl.{CudaDsl, DslSourcePosition}
 import flight4s.core.dsl.CudaDsl.*
 import flight4s.core.ir.*
 import flight4s.core.types.CudaType
+import flight4s.core.launch.{Block as LaunchBlock}
 
 @experimental
 class ScalaKernelIrSuite extends FunSuite:
@@ -25,6 +26,9 @@ class ScalaKernelIrSuite extends FunSuite:
       case (left: LocalVariable[?], right: LocalVariable[?]) => left.copy(span = right.span)
       case (left: BufferElement[?, ?], right: BufferElement[?, ?]) =>
         left.copy(index = align(left.index, right.index), span = right.span)
+      case (left: SharedElement[?], right: SharedElement[?]) =>
+        assertEquals(left.indices.size, right.indices.size)
+        left.copy(indices = left.indices.zip(right.indices).map(align), span = right.span)
       case _ => fail(s"place shapes differ: $expected / $actual")
     result.asInstanceOf[Place[T, S, M]]
 
@@ -62,6 +66,7 @@ class ScalaKernelIrSuite extends FunSuite:
           until = align(left.until, right.until), body = alignBlock(left.body, right.body), span = right.span)
       case (left: ScopedBlock, right: ScopedBlock) =>
         left.copy(body = alignBlock(left.body, right.body), span = right.span)
+      case (left: Barrier, right: Barrier) => left.copy(span = right.span)
       case _ => fail(s"statement shapes differ: $left / $right")
     })
 
@@ -118,11 +123,88 @@ class ScalaKernelIrSuite extends FunSuite:
     })
 
   private def assertReference[Args <: Tuple](actual: Kernel[Args], reference: Kernel[Args]): Unit =
-    val aligned = reference.copy(ir = reference.ir.copy(signature = actual.signature, body = alignBlock(reference.body, actual.body)))
+    assertEquals(reference.sharedMemory.size, actual.sharedMemory.size)
+    val memory = reference.sharedMemory.zip(actual.sharedMemory).map { (left, right) =>
+      left.copy(span = right.span)(using left.rankWitness)
+    }
+    val aligned = reference.copy(ir = reference.ir.copy(signature = actual.signature,
+      sharedMemory = memory, body = alignBlock(reference.body, actual.body)))
     assertEquals(actual.ir, aligned.ir)
     assertEquals(EffectAnalysis.block(actual.body), EffectAnalysis.block(aligned.body))
     assertEquals(KernelValidator.validate(actual), KernelValidator.validate(aligned))
     assertEquals(CudaCodegen.generate(actual), CudaCodegen.generate(aligned))
+
+  test("shared exchange exactly matches explicit shared declarations stores loads barriers and effects"):
+    val actual = ScalaKernels.sharedExchange
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"), value[Int]("count"))) { p =>
+      val tile = sharedArray[Float](actual.sharedMemory.head.name, 64)
+      val count = declare(p._3)
+      scoped {
+        val lane = declare(threadIdx.x)
+        val i = declare(blockIdx.x * blockDim.x + lane)
+        tile(lane) := choose(i < count)(p._1(i).read)(literal(0.0f))
+        barrier()
+        when(i < count) { p._2(i) := tile((lane + literal(1)) % literal(64)).read }
+      }
+    }.requiringBlock(LaunchBlock.x(64))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    val effects = EffectAnalysis.block(actual.body)
+    assert(effects.readSpaces.contains(EffectMemorySpace.Shared))
+    assert(effects.writtenSpaces.contains(EffectMemorySpace.Shared))
+    assert(effects.hasBarrier)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("shared reuse exactly matches serial loops and explicit read-before-overwrite barriers"):
+    val actual = ScalaKernels.sharedReuse
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), output[Int]("target"),
+        value[Int]("count"), value[Int]("rounds"))) { p =>
+      val tile = sharedArray[Int](actual.sharedMemory.head.name, 64)
+      val lane = declare(threadIdx.x)
+      val i = declare(blockIdx.x * blockDim.x + lane)
+      tile(lane) := choose(i < p._3)(p._1(i).read)(literal(0))
+      barrier()
+      val start = declare(literal(0))
+      val end = declare(p._4)
+      gpuFor(names.dequeue(), start, end) { round =>
+        val previous = declare(tile((lane + literal(1)) % literal(64)).read)
+        barrier()
+        tile(lane) := previous + round
+        barrier()
+      }
+      when(i < p._3) { p._2(i) := tile(lane).read }
+    }.requiringBlock(LaunchBlock.x(64))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("Boolean and Double shared arrays preserve lazy reads and distinct storage"):
+    val actual = ScalaKernels.sharedFlags
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Double]("data"), output[Double]("target"),
+        value[Int]("count"), value[Boolean]("enabled"))) { p =>
+      val flags = sharedArray[Boolean](actual.sharedMemory(0).name, 64)
+      val values = sharedArray[Double](actual.sharedMemory(1).name, 64)
+      val count = declare(p._3)
+      val enabled = declare(p._4)
+      scoped {
+        val lane = declare(threadIdx.x)
+        val i = declare(blockIdx.x * blockDim.x + lane)
+        flags(lane) := enabled && i < count
+        values(lane) := choose(flags(lane).read)(p._1(i).read)(literal(0.0))
+        barrier()
+        val neighbor = declare((lane + literal(1)) % literal(64))
+        when(i < count) { p._2(i) := choose(flags(neighbor).read)(values(neighbor).read)(literal(-7.0)) }
+      }
+    }.requiringBlock(LaunchBlock.x(64))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
 
   test("quoted row loops exactly match ordered explicit DSL loops and bound snapshots"):
     val actual = ScalaKernels.rowSum
@@ -913,7 +995,8 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.tupleRows, () => ScalaKernels.tupleReuse, () => ScalaKernels.tupleNested,
       () => ScalaKernels.tupleFoldRows, () => ScalaKernels.tupleFoldReuse, () => ScalaKernels.tupleFoldNested,
       () => ScalaKernels.namedFoldRows, () => ScalaKernels.namedFoldReuse, () => ScalaKernels.namedFoldNested,
-      () => ScalaKernels.namedReuse)
+      () => ScalaKernels.namedReuse, () => ScalaKernels.sharedExchange,
+      () => ScalaKernels.sharedReuse, () => ScalaKernels.sharedFlags)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)
@@ -924,6 +1007,14 @@ class ScalaKernelIrSuite extends FunSuite:
       assert(KernelValidator.validate(actual).isValid)
       val generated = CudaCodegen.generate(actual).toOption.get
       val mapped = generated.sourceMap.entries.map(_.sourceSpan)
+      val shared = actual.sharedMemory
+      val bindings = locals.map(_.name) ++ indices ++ shared.map(_.name)
+      assertEquals(bindings.distinct.size, bindings.size)
+      shared.foreach { declaration =>
+        assertNotEquals(declaration.span, SourceSpan.Unknown)
+        assert(declaration.span.file.replace('\\', '/').endsWith("examples/ScalaKernels.scala"))
+        assert(mapped.contains(declaration.span), s"unmapped shared declaration: $declaration")
+      }
       statements.foreach { statement =>
         assertNotEquals(statement.span, SourceSpan.Unknown)
         assert(statement.span.file.replace('\\', '/').endsWith("examples/ScalaKernels.scala"))
