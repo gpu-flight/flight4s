@@ -40,7 +40,8 @@ typed signatures (including empty), `Int`/`Float`/`Double`/`Boolean` literals an
 parameters, arithmetic `+ - * /`, Int `% & | ^`, numeric comparisons,
 primitive `== !=`, unary `+`, Int unary `-`, Boolean `! && ||`, primitive
 `val` snapshots, initialized `var`, assignment/compound assignment, immutable
-buffer aliases, static 1-D shared arrays and aliases, explicit block `barrier()`,
+buffer aliases, static 1-D shared arrays and aliases, `sync.block()` and `sync.blockAfter`
+(with `barrier()` retained for compatibility),
 statement scopes, statement `if`/`else`, and pure expression
 `if`/`else`, direct unit-stride `start until end` range loops with lazy guards,
 and explicit `deviceRange` scalar/flat-tuple yield/map/flatMap/withFilter/foreach plans with ordered
@@ -63,9 +64,9 @@ evaluate once in normal call order; that configuration is outside the body.
 `ScalaKernelCompilerSuite` contains 29 actual compiler-program tests,
 including separate callers, negative admission, all intrinsic axes, supported
 operators, scopes and configuration evaluation order. `ScalaKernelIrSuite`
-contains thirty-two tests: independent explicit-DSL branch/short-circuit/loop/guard/traversal/fold/flatMap/signature/shared-memory references
+contains thirty-four tests: independent explicit-DSL branch/short-circuit/loop/guard/traversal/fold/flatMap/signature/shared-memory/phase references
 compare exact IR/effects/generated artifacts after aligning only source spans;
-all thirty-three fixtures validate and retain source maps and deterministic CUDA.
+all thirty-five fixtures validate and retain source maps and deterministic CUDA.
 `ScalaKernelTupleCompilerSuite` adds twelve real compiler-program tests for flat
 tuple admission, field types, tupled callbacks, nested plans and rejected effects.
 `TupleSignatureCompilerSuite` retains seventeen signature compiler-program tests.
@@ -79,7 +80,12 @@ unnamed counterparts, proving the field-label change preserves operations and or
 tests for shared types, aliases, placements, sizes, purity and divergence warnings.
 Three independent shared-memory IR/GPU reference pairs cover cross-warp exchange,
 repeated reuse, Boolean/Double arrays and rejected mismatched block launches.
-`ScalaKernelCudaJniSuite` has thirty-three real GPU fixtures for Float scaling, mutable
+`ScalaKernelPhaseCompilerSuite` adds sixteen admission/marker tests for exact
+body-then-barrier order, scopes, nested/empty phases, purity and divergence,
+including standalone sync imports, compatibility and the retired prototype spelling.
+Two phase fixtures share unchanged CPU assertions with their explicit-barrier
+counterparts and have separate independent IR/effect/generated-artifact references.
+`ScalaKernelCudaJniSuite` has thirty-five real GPU fixtures for Float scaling, mutable
 Int snapshots/shadowing, tightly sized short-circuit inputs, and Double/Boolean
 branches. They cover counts 0/1/63/64/65/193/257, 32 output tails, both stream
 paths, disabled execution, unchanged read-only inputs, and in-place updates.
@@ -123,17 +129,18 @@ optimization and CUDA generation. Shared reads may occur in pure maps, guards an
 folds; writes and barriers cannot hide in expression callbacks, even unused plans.
 No buffer parameter, launch ABI, backend version, runtime or native change is needed.
 
-`barrier()` emits one `Barrier` at its exact statement position, producing
+`sync.block()` emits one `Barrier` at its exact statement position, producing
 `__syncthreads()`. There is no implicit entry/exit barrier or JVM synchronization.
+The earlier `barrier()` spelling remains supported with the same semantics.
 See the complete [Scala/CUDA exchange example](../README.md#shared-memory-and-barriers).
 For repeated cooperative reuse, synchronize after reads before overwriting:
 
 ```scala
 for round <- deviceRange(0, rounds) do
   val previous = tile((lane + 1) % 64)
-  barrier()
+  sync.block()
   tile(lane) = previous + round
-  barrier()
+  sync.block()
 ```
 
 Equivalent CUDA C++ after an initial tile fill and block barrier:
@@ -155,11 +162,75 @@ barriers, prove bounds/capacity/race safety, or infer launch geometry from array
 Use an explicit `requiringBlock` contract when an algorithm requires a fixed shape.
 
 Deferred: quoted 2-D/3-D/dynamic shared arrays, local/constant arrays, warp barriers,
-fences, split arrival/wait, collective operations and phase helpers. Existing
-explicit-DSL APIs are unchanged. A future `block.phase { body }` would mean body
-followed by one block barrier, not mutual exclusion; it is not implemented here.
+fences, split arrival/wait and collective operations. Existing explicit-DSL APIs
+are unchanged. The quoted `sync.blockAfter { body }` helper below means body followed
+by one block barrier, not mutual exclusion.
 Other synchronization functions require their own participation, scope and ordering
 contracts rather than automatically sharing that wrapper.
+
+### Block Synchronization Contract
+
+`ScalaKernel.sync.blockAfter(body: => Unit)` is statement syntax for one lexical
+device scope followed by one block barrier. The macro translates the body once
+through the existing statement path, emits `ScopedBlock(body)`, then appends
+`Barrier` to the enclosing block. Each participating thread executes that body
+once per dynamic visit. Both emitted nodes retain the phase call's source span;
+body statements retain their own locations. There is no new IR or native API.
+See the [Scala/CUDA example](../README.md#block-synchronization).
+
+Naming: `sync.block()` synchronizes at that statement; `sync.blockAfter { ... }`
+executes the body first. `block` here names the CUDA thread scope, not the lexical
+braces. The unreleased `block.phase` prototype is replaced, not retained as an
+alias. Existing quoted `barrier()` and all explicit-DSL APIs remain unchanged.
+Planned `sync.warp(mask)` and `sync.warpAfter(mask) { ... }` are not implemented
+in this frontend yet; they require their own mask and participation contract.
+
+The by-name marker never evaluates its argument on the JVM, including when an
+out-of-capture call throws. Direct, qualified and renamed imported API symbols
+are supported. Host lookalikes and effectful module receivers remain rejected.
+The body uses the same bounded statement subset, not an arbitrary stored callback.
+Phase results cannot initialize device vals or enter pure map/guard/fold callbacks.
+Body locals do not escape; enclosing vars and shared aliases remain usable.
+Unconditional phase scopes retain root shared-declaration ownership. A phase
+inside a branch/loop cannot bypass the existing declaration restriction.
+
+Empty phases still emit a barrier. Nested phases each add their own trailing
+barrier, and explicit body barriers are preserved without deduplication. A branch
+inside the body does not guard the trailing barrier, but a branch around the
+whole phase does. Existing `BarrierMayDiverge` warnings report at the phase call;
+no warning is not a complete participation or race-safety proof.
+
+A phase has no entry barrier, lock, implicit initialization, return value or
+cleanup/finally semantics. Existing return/throw/try rejection is unchanged.
+It does not infer launch shape or guarantee safety within the body. For example,
+after an initial tile fill and synchronization, reuse still needs a read barrier:
+
+```scala
+for round <- deviceRange(0, rounds) do
+  sync.blockAfter {
+    val previous = tile((lane + 1) % 64)
+    sync.block()
+    tile(lane) = previous + round
+  }
+```
+
+Equivalent CUDA C++ (bounds and names simplified):
+
+```cpp
+for (int round = 0; round < rounds; ++round) {
+    {
+        const int previous = tile[(lane + 1) % 64];
+        __syncthreads();
+        tile[lane] = previous + round;
+    }
+    __syncthreads();
+}
+```
+
+The explicit inner barrier finishes all reads before overwrite; the trailing
+phase barrier finishes all writes before the next round. Do not automatically
+reuse this contract for warp masks, memory fences or split arrival/wait. Those
+remain separate frontend slices, as do dynamic/multidimensional shared arrays.
 
 ### Generic Tuple Signature Contract
 

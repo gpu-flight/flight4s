@@ -206,6 +206,55 @@ class ScalaKernelIrSuite extends FunSuite:
     assertReference(actual, reference)
     assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
 
+  test("phase exchange exactly matches scoped explicit DSL statements and one trailing barrier"):
+    val actual = ScalaKernels.phaseExchange
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"), value[Int]("count"))) { p =>
+      val tile = sharedArray[Float](actual.sharedMemory.head.name, 64)
+      val count = declare(p._3)
+      scoped {
+        val lane = declare(threadIdx.x)
+        val i = declare(blockIdx.x * blockDim.x + lane)
+        scoped {
+          val item = declare(choose(i < count)(p._1(i).read)(literal(0.0f)))
+          tile(lane) := item
+        }
+        barrier()
+        when(i < count) { p._2(i) := tile((lane + literal(1)) % literal(64)).read }
+      }
+    }.requiringBlock(LaunchBlock.x(64))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("repeated phases keep explicit read-before-overwrite barriers and one trailing barrier per round"):
+    val actual = ScalaKernels.phaseReuse
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), output[Int]("target"),
+        value[Int]("count"), value[Int]("rounds"))) { p =>
+      val tile = sharedArray[Int](actual.sharedMemory.head.name, 64)
+      val lane = declare(threadIdx.x)
+      val i = declare(blockIdx.x * blockDim.x + lane)
+      scoped { tile(lane) := choose(i < p._3)(p._1(i).read)(literal(0)) }
+      barrier()
+      val start = declare(literal(0))
+      val end = declare(p._4)
+      gpuFor(names.dequeue(), start, end) { round =>
+        scoped {
+          val previous = declare(tile((lane + literal(1)) % literal(64)).read)
+          barrier()
+          tile(lane) := previous + round
+        }
+        barrier()
+      }
+      when(i < p._3) { p._2(i) := tile(lane).read }
+    }.requiringBlock(LaunchBlock.x(64))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
   test("quoted row loops exactly match ordered explicit DSL loops and bound snapshots"):
     val actual = ScalaKernels.rowSum
     val names = namesOf(actual)
@@ -996,7 +1045,8 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.tupleFoldRows, () => ScalaKernels.tupleFoldReuse, () => ScalaKernels.tupleFoldNested,
       () => ScalaKernels.namedFoldRows, () => ScalaKernels.namedFoldReuse, () => ScalaKernels.namedFoldNested,
       () => ScalaKernels.namedReuse, () => ScalaKernels.sharedExchange,
-      () => ScalaKernels.sharedReuse, () => ScalaKernels.sharedFlags)
+      () => ScalaKernels.sharedReuse, () => ScalaKernels.sharedFlags,
+      () => ScalaKernels.phaseExchange, () => ScalaKernels.phaseReuse)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)

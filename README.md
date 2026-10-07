@@ -64,7 +64,7 @@ def exchange = kernel("exchange", params(input[Float]("data"), output[Float]("ta
   val lane = threadIdx.x
   val i = blockIdx.x * blockDim.x + lane
   tile(lane) = if i < count then data(i) else 0.0f
-  barrier()
+  sync.block()
   if i < count then target(i) = tile((lane + 1) % 64)
 }.requiringBlock(LaunchBlock.x(64))
 ```
@@ -94,6 +94,38 @@ grid-wide synchronization point. Reusing storage after cooperative reads may
 require another barrier before overwriting it. Existing divergence warnings
 are diagnostics, not a proof of race freedom. See the
 [shared-memory contract](frontend/README.md#shared-memory-and-barrier-contract).
+
+### Block Synchronization
+
+Group a cooperative step with its trailing block barrier:
+
+```scala
+sync.blockAfter {
+  val item = if i < count then data(i) else 0.0f
+  tile(lane) = item
+}
+if i < count then target(i) = tile((lane + 1) % 64)
+```
+
+Equivalent CUDA C++ with simplified names:
+
+```cpp
+{
+    const float item = i < count ? data[i] : 0.0f;
+    tile[lane] = item;
+}
+__syncthreads();
+if (i < count) target[i] = tile[(lane + 1) % 64];
+```
+
+`sync.block()` synchronizes here; `sync.blockAfter { ... }` executes a scoped
+body and then synchronizes. The `sync` namespace distinguishes a CUDA thread
+block from a lexical code block. Existing `barrier()` calls remain supported.
+There is no entry barrier,
+lock or automatic race prevention. Phase locals stay inside the body; the call
+returns `Unit`. All participating block threads must reach its trailing barrier.
+Putting the whole phase inside a lane-dependent `if` is still unsafe. See the
+[synchronization contract](frontend/README.md#block-synchronization-contract), including storage reuse.
 
 ### Tuple Signatures
 

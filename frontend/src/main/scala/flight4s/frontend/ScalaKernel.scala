@@ -31,6 +31,13 @@ object ScalaKernel:
   /** Block-wide execution and memory barrier; not a lock or a grid-wide barrier. */
   def barrier(): Unit = markerOnly()
 
+  object sync:
+    /** Block-wide execution and memory barrier; equivalent to barrier(). */
+    def block(): Unit = markerOnly()
+
+    /** Executes a scoped device body, then one block barrier; no entry barrier or lock. */
+    def blockAfter(body: => Unit): Unit = markerOnly()
+
   /** Lazy serial device traversal syntax, not a materialized Scala collection. */
   final class DeviceTraversal[T] private[frontend] ():
     def map[U](transform: T => U): DeviceTraversal[U] = markerOnly()
