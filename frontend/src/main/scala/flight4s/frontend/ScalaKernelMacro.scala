@@ -88,13 +88,21 @@ private[frontend] object ScalaKernelMacro:
     val sharedArrayMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("sharedArray")
     val barrierMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("barrier")
     val markerModule = Symbol.requiredModule("flight4s.frontend.ScalaKernel")
+    val phaseModule = Symbol.requiredModule("flight4s.frontend.ScalaKernel.block")
+    val phaseMethods = TypeRepr.of[ScalaKernel.block.type].typeSymbol.methodMember("phase")
+
+    def phaseReceiver(term: Term): Boolean = unwrapped(term) match
+      case reference: Ident => reference.symbol == phaseModule
+      case selection: Select => selection.symbol == phaseModule && selection.qualifier.symbol == markerModule
+      case _ => false
 
     // Imported markers are Idents; qualified calls must not erase an effectful receiver.
-    def markerArguments(term: Term, methods: List[Symbol]): Option[List[List[Term]]] = unwrapped(term) match
-      case Apply(function, arguments) => markerArguments(function, methods).map(_ :+ arguments)
-      case TypeApply(function, _) => markerArguments(function, methods)
+    def markerArguments(term: Term, methods: List[Symbol],
+        receiver: Term => Boolean = _.symbol == markerModule): Option[List[List[Term]]] = unwrapped(term) match
+      case Apply(function, arguments) => markerArguments(function, methods, receiver).map(_ :+ arguments)
+      case TypeApply(function, _) => markerArguments(function, methods, receiver)
       case reference: Ident if methods.contains(reference.symbol) => Some(Nil)
-      case selection: Select if methods.contains(selection.symbol) && selection.qualifier.symbol == markerModule => Some(Nil)
+      case selection: Select if methods.contains(selection.symbol) && receiver(selection.qualifier) => Some(Nil)
       case _ => None
 
     val rangeForeachMethods = TypeRepr.of[scala.collection.immutable.Range].typeSymbol.methodMember("foreach")
@@ -527,6 +535,7 @@ private[frontend] object ScalaKernelMacro:
         sharedRoot: Option[Expr[CudaDsl.BlockBuilder]] = None)(using Quotes): Expr[Unit] =
       val source = unwrapped(term)
       val location = span(source.pos)
+      val phase = markerArguments(source, phaseMethods, phaseReceiver).collect { case List(List(body)) => body }
       source match
         case Literal(UnitConstant()) => '{ () }
         case branch: If =>
@@ -557,6 +566,13 @@ private[frontend] object ScalaKernelMacro:
           case _ => report.errorAndAbort("ScalaKernel assignments must target a device local; host mutation is not supported", source.pos)
         case _ if markerArguments(source, barrierMethods).contains(List(Nil)) =>
           '{ CudaDsl.barrier()(using $builder, ${position(source)}) }
+        case _ if phase.isDefined =>
+          val nestedBody: Expr[CudaDsl.BlockBuilder ?=> Unit] = '{ (nested: CudaDsl.BlockBuilder) ?=>
+            ${statements(phase.get, env, bindings, 'nested, sharedRoot)} }
+          '{
+            CudaDsl.scoped($nestedBody)(using $builder, ${position(source)})
+            CudaDsl.barrier()(using $builder, ${position(source)})
+          }
         case _ => invocation(source) match
           case Some((selection, List(List(callback)))) if traversalForeachMethods.contains(selection.symbol) =>
             traversal(selection.qualifier, env, bindings, builder) { plan =>

@@ -95,6 +95,35 @@ require another barrier before overwriting it. Existing divergence warnings
 are diagnostics, not a proof of race freedom. See the
 [shared-memory contract](frontend/README.md#shared-memory-and-barrier-contract).
 
+### Block Phases
+
+Group a cooperative step with its trailing block barrier:
+
+```scala
+block.phase {
+  val item = if i < count then data(i) else 0.0f
+  tile(lane) = item
+}
+if i < count then target(i) = tile((lane + 1) % 64)
+```
+
+Equivalent CUDA C++ with simplified names:
+
+```cpp
+{
+    const float item = i < count ? data[i] : 0.0f;
+    tile[lane] = item;
+}
+__syncthreads();
+if (i < count) target[i] = tile[(lane + 1) % 64];
+```
+
+This replaces a scoped body followed by `barrier()`. There is no entry barrier,
+lock or automatic race prevention. Phase locals stay inside the body; the call
+returns `Unit`. All participating block threads must reach its trailing barrier.
+Putting the whole phase inside a lane-dependent `if` is still unsafe. See the
+[phase contract](frontend/README.md#block-phase-contract), including storage reuse.
+
 ### Tuple Signatures
 
 For more than six parameters, pass one tuple to `params`. Names in the body remain

@@ -809,7 +809,12 @@ class ScalaKernelCudaJniSuite extends FunSuite:
     }
 
   test("shared Float exchange crosses warp boundaries with partial blocks and guarded tight inputs"):
-    val definition = ScalaKernels.sharedExchange
+    checkSharedExchange(ScalaKernels.sharedExchange)
+
+  test("block phase publishes Float tiles before cross-warp reads on both GPU stream paths"):
+    checkSharedExchange(ScalaKernels.phaseExchange)
+
+  private def checkSharedExchange(definition: Kernel[(DeviceBuffer[Float], DeviceBuffer[Float], Int)]): Unit =
     withKernel(definition) { (context, function) =>
       val stream = context.createStream().toOption.get
       try
@@ -836,7 +841,12 @@ class ScalaKernelCudaJniSuite extends FunSuite:
     }
 
   test("shared Int reuse preserves per-round snapshots before overwrite on both GPU stream paths"):
-    val definition = ScalaKernels.sharedReuse
+    checkSharedReuse(ScalaKernels.sharedReuse)
+
+  test("repeated block phases retain Int snapshots before shared overwrite with empty and partial work"):
+    checkSharedReuse(ScalaKernels.phaseReuse)
+
+  private def checkSharedReuse(definition: Kernel[(DeviceBuffer[Int], DeviceBuffer[Int], Int, Int)]): Unit =
     withKernel(definition) { (context, function) =>
       val stream = context.createStream().toOption.get
       try

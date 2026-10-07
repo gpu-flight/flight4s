@@ -6,6 +6,33 @@ import flight4s.core.launch.{Block as LaunchBlock}
 
 @experimental
 object ScalaKernels:
+  def phaseExchange = kernel("quotedPhaseExchange", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("count"))) { (data, target, count) =>
+    val tile = sharedArray[Float](64)
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    block.phase {
+      val item = if i < count then data(i) else 0.0f
+      tile(lane) = item
+    }
+    if i < count then target(i) = tile((lane + 1) % 64)
+  }.requiringBlock(LaunchBlock.x(64))
+
+  def phaseReuse = kernel("quotedPhaseReuse", params(input[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("rounds"))) { p =>
+    val tile = sharedArray[Int](64)
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    block.phase { tile(lane) = if i < p._3 then p._1(i) else 0 }
+    for round <- deviceRange(0, p._4) do
+      block.phase {
+        val previous = tile((lane + 1) % 64)
+        barrier()
+        tile(lane) = previous + round
+      }
+    if i < p._3 then p._2(i) = tile(lane)
+  }.requiringBlock(LaunchBlock.x(64))
+
   def sharedExchange = kernel("quotedSharedExchange", params(input[Float]("data"), output[Float]("target"),
       value[Int]("count"))) { (data, target, count) =>
     val tile = sharedArray[Float](64)
