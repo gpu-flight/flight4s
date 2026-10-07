@@ -43,7 +43,7 @@ primitive `== !=`, unary `+`, Int unary `-`, Boolean `! && ||`, primitive
 buffer aliases, statement scopes, statement `if`/`else`, and pure expression
 `if`/`else`, direct unit-stride `start until end` range loops with lazy guards,
 and explicit `deviceRange` scalar/flat-tuple yield/map/flatMap/withFilter/foreach plans with ordered
-scalar and immutable flat-tuple `foldLeft` initializers. Short-circuit
+scalar and immutable flat-tuple `foldLeft` initializers, including named tuples. Short-circuit
 booleans lower to lazy `Conditional` IR. An input's
 `update` requires read-write evidence, and lowering independently requires an
 output parameter. Existing validation and CUDA generation remain authoritative.
@@ -51,7 +51,7 @@ output parameter. Existing validation and CUDA generation remain authoritative.
 Deferred/rejected: other loops, eager range `.filter`, `to`/`by`, stored range values,
 eager Range `yield`, `match`/`try`/return, lazy/uninitialized bindings,
 local definitions, general expression blocks, arbitrary tuple/product local state, source-level
-embedded folds, named product fold state, case-class traversals and collectives, captured host state/values/helper calls,
+embedded folds, case-class fold state/traversals and collectives, captured host state/values/helper calls,
 numeric conversions, shifts, floating remainder, dynamic floating unary minus,
 vector/low-precision source types, signature inference, and Unit-style annotated
 methods. Dynamic floating negation is not approximated by `0 - x`, which would
@@ -62,15 +62,19 @@ evaluate once in normal call order; that configuration is outside the body.
 `ScalaKernelCompilerSuite` contains 29 actual compiler-program tests,
 including separate callers, negative admission, all intrinsic axes, supported
 operators, scopes and configuration evaluation order. `ScalaKernelIrSuite`
-contains twenty-five tests: independent explicit-DSL branch/short-circuit/loop/guard/traversal/fold/flatMap/signature references
+contains twenty-nine tests: independent explicit-DSL branch/short-circuit/loop/guard/traversal/fold/flatMap/signature references
 compare exact IR/effects/generated artifacts after aligning only source spans;
-all twenty-six fixtures validate and retain source maps and deterministic CUDA.
+all thirty fixtures validate and retain source maps and deterministic CUDA.
 `ScalaKernelTupleCompilerSuite` adds twelve real compiler-program tests for flat
 tuple admission, field types, tupled callbacks, nested plans and rejected effects.
 `TupleSignatureCompilerSuite` retains seventeen signature compiler-program tests.
 `ScalaKernelTupleFoldCompilerSuite` adds thirteen real compiler-program tests for
 typed tuple states, seed/result aliases, dependent fields and rejected effects.
-`ScalaKernelCudaJniSuite` has twenty-six real GPU fixtures for Float scaling, mutable
+`ScalaKernelNamedTupleCompilerSuite` adds fourteen compiler-program tests for named
+fields, mixed states, nesting, separate callers and rejected malformed/effectful inputs.
+Four named fixtures share independent primitive-DSL and CPU references with their
+unnamed counterparts, proving the field-label change preserves operations and order.
+`ScalaKernelCudaJniSuite` has thirty real GPU fixtures for Float scaling, mutable
 Int snapshots/shadowing, tightly sized short-circuit inputs, and Double/Boolean
 branches. They cover counts 0/1/63/64/65/193/257, 32 output tails, both stream
 paths, disabled execution, unchanged read-only inputs, and in-place updates.
@@ -359,7 +363,7 @@ Empty/reversed/rejected inner plans perform no updates. Reusing a plan emits a
 fresh nested traversal and independent fold state without retaining host lambdas,
 objects or intermediate collections. No parallel reassociation is introduced.
 
-Deferred: case-class elements, named product states, generator aliases/patterns, conditional
+Deferred: case-class elements/states, generator aliases/patterns, conditional
 plan factories, stored/helper callbacks, captures, expression blocks and eager
 Scala collection roots. The explicit DSL and annotation semantics are unchanged.
 The generic tuple-signature checker issue found during fixture development is
@@ -470,10 +474,62 @@ even when the result is unused or the range is empty.
 
 No tuple object, aggregate IR, CUDA struct or ABI type is introduced. Existing
 scalar folds retain their original IR. Mutable tuple results/aliases, arbitrary
-tuple locals, named/nested products, tuples above 22 fields, conditional tuple
+tuple locals, case-class/nested products, tuples above 22 fields, conditional tuple
 constructors, pattern bindings, helper/stored callbacks, host captures, effects,
 conversions and embedded fold expressions remain rejected. Projection-only
 immutable callback aliases follow the existing tuple traversal rule.
+
+### Named Tuple Contract
+
+The quoted frontend also accepts flat Scala 3 named tuples:
+
+```scala
+val items = deviceRange(0, count).map(i => (index = i, value = data(i)))
+val stats = items.foldLeft((sum = 0.0f, count = 0)) { (state, item) =>
+  (sum = state.sum + item.value, count = state.count + 1)
+}
+target(0) = stats.sum
+```
+
+Equivalent CUDA structure, with readable names in place of generated identifiers:
+
+```cpp
+float sum = 0.0f;
+int visits = 0;
+for (int i = 0; i < count; ++i) {
+    const int index = i;
+    const float value = data[i];
+    const float nextSum = sum + value;
+    const int nextVisits = visits + 1;
+    sum = nextSum;
+    visits = nextVisits;
+}
+target[0] = sum;
+```
+
+The 1..22-field primitive tuple rules apply unchanged to named traversal elements
+and immutable fold states. Names and field order remain Scala type information;
+they do not name CUDA locals. Type aliases such as `type Stats = (sum: Float,
+count: Int)` may be declared outside the kernel body. Named field selections and
+literal `state(0)` projections are supported. Identity steps/maps, immutable
+aliases, projection-only callback vals, earlier-result seeds, ordered guards,
+mixed named/unnamed maps and nested flatMap all retain the existing snapshot rules.
+
+The macro recognizes the actual standard-library `NamedTuple` type, `build` and
+`apply` symbols. It translates their inline argument proxies, not stale call-trace
+symbols, so nested callbacks retain lexical binding identity. Every name must be
+a distinct literal string and the label count must equal the value count, even
+for manually encoded `NamedTuple` aliases. No host tuple is constructed at staging
+time and no new IR, CUDA aggregate, launch ABI or compiler option is introduced.
+
+General named-tuple locals, mutable states, nested fields, dynamic indices,
+whole-tuple conditional expressions, `toTuple`/other tuple transformations and
+pattern bindings remain outside this slice. Construct a supported mapped tuple
+explicitly when changing shape. Case-class constructors are not admitted: the
+pinned macro setup exposes symbol trees without constructor bodies, so this
+frontend cannot safely erase their potential effects. The explicit DSL's
+`ProductFoldState` still uses its existing host-staging contract. A separately
+validated case-class schema is future work, not an implicit fallback.
 
 ## Kernel Annotation Prototype
 
@@ -663,6 +719,7 @@ test project. The published frontend depends on the stable core.
 
 ## References
 
+- [Scala named tuples](https://docs.scala-lang.org/scala3/reference/other-new-features/named-tuples.html)
 - [Scala experimental definitions](https://docs.scala-lang.org/scala3/reference/other-new-features/experimental-defs.html)
 - [Scala quoted code](https://docs.scala-lang.org/scala3/guides/macros/quotes.html)
 - [Scala macro reflection](https://docs.scala-lang.org/scala3/guides/macros/reflection.html)

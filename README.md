@@ -271,7 +271,7 @@ current device reads; earlier results remain saved. All four primitive accumulat
 types are supported, including a state type different from the element type.
 No implicit numeric conversion or parallel reassociation is introduced.
 
-Embedded folds, assignment RHS folds, named product accumulators, helper callbacks,
+Embedded folds, assignment RHS folds, case-class accumulators, helper callbacks,
 and expression blocks remain rejected. Bind a fold to a local first, then use that
 result in other expressions. See the [fold contract](frontend/README.md#ordered-scalar-fold-contract).
 
@@ -306,8 +306,43 @@ Empty traversals return the seed; each later fold copies its seed into independe
 state. Results support typed projections, immutable aliases and reuse as seeds or
 traversal values. `Tuple1`..`Tuple22` may mix `Int`, `Float`, `Double` and `Boolean`.
 Tuple fold results must be `val`s; general tuple construction, mutable tuple locals,
-nested tuples and named products remain deferred. See the
+nested tuples and case-class products remain deferred. See the
 [tuple fold contract](frontend/README.md#tuple-fold-contract).
+
+### Named Tuple Fields
+
+Use Scala 3 named tuples when field names make a traversal or fold easier to read:
+
+```scala
+val values = deviceRange(0, count).map(i => (index = i, value = data(i)))
+val stats = values.foldLeft((sum = 0.0f, count = 0)) { (state, item) =>
+  (sum = state.sum + item.value, count = state.count + 1)
+}
+target(0) = stats.sum
+```
+
+Equivalent CUDA structure (names simplified):
+
+```cpp
+float sum = 0.0f;
+int visits = 0;
+for (int i = 0; i < count; ++i) {
+    const int index = i;
+    const float value = data[i];
+    const float nextSum = sum + value;
+    const int nextVisits = visits + 1;
+    sum = nextSum;
+    visits = nextVisits;
+}
+target[0] = sum;
+```
+
+Names are compile-time field labels, not CUDA variable names or a new struct ABI.
+Flat named tuples support the same 1..22 primitive fields, snapshots, aliases,
+ordered guards, nested traversals and immutable fold results as ordinary tuples.
+Case classes remain outside this quoted subset: constructor effects require a
+separate admission contract. The explicit DSL's `ProductFoldState` is unchanged.
+See the [named tuple contract](frontend/README.md#named-tuple-contract).
 
 ### Nested Scalar Traversals
 

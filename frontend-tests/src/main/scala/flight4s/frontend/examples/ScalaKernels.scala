@@ -380,3 +380,69 @@ object ScalaKernels:
         total = result._1 + (if result._2 then 0.25 else 0.5)
       p._2(lane) = total
   }
+
+  def namedFoldRows = kernel("quotedNamedFoldRows", params(input[Float]("data"), output[Float]("target"),
+      output[Int]("visits"), value[Int]("rows"), value[Int]("columns"), value[Float]("seed"))) { p =>
+    val row = blockIdx.x * blockDim.x + threadIdx.x
+    if row < p._4 then
+      val items = for column <- deviceRange(-1, p._5 + 1) if column >= 0 if column < p._5
+        yield (index = column, value = p._1(row * p._5 + column))
+      val result = items.withFilter(item => item.index % 2 == 0 && item.value != 0.0f)
+        .foldLeft((sum = p._6, count = 0))((state, item) =>
+          (sum = state.sum - item.value - (if state.count % 2 == 0 then 0.5f else 0.0f), count = state.count + 1))
+      p._2(row) = result.sum
+      p._3(row) = result.count
+  }
+
+  def namedFoldReuse = kernel("quotedNamedFoldReuse", params(inOut[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("from"), value[Int]("until"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var begin = p._4
+      var end = p._5
+      val values = deviceRange(begin, end).withFilter(i => i % 2 == 0).map(i => p._1(lane) + i)
+      begin = 0
+      end = 0
+      val first = values.foldLeft((left = p._1(lane), right = p._1(lane) + 1))((state, item) => (left = state.right, right = state.left - item))
+      val saved = first
+      p._1(lane) = saved.left
+      val second = values.foldLeft(saved)((state, item) => (left = state.right + item, right = state.left))
+      p._1(lane) = first.left + second.right
+      p._2(lane) = saved.right + second.left
+  }
+
+  def namedFoldNested = kernel("quotedNamedFoldNested", params(input[Double]("data"), output[Double]("target"),
+      value[Int]("count"), value[Int]("rounds"), value[Boolean]("enabled"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var total = p._1(lane)
+      for round <- 0 until p._4 do
+        val items = deviceRange(0, round).map(i => (index = i, value = p._1(lane), enabled = p._5))
+          .flatMap(item => deviceRange(0, item.index).map(j => (index = j, value = item.value, enabled = item.enabled)))
+          .withFilter(item => item.enabled)
+        val result = items.foldLeft((sum = total, flag = false))((state, item) =>
+          (sum = if state.flag then state.sum / 2.0 - item.value else state.sum - item.value, flag = (state.sum > 0.0) != state.flag))
+        total = result.sum + (if result.flag then 0.25 else 0.5)
+      p._2(lane) = total
+  }
+
+  def namedReuse = kernel("quotedNamedReuse", params(inOut[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("from"), value[Int]("until"))) { p =>
+    val lane = blockIdx.x * blockDim.x + threadIdx.x
+    if lane < p._3 then
+      var begin = p._4
+      var end = p._5
+      var total = 0
+      val items = deviceRange(begin, end).map(i => (next = p._1(lane) + i, before = p._1(lane), index = i))
+        .withFilter(item => item.next >= 0)
+      val alias = items
+      begin = 0
+      end = 0
+      alias.foreach { item =>
+        val saved = item
+        p._1(lane) = saved.next + 1
+        total += saved.before + saved.before + saved.index
+      }
+      val result = items.foldLeft(total)((sum, item) => sum - item.next - item.before)
+      p._2(lane) = result
+  }

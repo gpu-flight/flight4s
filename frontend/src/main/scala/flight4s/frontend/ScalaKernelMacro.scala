@@ -28,6 +28,11 @@ private[frontend] object ScalaKernelMacro:
       Vector(TypeRepr.of[Int], TypeRepr.of[Float], TypeRepr.of[Double], TypeRepr.of[Boolean])
         .exists(_ =:= tpe.widen.dealias)
 
+    val namedTupleSymbol = TypeRepr.of[(field: Int)].typeSymbol
+    def tupleValueType(tpe: TypeRepr): TypeRepr = tpe.widen.dealias match
+      case AppliedType(constructor, List(_, values)) if constructor.typeSymbol == namedTupleSymbol => values
+      case other => other
+
     def tupleElements(tpe: TypeRepr): List[TypeRepr] = tpe.dealias.asType match
       case '[EmptyTuple] => Nil
       case '[head *: tail] => TypeRepr.of[head] :: tupleElements(TypeRepr.of[tail])
@@ -93,6 +98,9 @@ private[frontend] object ScalaKernelMacro:
     val traversalFoldMethods = traversalSymbol.methodMember("foldLeft")
     val tupleConstructors = (1 to 22).flatMap(arity =>
       Symbol.requiredModule(s"scala.Tuple$arity").methodMember("apply")).toSet
+    val namedTupleModule = Symbol.requiredModule("scala.NamedTuple")
+    val namedTupleBuildMethods = namedTupleModule.methodMember("build")
+    val namedTupleApplyMethods = namedTupleModule.methodMember("apply")
     val intrinsicSymbols = List(
       TypeRepr.of[ScalaKernel.threadIdx.type], TypeRepr.of[ScalaKernel.blockIdx.type],
       TypeRepr.of[ScalaKernel.blockDim.type], TypeRepr.of[ScalaKernel.gridDim.type])
@@ -108,6 +116,16 @@ private[frontend] object ScalaKernelMacro:
 
     def binding(term: Term, env: Environment, bindings: Expr[Params])(using Quotes): Option[Binding] = unwrapped(term) match
       case reference: Ident => env.get(reference.symbol).collect { case bound: Binding => bound }
+      // Named fields expand to the standard NamedTuple.apply with a literal index.
+      case Inlined(Some(call: Term), List(_: ValDef, receiver: ValDef), _) if invocation(call).exists { (selection, _) =>
+          namedTupleApplyMethods.contains(selection.symbol) && selection.qualifier.symbol == namedTupleModule
+        } => invocation(call) match
+        case Some((_, List(List(_), List(Literal(IntConstant(index)))))) => receiver.rhs.map(unwrapped) match
+          // Inline call traces keep old symbols; the proxy RHS retains the current lexical owner.
+          case Some(TypeApply(Select(reference: Ident, "$asInstanceOf$"), List(_))) =>
+            env.get(reference.symbol).collect { case tuple: TupleBinding => tuple }.flatMap(_.fields.lift(index))
+          case _ => None
+        case _ => None
       case selection @ Select(reference: Ident, name) if name.matches("_[1-9][0-9]*") &&
           selection.symbol.owner.fullName.startsWith("scala.Tuple") &&
           env.get(reference.symbol).exists(_.isInstanceOf[TupleBinding]) => env.get(reference.symbol) match
@@ -144,8 +162,15 @@ private[frontend] object ScalaKernelMacro:
 
     def elementTypes(tpe: TypeRepr, source: Term): List[TypeRepr] =
       if primitive(tpe) then List(tpe)
-      else if tpe <:< TypeRepr.of[Tuple] then
-        val fields = tupleElements(tpe)
+      else if tupleValueType(tpe) <:< TypeRepr.of[Tuple] then
+        val fields = tupleElements(tupleValueType(tpe))
+        tpe.widen.dealias match
+          case AppliedType(constructor, List(names, _)) if constructor.typeSymbol == namedTupleSymbol =>
+            val nameTypes = tupleElements(names)
+            val labels = nameTypes.collect { case ConstantType(StringConstant(name)) => name }
+            if labels.size != nameTypes.size || labels.size != fields.size || labels.distinct.size != labels.size then
+              report.errorAndAbort("ScalaKernel named tuple labels must be unique literal strings matching the field count", source.pos)
+          case _ => ()
         if fields.nonEmpty && fields.size <= 22 && fields.forall(primitive) then fields
         else report.errorAndAbort("ScalaKernel traversal callbacks require pure primitive results or flat nonempty primitive tuples of at most 22 fields", source.pos)
       else report.errorAndAbort("ScalaKernel traversal callbacks require pure primitive results or flat nonempty primitive tuples of at most 22 fields", source.pos)
@@ -193,12 +218,21 @@ private[frontend] object ScalaKernelMacro:
           case Some(tuple) => types.zip(tuple.fields).map { (field, bound) => field.asType match
             case '[t] => field -> readBinding[t](bound, span(source.pos)).asTerm
           }
-          case None => invocation(translated) match
-            case Some((selection, List(arguments))) if tupleConstructors.contains(selection.symbol) && arguments.size == types.size =>
-              types.zip(arguments).map { (field, argument) => field.asType match
-                case '[t] => field -> expression[t](argument, current, bindings).asTerm
-              }
-            case _ => report.errorAndAbort("ScalaKernel tuple values require a direct standard tuple constructor or an existing tuple binding", source.pos)
+          case None =>
+            // Inspect only the known library build call, never arbitrary inline expansion bodies.
+            val constructor = unwrapped(translated) match
+              case Inlined(Some(call: Term), List(_: ValDef, _: ValDef, values: ValDef), _) => invocation(call) match
+                case Some((selection, List(Nil, List(_)))) if
+                    namedTupleBuildMethods.contains(selection.symbol) && selection.qualifier.symbol == namedTupleModule =>
+                  values.rhs.getOrElse(translated)
+                case _ => translated
+              case _ => translated
+            invocation(constructor) match
+              case Some((selection, List(arguments))) if tupleConstructors.contains(selection.symbol) && arguments.size == types.size =>
+                types.zip(arguments).map { (field, argument) => field.asType match
+                  case '[t] => field -> expression[t](argument, current, bindings).asTerm
+                }
+              case _ => report.errorAndAbort("ScalaKernel tuple values require a direct standard tuple constructor or an existing tuple binding", source.pos)
 
     def snapshotElement(term: Term, tpe: TypeRepr, env: Environment, bindings: Expr[Params],
         builder: Expr[CudaDsl.BlockBuilder])(consume: Quotes ?=> ScopedBinding => Expr[Unit])(
@@ -575,7 +609,7 @@ private[frontend] object ScalaKernelMacro:
             case AppliedType(_, _) => true
             case _ => false
           val declaredType = value.tpt.tpe.widen.dealias
-          val isTupleFold = declaredType <:< TypeRepr.of[Tuple] && invocation(rhs).exists {
+          val isTupleFold = tupleValueType(declaredType) <:< TypeRepr.of[Tuple] && invocation(rhs).exists {
             (selection, _) => traversalFoldMethods.contains(selection.symbol)
           }
           if tupleAlias.isDefined && !mutable then

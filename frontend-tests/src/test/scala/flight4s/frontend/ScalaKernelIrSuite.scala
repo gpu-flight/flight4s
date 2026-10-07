@@ -683,7 +683,12 @@ class ScalaKernelIrSuite extends FunSuite:
     assertReference(actual, reference)
 
   test("tuple reuse snapshots every field before terminal stores and recaptures only mapping values"):
-    val actual = ScalaKernels.tupleReuse
+    assertTupleReuse(ScalaKernels.tupleReuse)
+
+  test("named tuple reuse has identical primitive snapshot and store semantics"):
+    assertTupleReuse(ScalaKernels.namedReuse)
+
+  private def assertTupleReuse(actual: Kernel[(DeviceBuffer[Int], DeviceBuffer[Int], Int, Int, Int)]): Unit =
     val names = namesOf(actual)
     def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
     val reference = CudaDsl.kernel(actual.name, params(inOut[Int]("data"), output[Int]("target"),
@@ -764,7 +769,12 @@ class ScalaKernelIrSuite extends FunSuite:
     assertReference(actual, reference)
 
   test("tuple Float and Int state snapshots all next fields before stores"):
-    val actual = ScalaKernels.tupleFoldRows
+    assertTupleFoldRows(ScalaKernels.tupleFoldRows)
+
+  test("named Float Int folds match independent primitive locals and stores"):
+    assertTupleFoldRows(ScalaKernels.namedFoldRows)
+
+  private def assertTupleFoldRows(actual: Kernel[(DeviceBuffer[Float], DeviceBuffer[Float], DeviceBuffer[Int], Int, Int, Float)]): Unit =
     val names = namesOf(actual)
     def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
     val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"),
@@ -797,7 +807,12 @@ class ScalaKernelIrSuite extends FunSuite:
     assertReference(actual, reference)
 
   test("tuple fold reuse keeps saved results independent of later seeds and cross field updates"):
-    val actual = ScalaKernels.tupleFoldReuse
+    assertTupleFoldReuse(ScalaKernels.tupleFoldReuse)
+
+  test("named fold reuse preserves previous fields and independent seeds"):
+    assertTupleFoldReuse(ScalaKernels.namedFoldReuse)
+
+  private def assertTupleFoldReuse(actual: Kernel[(DeviceBuffer[Int], DeviceBuffer[Int], Int, Int, Int)]): Unit =
     val names = namesOf(actual)
     def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
     val reference = CudaDsl.kernel(actual.name, params(inOut[Int]("data"), output[Int]("target"),
@@ -841,7 +856,12 @@ class ScalaKernelIrSuite extends FunSuite:
     assertReference(actual, reference)
 
   test("nested tuple folds refresh Double Boolean seeds and share state across inner traversals"):
-    val actual = ScalaKernels.tupleFoldNested
+    assertTupleFoldNested(ScalaKernels.tupleFoldNested)
+
+  test("nested named folds preserve Double Boolean state across flattening"):
+    assertTupleFoldNested(ScalaKernels.namedFoldNested)
+
+  private def assertTupleFoldNested(actual: Kernel[(DeviceBuffer[Double], DeviceBuffer[Double], Int, Int, Boolean)]): Unit =
     val names = namesOf(actual)
     def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
     val reference = CudaDsl.kernel(actual.name, params(input[Double]("data"), output[Double]("target"),
@@ -891,7 +911,9 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.foldReuse, () => ScalaKernels.foldNested, () => ScalaKernels.flatMapRows,
       () => ScalaKernels.flatMapReuse, () => ScalaKernels.flatMapNested, () => ScalaKernels.tupleScale,
       () => ScalaKernels.tupleRows, () => ScalaKernels.tupleReuse, () => ScalaKernels.tupleNested,
-      () => ScalaKernels.tupleFoldRows, () => ScalaKernels.tupleFoldReuse, () => ScalaKernels.tupleFoldNested)
+      () => ScalaKernels.tupleFoldRows, () => ScalaKernels.tupleFoldReuse, () => ScalaKernels.tupleFoldNested,
+      () => ScalaKernels.namedFoldRows, () => ScalaKernels.namedFoldReuse, () => ScalaKernels.namedFoldNested,
+      () => ScalaKernels.namedReuse)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)
