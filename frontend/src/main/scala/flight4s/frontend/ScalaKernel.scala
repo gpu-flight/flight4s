@@ -20,6 +20,17 @@ object ScalaKernel:
     def apply(index: Int): T = markerOnly()
     def update(index: Int, value: T)(using Mode =:= ReadWrite): Unit = markerOnly()
 
+  /** Per-block storage marker, distinct from a global-memory kernel argument. */
+  final class DeviceSharedArray[T] private[frontend] ():
+    def apply(index: Int): T = markerOnly()
+    def update(index: Int, value: T): Unit = markerOnly()
+
+  /** Declares uninitialized static storage with a positive compile-time element count. */
+  def sharedArray[T](elementCount: Int): DeviceSharedArray[T] = markerOnly()
+
+  /** Block-wide execution and memory barrier; not a lock or a grid-wide barrier. */
+  def barrier(): Unit = markerOnly()
+
   /** Lazy serial device traversal syntax, not a materialized Scala collection. */
   final class DeviceTraversal[T] private[frontend] ():
     def map[U](transform: T => U): DeviceTraversal[U] = markerOnly()

@@ -49,6 +49,52 @@ captures/calls, numeric conversions, vectors, and low-precision source types
 are deferred in this frontend. The existing DSL and annotation remain available.
 See the [frontend contract](frontend/README.md#quoted-scala-syntax-prototype).
 
+### Shared Memory And Barriers
+
+Threads in one block can exchange values through a shared array. Using the
+`ScalaKernel` imports above:
+
+```scala
+import flight4s.core.launch.{Block as LaunchBlock}
+
+@experimental
+def exchange = kernel("exchange", params(input[Float]("data"), output[Float]("target"),
+    value[Int]("count"))) { (data, target, count) =>
+  val tile = sharedArray[Float](64)
+  val lane = threadIdx.x
+  val i = blockIdx.x * blockDim.x + lane
+  tile(lane) = if i < count then data(i) else 0.0f
+  barrier()
+  if i < count then target(i) = tile((lane + 1) % 64)
+}.requiringBlock(LaunchBlock.x(64))
+```
+
+Equivalent CUDA C++ with simplified local names and parameter aliases:
+
+```cpp
+extern "C" __global__ void exchange(const float* data, float* target, int count) {
+    __shared__ float tile[64];
+    const int lane = threadIdx.x;
+    const int i = blockIdx.x * blockDim.x + lane;
+    tile[lane] = i < count ? data[i] : 0.0f;
+    __syncthreads();
+    if (i < count) target[i] = tile[(lane + 1) % 64];
+}
+```
+
+Every thread initializes its slot and reaches the barrier, including inactive
+tail lanes. The final partial block reads zero from an inactive neighbor.
+The explicit launch requirement enforces 64 threads; array size alone does not
+infer it. CUDA names are automatic, so no `"tile"` string is needed.
+
+This slice supports static 1-D arrays of `Int`, `Float`, `Double` and `Boolean`,
+immutable handle aliases, ordinary reads/writes, and explicit block barriers.
+Storage is uninitialized until written. A barrier is neither a lock nor a
+grid-wide synchronization point. Reusing storage after cooperative reads may
+require another barrier before overwriting it. Existing divergence warnings
+are diagnostics, not a proof of race freedom. See the
+[shared-memory contract](frontend/README.md#shared-memory-and-barrier-contract).
+
 ### Tuple Signatures
 
 For more than six parameters, pass one tuple to `params`. Names in the body remain

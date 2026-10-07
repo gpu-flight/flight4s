@@ -2,9 +2,50 @@ package flight4s.frontend.examples
 
 import scala.annotation.experimental
 import flight4s.frontend.ScalaKernel.*
+import flight4s.core.launch.{Block as LaunchBlock}
 
 @experimental
 object ScalaKernels:
+  def sharedExchange = kernel("quotedSharedExchange", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("count"))) { (data, target, count) =>
+    val tile = sharedArray[Float](64)
+    val alias = tile
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    alias(lane) = if i < count then data(i) else 0.0f
+    barrier()
+    if i < count then target(i) = tile((lane + 1) % 64)
+  }.requiringBlock(LaunchBlock.x(64))
+
+  def sharedReuse = kernel("quotedSharedReuse", params(input[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("rounds"))) { p =>
+    val tile = sharedArray[Int](64)
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    tile(lane) = if i < p._3 then p._1(i) else 0
+    barrier()
+    for round <- deviceRange(0, p._4) do
+      val alias = tile
+      val previous = alias((lane + 1) % 64)
+      barrier()
+      alias(lane) = previous + round
+      barrier()
+    if i < p._3 then p._2(i) = tile(lane)
+  }.requiringBlock(LaunchBlock.x(64))
+
+  def sharedFlags = kernel("quotedSharedFlags", params(input[Double]("data"), output[Double]("target"),
+      value[Int]("count"), value[Boolean]("enabled"))) { (data, target, count, enabled) =>
+    val flags = sharedArray[Boolean](64)
+    val values = sharedArray[Double](64)
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    flags(lane) = enabled && i < count
+    values(lane) = if flags(lane) then data(i) else 0.0
+    barrier()
+    val neighbor = (lane + 1) % 64
+    if i < count then target(i) = if flags(neighbor) then values(neighbor) else -7.0
+  }.requiringBlock(LaunchBlock.x(64))
+
   def tupleScale = kernel("quotedTupleScale", params((input[Float]("data"), output[Float]("target"),
       value[Int]("count"), value[Float]("factor"), value[Float]("bias"),
       value[Boolean]("enabled"), value[Double]("cutoff")))) { (data, target, count, factor, bias, enabled, cutoff) =>
