@@ -29,8 +29,18 @@ class ScalaKernelPhaseCompilerSuite extends FunSuite:
       }
     }
 
+  test("sync namespace preserves body then barrier and standalone barrier order"):
+    accepted("sync.blockAfter { p._2(0) = 1 }; sync.block()") { kernel =>
+      assertEquals(kernel.body.statements.map(_.getClass.getSimpleName), Vector("ScopedBlock", "Barrier", "Barrier"))
+      val scope = kernel.body.statements.head.asInstanceOf[ScopedBlock]
+      assertEquals(scope.body.statements.size, 1)
+      assert(scope.body.statements.head.isInstanceOf[Store[?, ?]])
+      assertEquals(kernel.body.statements(1).span, scope.span)
+      assert(kernel.body.statements.forall(_.span != SourceSpan.Unknown))
+    }
+
   test("phase emits its body once in a scope followed by exactly one barrier"):
-    accepted("p._2(0) = 1; block.phase { p._2(1) = 2 }; p._2(2) = 3") { kernel =>
+    accepted("p._2(0) = 1; sync.blockAfter { p._2(1) = 2 }; p._2(2) = 3") { kernel =>
       kernel.body.statements match
         case Vector(_: Store[?, ?], scope: ScopedBlock, barrier: Barrier, _: Store[?, ?]) =>
           assertEquals(scope.body.statements.size, 1)
@@ -50,7 +60,7 @@ class ScalaKernelPhaseCompilerSuite extends FunSuite:
   }
 
   test("empty nested and explicitly synchronized phases retain every trailing barrier"):
-    accepted("block.phase { () }; block.phase { block.phase { () }; barrier() }") { kernel =>
+    accepted("sync.blockAfter { () }; sync.blockAfter { sync.blockAfter { () }; sync.block() }") { kernel =>
       assertEquals(all(kernel.body).count(_.isInstanceOf[ScopedBlock]), 3)
       assertEquals(all(kernel.body).count(_.isInstanceOf[Barrier]), 4)
       assertEquals(kernel.body.statements.map(_.getClass.getSimpleName), Vector("ScopedBlock", "Barrier", "ScopedBlock", "Barrier"))
@@ -62,7 +72,7 @@ class ScalaKernelPhaseCompilerSuite extends FunSuite:
     accepted("""
       val tile = sharedArray[Int](64)
       var total = 1
-      block.phase {
+      sync.blockAfter {
         val saved = total;
         {
           val total = saved + 1
@@ -70,7 +80,7 @@ class ScalaKernelPhaseCompilerSuite extends FunSuite:
           alias(threadIdx.x) = total
         }
       }
-      block.phase { total += tile(threadIdx.x) }
+      sync.blockAfter { total += tile(threadIdx.x) }
       p._2(threadIdx.x) = total
     """) { kernel =>
       val locals = all(kernel.body).collect { case declaration: LocalDeclaration[?] => declaration.local.name }
@@ -79,19 +89,19 @@ class ScalaKernelPhaseCompilerSuite extends FunSuite:
     }
 
   test("unconditional phases can declare shared storage with lexical handle visibility"):
-    accepted("block.phase { val tile = sharedArray[Int](64); tile(threadIdx.x) = 1; block.phase { p._2(threadIdx.x) = tile(threadIdx.x) } }") { kernel =>
+    accepted("sync.blockAfter { val tile = sharedArray[Int](64); tile(threadIdx.x) = 1; sync.blockAfter { p._2(threadIdx.x) = tile(threadIdx.x) } }") { kernel =>
       assertEquals(kernel.sharedMemory.size, 1)
       assertEquals(all(kernel.body).count(_.isInstanceOf[Barrier]), 2)
     }
 
   test("qualified and renamed imported phase symbols share the same lowering"):
-    accepted("flight4s.frontend.ScalaKernel.block.phase { () }; sync { () }; threads.phase { () }",
-      "import flight4s.frontend.ScalaKernel.block.{phase as sync}; import flight4s.frontend.ScalaKernel.{block as threads}") { kernel =>
-      assertEquals(all(kernel.body).count(_.isInstanceOf[Barrier]), 3)
+    accepted("flight4s.frontend.ScalaKernel.sync.blockAfter { () }; blockAfter { () }; publish { () }; coordination.blockAfter { () }",
+      "import flight4s.frontend.ScalaKernel.sync.*; import flight4s.frontend.ScalaKernel.sync.{blockAfter as publish}; import flight4s.frontend.ScalaKernel.{sync as coordination}") { kernel =>
+      assertEquals(all(kernel.body).count(_.isInstanceOf[Barrier]), 4)
     }
 
   test("lane-varying statements inside a phase do not guard its trailing barrier"):
-    accepted("block.phase { if threadIdx.x < p._3 then p._2(threadIdx.x) = 1 }") { kernel =>
+    accepted("sync.blockAfter { if threadIdx.x < p._3 then p._2(threadIdx.x) = 1 }") { kernel =>
       assertEquals(KernelValidator.validate(kernel).warnings, Vector.empty)
       val scope = kernel.body.statements.head.asInstanceOf[ScopedBlock]
       assert(scope.body.statements.head.isInstanceOf[IfThen])
@@ -99,22 +109,22 @@ class ScalaKernelPhaseCompilerSuite extends FunSuite:
     }
 
   test("divergent enclosing control warns at the phase call including nested phases"):
-    accepted("val lane = threadIdx.x; if lane < 32 then block.phase { block.phase { () } }") { kernel =>
+    accepted("val lane = threadIdx.x; if lane < 32 then sync.blockAfter { sync.blockAfter { () } }") { kernel =>
       val barriers = all(kernel.body).collect { case barrier: Barrier => barrier }
       val warnings = KernelValidator.validate(kernel).warnings
       assertEquals(warnings.map(_.code), Vector.fill(2)(ValidationWarningCode.BarrierMayDiverge))
       assertEquals(warnings.map(_.span), barriers.map(_.span))
       assert(warnings.forall(_.span != SourceSpan.Unknown))
     }
-    accepted("deviceRange(0, threadIdx.x).foreach { i => block.phase { () } }") { kernel =>
+    accepted("deviceRange(0, threadIdx.x).foreach { i => sync.blockAfter { () } }") { kernel =>
       assertEquals(KernelValidator.validate(kernel).warnings.map(_.code), Vector(ValidationWarningCode.BarrierMayDiverge))
     }
 
   test("block-uniform branches serial loops and guarded traversal phases preserve warning policy"):
     accepted("""
-      if blockIdx.x == 0 then block.phase { () }
-      for i <- 0 until p._3 do block.phase { () }
-      for i <- deviceRange(0, p._3) if i % 2 == 0 do block.phase { () }
+      if blockIdx.x == 0 then sync.blockAfter { () }
+      for i <- 0 until p._3 do sync.blockAfter { () }
+      for i <- deviceRange(0, p._3) if i % 2 == 0 do sync.blockAfter { () }
     """) { kernel => assertEquals(KernelValidator.validate(kernel).warnings, Vector.empty) }
 
   private def rejected(body: String, message: String, schema: String = ""): Unit =
@@ -125,27 +135,60 @@ class ScalaKernelPhaseCompilerSuite extends FunSuite:
     }
 
   test("phases cannot hide host effects helpers captures lookalikes or effectful receivers"):
-    rejected("block.phase { Host.work() }", "host effects", "object Host { def work(): Unit = println(1) }")
-    rejected("block.phase { p._2(0) = Host.value }", "captures", "object Host { val value = 1 }")
-    rejected("Host.phase { p._2(0) = 1 }", "host effects", "object Host { def phase(body: => Unit): Unit = body }")
-    rejected("Host.api.phase { () }", "host effects", "object Host { def api: flight4s.frontend.ScalaKernel.block.type = { println(1); flight4s.frontend.ScalaKernel.block } }")
-    rejected("Host.api.block.phase { () }", "host effects", "object Host { def api: flight4s.frontend.ScalaKernel.type = { println(1); flight4s.frontend.ScalaKernel } }")
+    rejected("sync.blockAfter { Host.work() }", "host effects", "object Host { def work(): Unit = println(1) }")
+    rejected("sync.blockAfter { p._2(0) = Host.value }", "captures", "object Host { val value = 1 }")
+    rejected("Host.blockAfter { p._2(0) = 1 }", "host effects", "object Host { def blockAfter(body: => Unit): Unit = body }")
+    rejected("Host.api.blockAfter { () }", "host effects", "object Host { def api: flight4s.frontend.ScalaKernel.sync.type = { println(1); flight4s.frontend.ScalaKernel.sync } }")
+    rejected("Host.api.sync.blockAfter { () }", "host effects", "object Host { def api: flight4s.frontend.ScalaKernel.type = { println(1); flight4s.frontend.ScalaKernel } }")
 
   test("conditional or repeated phases cannot bypass shared-declaration restrictions"):
     for body <- Vector(
-        "if p._3 > 0 then block.phase { val tile = sharedArray[Int](64); () }",
-        "for i <- 0 until 2 do block.phase { val tile = sharedArray[Int](64); () }",
-        "deviceRange(0, 2).foreach { i => block.phase { val tile = sharedArray[Int](64); () } }") do
+        "if p._3 > 0 then sync.blockAfter { val tile = sharedArray[Int](64); () }",
+        "for i <- 0 until 2 do sync.blockAfter { val tile = sharedArray[Int](64); () }",
+        "deviceRange(0, 2).foreach { i => sync.blockAfter { val tile = sharedArray[Int](64); () } }") do
       rejected(body, "outside branches and loops")
 
   test("phase is statement-only and cannot leak locals or hide effects in pure callbacks"):
-    rejected("block.phase { val inner = 1 }; p._2(0) = inner", "Not found: inner")
-    rejected("val result = block.phase { p._2(0) = 1 }", "primitive locals")
-    rejected("val unused = deviceRange(0, 0).map(i => { block.phase { p._2(0) = i }; i })", "expression blocks")
-    rejected("val unused = deviceRange(0, 0).foldLeft(0)((sum, i) => { block.phase { () }; sum })", "expression blocks")
-    rejected("block.phase { p._1(0) = 1 }", "Cannot prove")
+    rejected("sync.blockAfter { val inner = 1 }; p._2(0) = inner", "Not found: inner")
+    rejected("val result = sync.blockAfter { p._2(0) = 1 }", "primitive locals")
+    rejected("val unused = deviceRange(0, 0).map(i => { sync.blockAfter { p._2(0) = i }; i })", "expression blocks")
+    rejected("val unused = deviceRange(0, 0).foldLeft(0)((sum, i) => { sync.blockAfter { () }; sum })", "expression blocks")
+    rejected("sync.blockAfter { p._1(0) = 1 }", "Cannot prove")
+
+  test("standalone sync symbols preserve the CUDA source of compatible barrier calls"):
+    var legacySource = ""
+    accepted("barrier(); barrier(); barrier(); barrier(); barrier()") { kernel =>
+      legacySource = CudaCodegen.generate(kernel).toOption.get.cudaSource
+    }
+    accepted("sync.block(); block(); flight4s.frontend.ScalaKernel.sync.block(); waitForBlock(); coordination.block()",
+      "import flight4s.frontend.ScalaKernel.sync.*; import flight4s.frontend.ScalaKernel.sync.{block as waitForBlock}; import flight4s.frontend.ScalaKernel.{sync as coordination}") { kernel =>
+      assertEquals(kernel.body.statements.size, 5)
+      assert(kernel.body.statements.forall(_.isInstanceOf[Barrier]))
+      assert(kernel.body.statements.forall(_.span != SourceSpan.Unknown))
+      assertEquals(CudaCodegen.generate(kernel).toOption.get.cudaSource, legacySource)
+    }
+
+  test("standalone sync retains divergence spans and rejects impure receivers and expression callbacks"):
+    accepted("val lane = threadIdx.x; if lane < 32 then sync.block()") { kernel =>
+      val barriers = all(kernel.body).collect { case barrier: Barrier => barrier }
+      val warnings = KernelValidator.validate(kernel).warnings
+      assertEquals(warnings.map(_.code), Vector(ValidationWarningCode.BarrierMayDiverge))
+      assertEquals(warnings.map(_.span), barriers.map(_.span))
+      assert(warnings.forall(_.span != SourceSpan.Unknown))
+    }
+    rejected("Host.block()", "host effects", "object Host { def block(): Unit = println(1) }")
+    rejected("Host.api.block()", "host effects", "object Host { def api: flight4s.frontend.ScalaKernel.sync.type = { println(1); flight4s.frontend.ScalaKernel.sync } }")
+    rejected("Host.api.sync.block()", "host effects", "object Host { def api: flight4s.frontend.ScalaKernel.type = { println(1); flight4s.frontend.ScalaKernel } }")
+    rejected("val result = sync.block()", "primitive locals")
+    rejected("val unused = deviceRange(0, 0).map(i => { sync.block(); i })", "expression blocks")
+    rejected("val unused = deviceRange(0, 0).foldLeft(0)((sum, i) => { sync.block(); sum })", "expression blocks")
+
+  test("the unreleased block phase spelling is replaced rather than retained as another API"):
+    rejected("flight4s.frontend.ScalaKernel.block.phase { () }", "value block is not a member")
 
   test("host calls fail without evaluating the by-name phase body"):
     var executed = false
-    intercept[IllegalStateException](ScalaKernel.block.phase { executed = true })
+    intercept[IllegalStateException](ScalaKernel.sync.blockAfter { executed = true })
     assert(!executed)
+    intercept[IllegalStateException](ScalaKernel.sync.block())
+    intercept[IllegalStateException](ScalaKernel.barrier())

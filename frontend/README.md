@@ -40,7 +40,8 @@ typed signatures (including empty), `Int`/`Float`/`Double`/`Boolean` literals an
 parameters, arithmetic `+ - * /`, Int `% & | ^`, numeric comparisons,
 primitive `== !=`, unary `+`, Int unary `-`, Boolean `! && ||`, primitive
 `val` snapshots, initialized `var`, assignment/compound assignment, immutable
-buffer aliases, static 1-D shared arrays and aliases, explicit block `barrier()` and `block.phase`,
+buffer aliases, static 1-D shared arrays and aliases, `sync.block()` and `sync.blockAfter`
+(with `barrier()` retained for compatibility),
 statement scopes, statement `if`/`else`, and pure expression
 `if`/`else`, direct unit-stride `start until end` range loops with lazy guards,
 and explicit `deviceRange` scalar/flat-tuple yield/map/flatMap/withFilter/foreach plans with ordered
@@ -79,8 +80,9 @@ unnamed counterparts, proving the field-label change preserves operations and or
 tests for shared types, aliases, placements, sizes, purity and divergence warnings.
 Three independent shared-memory IR/GPU reference pairs cover cross-warp exchange,
 repeated reuse, Boolean/Double arrays and rejected mismatched block launches.
-`ScalaKernelPhaseCompilerSuite` adds twelve admission/marker tests for exact
-body-then-barrier order, scopes, nested/empty phases, purity and divergence.
+`ScalaKernelPhaseCompilerSuite` adds sixteen admission/marker tests for exact
+body-then-barrier order, scopes, nested/empty phases, purity and divergence,
+including standalone sync imports, compatibility and the retired prototype spelling.
 Two phase fixtures share unchanged CPU assertions with their explicit-barrier
 counterparts and have separate independent IR/effect/generated-artifact references.
 `ScalaKernelCudaJniSuite` has thirty-five real GPU fixtures for Float scaling, mutable
@@ -127,17 +129,18 @@ optimization and CUDA generation. Shared reads may occur in pure maps, guards an
 folds; writes and barriers cannot hide in expression callbacks, even unused plans.
 No buffer parameter, launch ABI, backend version, runtime or native change is needed.
 
-`barrier()` emits one `Barrier` at its exact statement position, producing
+`sync.block()` emits one `Barrier` at its exact statement position, producing
 `__syncthreads()`. There is no implicit entry/exit barrier or JVM synchronization.
+The earlier `barrier()` spelling remains supported with the same semantics.
 See the complete [Scala/CUDA exchange example](../README.md#shared-memory-and-barriers).
 For repeated cooperative reuse, synchronize after reads before overwriting:
 
 ```scala
 for round <- deviceRange(0, rounds) do
   val previous = tile((lane + 1) % 64)
-  barrier()
+  sync.block()
   tile(lane) = previous + round
-  barrier()
+  sync.block()
 ```
 
 Equivalent CUDA C++ after an initial tile fill and block barrier:
@@ -160,20 +163,27 @@ Use an explicit `requiringBlock` contract when an algorithm requires a fixed sha
 
 Deferred: quoted 2-D/3-D/dynamic shared arrays, local/constant arrays, warp barriers,
 fences, split arrival/wait and collective operations. Existing explicit-DSL APIs
-are unchanged. The quoted `block.phase { body }` helper below means body followed
+are unchanged. The quoted `sync.blockAfter { body }` helper below means body followed
 by one block barrier, not mutual exclusion.
 Other synchronization functions require their own participation, scope and ordering
 contracts rather than automatically sharing that wrapper.
 
-### Block Phase Contract
+### Block Synchronization Contract
 
-`ScalaKernel.block.phase(body: => Unit)` is statement syntax for one lexical
+`ScalaKernel.sync.blockAfter(body: => Unit)` is statement syntax for one lexical
 device scope followed by one block barrier. The macro translates the body once
 through the existing statement path, emits `ScopedBlock(body)`, then appends
 `Barrier` to the enclosing block. Each participating thread executes that body
 once per dynamic visit. Both emitted nodes retain the phase call's source span;
 body statements retain their own locations. There is no new IR or native API.
-See the [Scala/CUDA example](../README.md#block-phases).
+See the [Scala/CUDA example](../README.md#block-synchronization).
+
+Naming: `sync.block()` synchronizes at that statement; `sync.blockAfter { ... }`
+executes the body first. `block` here names the CUDA thread scope, not the lexical
+braces. The unreleased `block.phase` prototype is replaced, not retained as an
+alias. Existing quoted `barrier()` and all explicit-DSL APIs remain unchanged.
+Planned `sync.warp(mask)` and `sync.warpAfter(mask) { ... }` are not implemented
+in this frontend yet; they require their own mask and participation contract.
 
 The by-name marker never evaluates its argument on the JVM, including when an
 out-of-capture call throws. Direct, qualified and renamed imported API symbols
@@ -197,9 +207,9 @@ after an initial tile fill and synchronization, reuse still needs a read barrier
 
 ```scala
 for round <- deviceRange(0, rounds) do
-  block.phase {
+  sync.blockAfter {
     val previous = tile((lane + 1) % 64)
-    barrier()
+    sync.block()
     tile(lane) = previous + round
   }
 ```

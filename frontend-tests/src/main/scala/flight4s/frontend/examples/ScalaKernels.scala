@@ -11,7 +11,7 @@ object ScalaKernels:
     val tile = sharedArray[Float](64)
     val lane = threadIdx.x
     val i = blockIdx.x * blockDim.x + lane
-    block.phase {
+    sync.blockAfter {
       val item = if i < count then data(i) else 0.0f
       tile(lane) = item
     }
@@ -23,11 +23,11 @@ object ScalaKernels:
     val tile = sharedArray[Int](64)
     val lane = threadIdx.x
     val i = blockIdx.x * blockDim.x + lane
-    block.phase { tile(lane) = if i < p._3 then p._1(i) else 0 }
+    sync.blockAfter { tile(lane) = if i < p._3 then p._1(i) else 0 }
     for round <- deviceRange(0, p._4) do
-      block.phase {
+      sync.blockAfter {
         val previous = tile((lane + 1) % 64)
-        barrier()
+        sync.block()
         tile(lane) = previous + round
       }
     if i < p._3 then p._2(i) = tile(lane)

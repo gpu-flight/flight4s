@@ -88,12 +88,13 @@ private[frontend] object ScalaKernelMacro:
     val sharedArrayMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("sharedArray")
     val barrierMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("barrier")
     val markerModule = Symbol.requiredModule("flight4s.frontend.ScalaKernel")
-    val phaseModule = Symbol.requiredModule("flight4s.frontend.ScalaKernel.block")
-    val phaseMethods = TypeRepr.of[ScalaKernel.block.type].typeSymbol.methodMember("phase")
+    val syncModule = Symbol.requiredModule("flight4s.frontend.ScalaKernel.sync")
+    val blockSyncMethods = TypeRepr.of[ScalaKernel.sync.type].typeSymbol.methodMember("block")
+    val blockAfterMethods = TypeRepr.of[ScalaKernel.sync.type].typeSymbol.methodMember("blockAfter")
 
-    def phaseReceiver(term: Term): Boolean = unwrapped(term) match
-      case reference: Ident => reference.symbol == phaseModule
-      case selection: Select => selection.symbol == phaseModule && selection.qualifier.symbol == markerModule
+    def syncReceiver(term: Term): Boolean = unwrapped(term) match
+      case reference: Ident => reference.symbol == syncModule
+      case selection: Select => selection.symbol == syncModule && selection.qualifier.symbol == markerModule
       case _ => false
 
     // Imported markers are Idents; qualified calls must not erase an effectful receiver.
@@ -535,7 +536,7 @@ private[frontend] object ScalaKernelMacro:
         sharedRoot: Option[Expr[CudaDsl.BlockBuilder]] = None)(using Quotes): Expr[Unit] =
       val source = unwrapped(term)
       val location = span(source.pos)
-      val phase = markerArguments(source, phaseMethods, phaseReceiver).collect { case List(List(body)) => body }
+      val blockAfter = markerArguments(source, blockAfterMethods, syncReceiver).collect { case List(List(body)) => body }
       source match
         case Literal(UnitConstant()) => '{ () }
         case branch: If =>
@@ -564,11 +565,12 @@ private[frontend] object ScalaKernelMacro:
                 val value = expression[t](assignment.rhs, env, bindings)
                 '{ CudaDsl.:=[t, Local]($handle)($value)(using $builder, ${position(source)}) }
           case _ => report.errorAndAbort("ScalaKernel assignments must target a device local; host mutation is not supported", source.pos)
-        case _ if markerArguments(source, barrierMethods).contains(List(Nil)) =>
+        case _ if markerArguments(source, barrierMethods).contains(List(Nil)) ||
+            markerArguments(source, blockSyncMethods, syncReceiver).contains(List(Nil)) =>
           '{ CudaDsl.barrier()(using $builder, ${position(source)}) }
-        case _ if phase.isDefined =>
+        case _ if blockAfter.isDefined =>
           val nestedBody: Expr[CudaDsl.BlockBuilder ?=> Unit] = '{ (nested: CudaDsl.BlockBuilder) ?=>
-            ${statements(phase.get, env, bindings, 'nested, sharedRoot)} }
+            ${statements(blockAfter.get, env, bindings, 'nested, sharedRoot)} }
           '{
             CudaDsl.scoped($nestedBody)(using $builder, ${position(source)})
             CudaDsl.barrier()(using $builder, ${position(source)})
