@@ -33,6 +33,47 @@ object ScalaKernels:
     if i < p._3 then p._2(i) = tile(lane)
   }.requiringBlock(LaunchBlock.x(64))
 
+  def warpExchange = kernel("quotedWarpExchange", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("count"))) { (data, target, count) =>
+    val tile = sharedArray[Float](32)
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    sync.warpAfter(sync.fullMask) {
+      val item = if i < count then data(i) else 0.0f
+      tile(lane) = item
+    }
+    if i < count then target(i) = tile((lane + 1) % 32)
+  }.requiringBlock(LaunchBlock.x(32))
+
+  def warpReuse = kernel("quotedWarpReuse", params(input[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("rounds"))) { p =>
+    val tile = sharedArray[Int](32)
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    sync.warpAfter(sync.fullMask) { tile(lane) = if i < p._3 then p._1(i) else 0 }
+    for round <- deviceRange(0, p._4) do
+      sync.warpAfter(sync.fullMask) {
+        val previous = tile((lane + 1) % 32)
+        sync.warp(sync.fullMask)
+        tile(lane) = previous + round
+      }
+    if i < p._3 then p._2(i) = tile(lane)
+  }.requiringBlock(LaunchBlock.x(32))
+
+  def warpGroups = kernel("quotedWarpGroups", params(input[Int]("data"), output[Int]("target"),
+      value[Int]("count"))) { p =>
+    val tile = sharedArray[Int](32)
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    tile(lane) = if i < p._3 then p._1(i) else -1
+    if lane % 2 == 0 then
+      sync.warp(0x55555555)
+      if i < p._3 then p._2(i) = tile((lane + 2) % 32)
+    else
+      sync.warp(0xaaaaaaaa)
+      if i < p._3 then p._2(i) = tile((lane + 2) % 32)
+  }.requiringBlock(LaunchBlock.x(32))
+
   def sharedExchange = kernel("quotedSharedExchange", params(input[Float]("data"), output[Float]("target"),
       value[Int]("count"))) { (data, target, count) =>
     val tile = sharedArray[Float](64)

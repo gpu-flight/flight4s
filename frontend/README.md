@@ -161,8 +161,8 @@ but are not a complete proof. The frontend does not initialize storage, insert
 barriers, prove bounds/capacity/race safety, or infer launch geometry from array size.
 Use an explicit `requiringBlock` contract when an algorithm requires a fixed shape.
 
-Deferred: quoted 2-D/3-D/dynamic shared arrays, local/constant arrays, warp barriers,
-fences, split arrival/wait and collective operations. Existing explicit-DSL APIs
+Deferred: quoted 2-D/3-D/dynamic shared arrays, local/constant arrays, fences,
+split arrival/wait and collective operations. Existing explicit-DSL APIs
 are unchanged. The quoted `sync.blockAfter { body }` helper below means body followed
 by one block barrier, not mutual exclusion.
 Other synchronization functions require their own participation, scope and ordering
@@ -182,8 +182,8 @@ Naming: `sync.block()` synchronizes at that statement; `sync.blockAfter { ... }`
 executes the body first. `block` here names the CUDA thread scope, not the lexical
 braces. The unreleased `block.phase` prototype is replaced, not retained as an
 alias. Existing quoted `barrier()` and all explicit-DSL APIs remain unchanged.
-Planned `sync.warp(mask)` and `sync.warpAfter(mask) { ... }` are not implemented
-in this frontend yet; they require their own mask and participation contract.
+`sync.warp(mask)` and `sync.warpAfter(mask) { ... }` are implemented with their
+own compile-time mask and participation contract; see the warp section below.
 
 The by-name marker never evaluates its argument on the JVM, including when an
 out-of-capture call throws. Direct, qualified and renamed imported API symbols
@@ -229,8 +229,52 @@ for (int round = 0; round < rounds; ++round) {
 
 The explicit inner barrier finishes all reads before overwrite; the trailing
 phase barrier finishes all writes before the next round. Do not automatically
-reuse this contract for warp masks, memory fences or split arrival/wait. Those
-remain separate frontend slices, as do dynamic/multidimensional shared arrays.
+reuse this contract for memory fences or split arrival/wait. Those remain
+separate frontend slices, as do dynamic/multidimensional shared arrays.
+
+### Warp Synchronization Contract
+
+`sync.warp(mask)` emits one warp barrier for exactly the lanes named by the mask.
+`sync.warpAfter(mask) { body }` translates the body once into a lexical device
+scope, then appends one warp barrier, mirroring `sync.blockAfter`. Both lower to
+the existing core `WarpBarrier`; there is no new IR, native API or launch change.
+The scope and trailing barrier keep the call-site span; body statements keep theirs.
+
+The mask must be a compile-time constant Int: a literal such as `-1`, `0xffffffff`
+or `0x0000ffff`, or the library constant `sync.fullMask` (all 32 lanes). The bit
+pattern is taken as-is and emitted as CUDA `unsigned int`. An empty mask is rejected
+at compile time. Dynamic masks, host-computed masks, captures and general UInt
+expressions are rejected; they are a separate future contract.
+
+```scala
+sync.warpAfter(sync.fullMask) {
+  val item = if i < count then data(i) else 0.0f
+  tile(lane) = item
+}
+if i < count then target(i) = tile((lane + 1) % 32)
+```
+
+Equivalent CUDA C++ (names simplified):
+
+```cpp
+{
+    const float item = i < count ? data[i] : 0.0f;
+    tile[lane] = item;
+}
+::__syncwarp(0xffffffffu);
+if (i < count) target[i] = tile[(lane + 1) % 32];
+```
+
+A mask does not filter which lanes execute the body or the barrier. Every calling
+lane must be named by the mask, and every named non-exited lane must reach the
+same barrier with the same mask: the CUDA participation contract is the caller's
+obligation. Divergent enclosing control reports `WarpParticipationMayDiverge` at
+the call site as a diagnostic, not a proof. Disjoint constant masks may synchronize
+independent lane groups under lane-parity branches. Like block phases, a warp
+phase has no entry barrier, lock, lane guard, initialization or race repair, and
+shared-memory reuse still needs an explicit read barrier inside the body. Empty
+and nested phases retain every barrier without deduplication. Warp barriers order
+only the named lanes; block-wide publication still requires a block barrier.
 
 ### Generic Tuple Signature Contract
 

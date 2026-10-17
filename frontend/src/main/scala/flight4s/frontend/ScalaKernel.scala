@@ -38,6 +38,15 @@ object ScalaKernel:
     /** Executes a scoped device body, then one block barrier; no entry barrier or lock. */
     def blockAfter(body: => Unit): Unit = markerOnly()
 
+    /** Bit pattern naming all 32 lanes of the calling warp. */
+    inline val fullMask = -1
+
+    /** Warp barrier among exactly the lanes of the compile-time constant mask; not a lane filter. */
+    def warp(mask: Int): Unit = markerOnly()
+
+    /** Executes a scoped device body, then one warp barrier; no entry barrier or lane guard. */
+    def warpAfter(mask: Int)(body: => Unit): Unit = markerOnly()
+
   /** Lazy serial device traversal syntax, not a materialized Scala collection. */
   final class DeviceTraversal[T] private[frontend] ():
     def map[U](transform: T => U): DeviceTraversal[U] = markerOnly()
