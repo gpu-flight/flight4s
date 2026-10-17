@@ -74,6 +74,36 @@ object ScalaKernels:
       if i < p._3 then p._2(i) = tile((lane + 2) % 32)
   }.requiringBlock(LaunchBlock.x(32))
 
+  def warpSum = kernel("quotedWarpSum", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("count"))) { (data, target, count) =>
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    val item = if i < count then data(i) else 0.0f
+    val total = warpReduceSum(sync.fullMask, item)
+    if i < count then target(i) = total
+  }.requiringBlock(LaunchBlock.x(32))
+
+  def warpGroupSums = kernel("quotedWarpGroupSums", params(input[Int]("data"), output[Int]("target"),
+      value[Int]("count"))) { p =>
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    val item = if i < p._3 then p._1(i) else 0
+    val total = warpReduceSum(sync.fullMask, item, 16)
+    if i < p._3 then p._2(i) = total
+  }.requiringBlock(LaunchBlock.x(32))
+
+  def warpSumRounds = kernel("quotedWarpSumRounds", params(input[Double]("data"), output[Double]("target"),
+      value[Int]("count"), value[Int]("rounds"))) { p =>
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    var total = 0.0
+    for round <- deviceRange(0, p._4) do
+      val item = if i < p._3 then p._1(i) else -0.5
+      val sum = warpReduceSum(sync.fullMask, item, 8)
+      total += sum
+    if i < p._3 then p._2(i) = total
+  }.requiringBlock(LaunchBlock.x(32))
+
   def sharedExchange = kernel("quotedSharedExchange", params(input[Float]("data"), output[Float]("target"),
       value[Int]("count"))) { (data, target, count) =>
     val tile = sharedArray[Float](64)

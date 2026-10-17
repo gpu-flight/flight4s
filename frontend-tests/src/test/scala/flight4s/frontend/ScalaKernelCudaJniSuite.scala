@@ -983,6 +983,86 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("quoted warp sums reduce full 32-lane groups with zeroed tails on both GPU stream paths"):
+    val definition = ScalaKernels.warpSum
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 9 - 4).toFloat * 0.25f)
+          val data = context.allocate[Float](initial.length).toOption.get
+          val target = context.allocate[Float](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(count) { i =>
+              val base = (i / 32) * 32
+              (0 until 32).map(lane => if base + lane < count then initial(base + lane) else 0.0f).sum
+            }
+            assert(function.launch(definition.bind((data, target, count)), LaunchConfig(Grid.x(1), LaunchBlock.x(64))).isLeft)
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999f)), Right(()))
+              launch(context, function, definition.bind((data, target, count)), config32(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted half-warp Int group sums stay independent per aligned 16-lane group on the GPU"):
+    val definition = ScalaKernels.warpGroupSums
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => i % 23 - 11)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val target = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(count) { i =>
+              val base = (i / 16) * 16
+              (0 until 16).map(lane => if base + lane < count then initial(base + lane) else 0).sum
+            }
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, count)), config32(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("repeated quoted width-8 Double sums accumulate per round with sentinel tail lanes"):
+    val definition = ScalaKernels.warpSumRounds
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 17 - 8).toDouble * 0.25)
+          val data = context.allocate[Double](initial.length).toOption.get
+          val target = context.allocate[Double](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for rounds <- Vector(-1, 0, 1, 2, 5); explicit <- Vector(false, true) do
+              val expected = Vector.tabulate(count) { i =>
+                val base = (i / 8) * 8
+                val group = (0 until 8).map(lane => if base + lane < count then initial(base + lane) else -0.5).sum
+                group * math.max(0, rounds)
+              }
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999.0)), Right(()))
+              launch(context, function, definition.bind((data, target, count, rounds)), config32(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999.0))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))
