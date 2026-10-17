@@ -7,7 +7,7 @@ import flight4s.core.codegen.CudaCodegen
 import flight4s.core.dsl.{CudaDsl, DslSourcePosition}
 import flight4s.core.dsl.CudaDsl.*
 import flight4s.core.ir.*
-import flight4s.core.types.CudaType
+import flight4s.core.types.{CudaType, UInt}
 import flight4s.core.launch.{Block as LaunchBlock}
 
 @experimental
@@ -67,6 +67,8 @@ class ScalaKernelIrSuite extends FunSuite:
       case (left: ScopedBlock, right: ScopedBlock) =>
         left.copy(body = alignBlock(left.body, right.body), span = right.span)
       case (left: Barrier, right: Barrier) => left.copy(span = right.span)
+      case (left: WarpBarrier, right: WarpBarrier) =>
+        left.copy(mask = align(left.mask, right.mask), span = right.span)
       case _ => fail(s"statement shapes differ: $left / $right")
     })
 
@@ -254,6 +256,83 @@ class ScalaKernelIrSuite extends FunSuite:
     assert(names.isEmpty)
     assertReference(actual, reference)
     assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("warp phase exchange exactly matches scoped explicit DSL statements and one trailing warp barrier"):
+    val actual = ScalaKernels.warpExchange
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"), value[Int]("count"))) { p =>
+      val tile = sharedArray[Float](actual.sharedMemory.head.name, 32)
+      val count = declare(p._3)
+      scoped {
+        val lane = declare(threadIdx.x)
+        val i = declare(blockIdx.x * blockDim.x + lane)
+        scoped {
+          val item = declare(choose(i < count)(p._1(i).read)(literal(0.0f)))
+          tile(lane) := item
+        }
+        warp.sync(literal(UInt.fromBits(-1)))
+        when(i < count) { p._2(i) := tile((lane + literal(1)) % literal(32)).read }
+      }
+    }.requiringBlock(LaunchBlock.x(32))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    val effects = EffectAnalysis.block(actual.body)
+    assert(effects.readSpaces.contains(EffectMemorySpace.Shared))
+    assert(effects.writtenSpaces.contains(EffectMemorySpace.Shared))
+    assert(effects.hasWarpBarrier)
+    assert(!effects.hasBarrier)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("repeated warp phases keep explicit read-before-overwrite warp barriers per round"):
+    val actual = ScalaKernels.warpReuse
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), output[Int]("target"),
+        value[Int]("count"), value[Int]("rounds"))) { p =>
+      val tile = sharedArray[Int](actual.sharedMemory.head.name, 32)
+      val lane = declare(threadIdx.x)
+      val i = declare(blockIdx.x * blockDim.x + lane)
+      scoped { tile(lane) := choose(i < p._3)(p._1(i).read)(literal(0)) }
+      warp.sync(literal(UInt.fromBits(-1)))
+      val start = declare(literal(0))
+      val end = declare(p._4)
+      gpuFor(names.dequeue(), start, end) { round =>
+        scoped {
+          val previous = declare(tile((lane + literal(1)) % literal(32)).read)
+          warp.sync(literal(UInt.fromBits(-1)))
+          tile(lane) := previous + round
+        }
+        warp.sync(literal(UInt.fromBits(-1)))
+      }
+      when(i < p._3) { p._2(i) := tile(lane).read }
+    }.requiringBlock(LaunchBlock.x(32))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("disjoint warp groups keep their own constant masks under divergent branches"):
+    val actual = ScalaKernels.warpGroups
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), output[Int]("target"), value[Int]("count"))) { p =>
+      val tile = sharedArray[Int](actual.sharedMemory.head.name, 32)
+      val lane = declare(threadIdx.x)
+      val i = declare(blockIdx.x * blockDim.x + lane)
+      tile(lane) := choose(i < p._3)(p._1(i).read)(literal(-1))
+      gpuIf((lane % literal(2)) === literal(0)) {
+        warp.sync(literal(UInt.fromBits(0x55555555)))
+        when(i < p._3) { p._2(i) := tile((lane + literal(2)) % literal(32)).read }
+      } {
+        warp.sync(literal(UInt.fromBits(0xaaaaaaaa)))
+        when(i < p._3) { p._2(i) := tile((lane + literal(2)) % literal(32)).read }
+      }
+    }.requiringBlock(LaunchBlock.x(32))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    // Divergent lane-parity branches keep the participation warnings as diagnostics, never proofs.
+    assertEquals(KernelValidator.validate(actual).warnings.map(_.code),
+      Vector.fill(2)(ValidationWarningCode.WarpParticipationMayDiverge))
 
   test("quoted row loops exactly match ordered explicit DSL loops and bound snapshots"):
     val actual = ScalaKernels.rowSum
@@ -1046,7 +1125,8 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.namedFoldRows, () => ScalaKernels.namedFoldReuse, () => ScalaKernels.namedFoldNested,
       () => ScalaKernels.namedReuse, () => ScalaKernels.sharedExchange,
       () => ScalaKernels.sharedReuse, () => ScalaKernels.sharedFlags,
-      () => ScalaKernels.phaseExchange, () => ScalaKernels.phaseReuse)
+      () => ScalaKernels.phaseExchange, () => ScalaKernels.phaseReuse,
+      () => ScalaKernels.warpExchange, () => ScalaKernels.warpReuse, () => ScalaKernels.warpGroups)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)

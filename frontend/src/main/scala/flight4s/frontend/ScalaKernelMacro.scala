@@ -91,11 +91,31 @@ private[frontend] object ScalaKernelMacro:
     val syncModule = Symbol.requiredModule("flight4s.frontend.ScalaKernel.sync")
     val blockSyncMethods = TypeRepr.of[ScalaKernel.sync.type].typeSymbol.methodMember("block")
     val blockAfterMethods = TypeRepr.of[ScalaKernel.sync.type].typeSymbol.methodMember("blockAfter")
+    val warpSyncMethods = TypeRepr.of[ScalaKernel.sync.type].typeSymbol.methodMember("warp")
+    val warpAfterMethods = TypeRepr.of[ScalaKernel.sync.type].typeSymbol.methodMember("warpAfter")
+    val fullMaskSymbol = TypeRepr.of[ScalaKernel.sync.type].typeSymbol.fieldMember("fullMask")
 
     def syncReceiver(term: Term): Boolean = unwrapped(term) match
       case reference: Ident => reference.symbol == syncModule
       case selection: Select => selection.symbol == syncModule && selection.qualifier.symbol == markerModule
       case _ => false
+
+    // Masks stay compile-time constants; dynamic or host-computed participation is a separate contract.
+    def warpMask(term: Term)(using Quotes): Expr[DeviceExpr[UInt]] =
+      def reject(position: Position): Nothing = report.errorAndAbort(
+        "ScalaKernel warp masks must be compile-time constant Int values; dynamic or host-computed masks are not supported yet", position)
+      def admitted(bits: Int, position: Position): Expr[DeviceExpr[UInt]] =
+        if bits == 0 then report.errorAndAbort("ScalaKernel warp masks must name at least one participating lane", position)
+        '{ flight4s.core.ir.Literal(UInt.fromBits(${Expr(bits)}), U32, ${span(position)}) }
+      // Inline-val references keep their constant in the type, not as a literal tree.
+      def libraryConstant(reference: Term): Expr[DeviceExpr[UInt]] = reference.tpe.widenTermRefByName.dealias match
+        case ConstantType(IntConstant(bits)) => admitted(bits, reference.pos)
+        case _ => reject(reference.pos)
+      unwrapped(term) match
+        case mask @ Literal(IntConstant(bits)) => admitted(bits, mask.pos)
+        case reference: Ident if reference.symbol == fullMaskSymbol => libraryConstant(reference)
+        case selection: Select if selection.symbol == fullMaskSymbol && syncReceiver(selection.qualifier) => libraryConstant(selection)
+        case other => reject(other.pos)
 
     // Imported markers are Idents; qualified calls must not erase an effectful receiver.
     def markerArguments(term: Term, methods: List[Symbol],
@@ -537,6 +557,8 @@ private[frontend] object ScalaKernelMacro:
       val source = unwrapped(term)
       val location = span(source.pos)
       val blockAfter = markerArguments(source, blockAfterMethods, syncReceiver).collect { case List(List(body)) => body }
+      val warpSync = markerArguments(source, warpSyncMethods, syncReceiver).collect { case List(List(mask)) => mask }
+      val warpAfter = markerArguments(source, warpAfterMethods, syncReceiver).collect { case List(List(mask), List(body)) => (mask, body) }
       source match
         case Literal(UnitConstant()) => '{ () }
         case branch: If =>
@@ -574,6 +596,16 @@ private[frontend] object ScalaKernelMacro:
           '{
             CudaDsl.scoped($nestedBody)(using $builder, ${position(source)})
             CudaDsl.barrier()(using $builder, ${position(source)})
+          }
+        case _ if warpSync.isDefined =>
+          '{ CudaDsl.warp.sync(${warpMask(warpSync.get)})(using $builder, ${position(source)}) }
+        case _ if warpAfter.isDefined =>
+          val (mask, body) = warpAfter.get
+          val nestedBody: Expr[CudaDsl.BlockBuilder ?=> Unit] = '{ (nested: CudaDsl.BlockBuilder) ?=>
+            ${statements(body, env, bindings, 'nested, sharedRoot)} }
+          '{
+            CudaDsl.scoped($nestedBody)(using $builder, ${position(source)})
+            CudaDsl.warp.sync(${warpMask(mask)})(using $builder, ${position(source)})
           }
         case _ => invocation(source) match
           case Some((selection, List(List(callback)))) if traversalForeachMethods.contains(selection.symbol) =>
