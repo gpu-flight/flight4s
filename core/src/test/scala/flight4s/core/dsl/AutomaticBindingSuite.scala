@@ -40,13 +40,15 @@ class AutomaticBindingSuite extends FunSuite:
       p._2(literal(1)) := expression
     }
     val source = CudaCodegen.generate(definition).toOption.get.cudaSource
-    assertEquals(source, """extern "C" __global__ void snapshot(int* data, int* out) {
+    // The literal inherits the checkout's line endings; codegen always emits \n.
+    val expected = """extern "C" __global__ void snapshot(int* data, int* out) {
   int flight4s_auto_value_0 = data[0];
   data[0] = 99;
   out[0] = (flight4s_auto_value_0 + flight4s_auto_value_0);
   out[1] = data[0];
 }
-""")
+""".replace("\r\n", "\n")
+    assertEquals(source, expected)
 
   test("emitted names avoid parameters constants and later explicit declarations"):
     val table = constantArray[Int]("flight4s_auto_value_1", 1)
