@@ -958,6 +958,38 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("dynamic shared exchange sizes storage at launch and rejects missing or misaligned bytes"):
+    val definition = ScalaKernels.dynamicExchange
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i - 90).toFloat * 0.25f)
+          val data = context.allocate[Float](initial.length).toOption.get
+          val target = context.allocate[Float](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(count) { i =>
+              val neighbor = (i / 64) * 64 + (i % 64 + 1) % 64
+              if neighbor < count then initial(neighbor) else 0.0f
+            }
+            val dynamicConfig = config(count).copy(dynamicSharedMemoryBytes = 64 * 4)
+            assert(function.launch(definition.bind((data, target, count)), config(count)).isLeft)
+            assert(function.launch(definition.bind((data, target, count)),
+              dynamicConfig.copy(dynamicSharedMemoryBytes = 63)).isLeft)
+            assert(function.launch(definition.bind((data, target, count)),
+              LaunchConfig(Grid.x(1), LaunchBlock.x(32), dynamicSharedMemoryBytes = 64 * 4)).isLeft)
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999f)), Right(()))
+              launch(context, function, definition.bind((data, target, count)), dynamicConfig, stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def config32(count: Int): LaunchConfig =
     LaunchConfig(Grid.x(math.max(1, (count + 31) / 32)), LaunchBlock.x(32))
 

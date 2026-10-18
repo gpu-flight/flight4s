@@ -115,9 +115,36 @@ the physical row stride equals `columns`. The explicit DSL's `rowStride`
 padding overloads are deferred in the quoted subset: declaring wider `columns`
 and leaving the padding cells unused emits identical storage.
 
-These slices support static 1-D, 2-D and 3-D arrays of `Int`, `Float`, `Double`
-and `Boolean`, immutable handle aliases, ordinary reads/writes, and explicit
-block barriers.
+When the element count is a launch-time decision, declare the kernel's single
+dynamic shared array without a size:
+
+```scala
+val tile = dynamicSharedArray[Float]()
+tile(lane) = if i < count then data(i) else 0.0f
+sync.block()
+if i < count then target(i) = tile((lane + 1) % 64)
+```
+
+```cpp
+extern __shared__ __align__(4) float tile[];
+tile[lane] = i < count ? data[i] : 0.0f;
+__syncthreads();
+if (i < count) target[i] = tile[(lane + 1) % 64];
+```
+
+The launch supplies the bytes, validated against the kernel's recorded element
+size and alignment before anything reaches the driver:
+
+```scala
+val config = LaunchConfig(Grid.x(blocks), Block.x(64), dynamicSharedMemoryBytes = 64 * 4)
+```
+
+A missing, undersized or misaligned size fails as a structured launch error.
+One dynamic array per kernel; a second declaration fails validation.
+
+These slices support static 1-D, 2-D and 3-D arrays plus one launch-sized
+dynamic array of `Int`, `Float`, `Double` and `Boolean`, immutable handle
+aliases, ordinary reads/writes, and explicit block barriers.
 Storage is uninitialized until written. A barrier is neither a lock nor a
 grid-wide synchronization point. Reusing storage after cooperative reads may
 require another barrier before overwriting it. Existing divergence warnings

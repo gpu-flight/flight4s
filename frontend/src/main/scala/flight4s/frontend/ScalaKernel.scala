@@ -44,6 +44,14 @@ object ScalaKernel:
   /** Declares uninitialized static rank-3 storage; the physical row stride equals columns. */
   def sharedArray3D[T](depth: Int, rows: Int, columns: Int): DeviceSharedArray3D[T] = markerOnly()
 
+  /** Per-block sizeless storage marker; the element count is a launch-time decision. */
+  final class DeviceDynamicSharedArray[T] private[frontend] ():
+    def apply(index: Int): T = markerOnly()
+    def update(index: Int, value: T): Unit = markerOnly()
+
+  /** Declares the kernel's single dynamic shared array; the launch supplies dynamicSharedMemoryBytes. */
+  def dynamicSharedArray[T](): DeviceDynamicSharedArray[T] = markerOnly()
+
   /** Block-wide execution and memory barrier; not a lock or a grid-wide barrier. */
   def barrier(): Unit = markerOnly()
 

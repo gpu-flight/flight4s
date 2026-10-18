@@ -123,6 +123,13 @@ rules as rank 1. The physical row stride equals `columns`; the explicit DSL's
 `rowStride` padding overloads are deliberately deferred in the quoted subset,
 so declare wider `columns` and leave the padding cells unused.
 
+`dynamicSharedArray[T]()` returns a sizeless rank-1 marker; the launch supplies
+`dynamicSharedMemoryBytes` on `LaunchConfig`, and the runtime validates it
+against the kernel's recorded element size and alignment before launch
+(missing, undersized or misaligned sizes are structured failures). Declaration
+and access rules match the static rank-1 marker; existing core validation
+rejects a second dynamic declaration in the same kernel.
+
 Declarations are admitted in the kernel body and unconditional lexical scopes,
 including the wrapper Scala emits for tupled parameters. They register static
 storage with the root kernel builder, while aliases remain lexically scoped.
@@ -170,8 +177,8 @@ but are not a complete proof. The frontend does not initialize storage, insert
 barriers, prove bounds/capacity/race safety, or infer launch geometry from array size.
 Use an explicit `requiringBlock` contract when an algorithm requires a fixed shape.
 
-Deferred: quoted dynamic shared arrays, `rowStride` padding overloads,
-local/constant arrays, fences, split arrival/wait and collective operations.
+Deferred: `rowStride` padding overloads, local/constant arrays, fences,
+split arrival/wait and collective operations.
 Existing explicit-DSL APIs are unchanged. The quoted `sync.blockAfter { body }` helper below means body followed
 by one block barrier, not mutual exclusion.
 Other synchronization functions require their own participation, scope and ordering

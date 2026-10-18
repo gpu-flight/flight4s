@@ -94,6 +94,10 @@ private[frontend] object ScalaKernelMacro:
     val shared3ReadMethods = shared3Symbol.methodMember("apply")
     val shared3WriteMethods = shared3Symbol.methodMember("update")
     val sharedArray3DMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("sharedArray3D")
+    val dynamicSymbol = TypeRepr.of[ScalaKernel.DeviceDynamicSharedArray[Any]].typeSymbol
+    val dynamicReadMethods = dynamicSymbol.methodMember("apply")
+    val dynamicWriteMethods = dynamicSymbol.methodMember("update")
+    val dynamicSharedArrayMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("dynamicSharedArray")
     val barrierMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("barrier")
     val markerModule = Symbol.requiredModule("flight4s.frontend.ScalaKernel")
     val syncModule = Symbol.requiredModule("flight4s.frontend.ScalaKernel.sync")
@@ -342,7 +346,8 @@ private[frontend] object ScalaKernelMacro:
                   val handle = array.handle.asExprOf[BufferParam[T, mode]]
                   '{ Load(BufferElement[T, mode]($handle.name, $offset, $cudaType, $location), $location) }
                 case _ => report.errorAndAbort("device array access must reference a buffer parameter", selection.pos)
-            case Some((selection, List(List(index)))) if sharedReadMethods.contains(selection.symbol) =>
+            case Some((selection, List(List(index)))) if sharedReadMethods.contains(selection.symbol) ||
+                dynamicReadMethods.contains(selection.symbol) =>
               val array = binding(selection.qualifier, env, bindings).getOrElse(
                 report.errorAndAbort("shared array reads must reference a declared shared array or immutable alias", selection.pos))
               array.handle.tpe.widen.asType match
@@ -739,7 +744,8 @@ private[frontend] object ScalaKernelMacro:
                 '{ CudaDsl.:=[t, Global](BufferElement[t, ReadWrite]($handle.name, $offset,
                     $handle.valueType, $location))($initial)(using $builder, ${position(source)}) }
               case _ => report.errorAndAbort("ScalaKernel writes require an output buffer", source.pos)
-          case Some((selection, List(List(index, value)))) if sharedWriteMethods.contains(selection.symbol) =>
+          case Some((selection, List(List(index, value)))) if sharedWriteMethods.contains(selection.symbol) ||
+              dynamicWriteMethods.contains(selection.symbol) =>
             val array = binding(selection.qualifier, env, bindings).getOrElse(
               report.errorAndAbort("shared array writes must reference a declared shared array or immutable alias", selection.pos))
             array.handle.tpe.widen.asType match
@@ -807,7 +813,23 @@ private[frontend] object ScalaKernelMacro:
           val isTupleFold = tupleValueType(declaredType) <:< TypeRepr.of[Tuple] && invocation(rhs).exists {
             (selection, _) => traversalFoldMethods.contains(selection.symbol)
           }
-          if sharedMarker.isDefined then
+          if ranked(dynamicSymbol) then
+            if mutable then report.errorAndAbort("ScalaKernel shared array bindings must be immutable", value.pos)
+            binding(rhs, current, bindings) match
+              case Some(original) => next(tail, result, current.updated(value.symbol, original))
+              case None => markerArguments(rhs, dynamicSharedArrayMethods) match
+                case Some(List(Nil)) =>
+                  val root = sharedRoot.getOrElse(report.errorAndAbort(
+                    "ScalaKernel shared arrays must be declared outside branches and loops", value.pos))
+                  declaredType.asType match
+                    case '[ScalaKernel.DeviceDynamicSharedArray[t]] if primitive(TypeRepr.of[t]) =>
+                      '{
+                        val handle = CudaDsl.dynamicSharedArray[t]()(using ${valueType[t]}, $root, ${position(value)})
+                        ${next(tail, result, current.updated(value.symbol, Binding('handle.asTerm)))}
+                      }
+                    case _ => report.errorAndAbort("ScalaKernel shared arrays support Int, Float, Double and Boolean elements only", value.pos)
+                case _ => report.errorAndAbort("ScalaKernel shared arrays require a direct dynamicSharedArray declaration or immutable alias", rhs.pos)
+          else if sharedMarker.isDefined then
             val (declarationMethods, markerName, rank) = sharedMarker.get
             if mutable then report.errorAndAbort("ScalaKernel shared array bindings must be immutable", value.pos)
             binding(rhs, current, bindings) match
