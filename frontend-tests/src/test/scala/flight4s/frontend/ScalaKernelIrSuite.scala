@@ -3,7 +3,7 @@ package flight4s.core.frontend
 import scala.annotation.experimental
 import munit.FunSuite
 import flight4s.frontend.examples.ScalaKernels
-import flight4s.core.codegen.CudaCodegen
+import flight4s.core.codegen.{CudaCodegen, DynamicSharedMemoryRequirement}
 import flight4s.core.dsl.{CudaDsl, DslSourcePosition}
 import flight4s.core.dsl.CudaDsl.*
 import flight4s.core.ir.*
@@ -255,6 +255,26 @@ class ScalaKernelIrSuite extends FunSuite:
     }.requiringBlock(LaunchBlock.x(64))
     assert(names.isEmpty)
     assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("dynamic shared exchange exactly matches the explicit sizeless declaration and launch requirement"):
+    val actual = ScalaKernels.dynamicExchange
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"), value[Int]("count"))) { p =>
+      val tile = dynamicSharedArray[Float](actual.sharedMemory.head.name)
+      val lane = declare(threadIdx.x)
+      val i = declare(blockIdx.x * blockDim.x + lane)
+      tile(lane) := choose(i < p._3)(p._1(i).read)(literal(0.0f))
+      barrier()
+      when(i < p._3) { p._2(i) := tile((lane + literal(1)) % literal(64)).read }
+    }.requiringBlock(LaunchBlock.x(64))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    val generated = CudaCodegen.generate(actual).toOption.get
+    assertEquals(generated.launchRequirements.dynamicSharedMemory,
+      Some(DynamicSharedMemoryRequirement(elementSizeBytes = 4, elementAlignmentBytes = 4)))
+    assert(generated.cudaSource.contains("extern __shared__"))
     assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
 
   test("phase exchange exactly matches scoped explicit DSL statements and one trailing barrier"):

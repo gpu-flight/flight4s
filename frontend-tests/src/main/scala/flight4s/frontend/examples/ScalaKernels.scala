@@ -144,6 +144,16 @@ object ScalaKernels:
     if i < p._3 then p._2(i) = cube(layer, row, column)
   }.requiringBlock(LaunchBlock.x(64))
 
+  def dynamicExchange = kernel("quotedDynamicExchange", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("count"))) { p =>
+    val tile = dynamicSharedArray[Float]()
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    tile(lane) = if i < p._3 then p._1(i) else 0.0f
+    barrier()
+    if i < p._3 then p._2(i) = tile((lane + 1) % 64)
+  }.requiringBlock(LaunchBlock.x(64))
+
   def tupleScale = kernel("quotedTupleScale", params((input[Float]("data"), output[Float]("target"),
       value[Int]("count"), value[Float]("factor"), value[Float]("bias"),
       value[Boolean]("enabled"), value[Double]("cutoff")))) { (data, target, count, factor, bias, enabled, cutoff) =>
