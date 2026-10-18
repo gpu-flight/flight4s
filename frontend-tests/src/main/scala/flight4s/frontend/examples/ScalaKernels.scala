@@ -104,6 +104,35 @@ object ScalaKernels:
     if i < p._3 then p._2(i) = total
   }.requiringBlock(LaunchBlock.x(32))
 
+  def blockSum = kernel("quotedBlockSum", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("count"))) { (data, target, count) =>
+    val scratch = blockReduction[Float](256)
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    val item = if i < count then data(i) else 0.0f
+    val total = scratch.sum(item)
+    if i < count then target(i) = total
+  }.requiringBlock(LaunchBlock.x(256))
+
+  def blockTreeMax = kernel("quotedBlockMax", params(input[Int]("data"), output[Int]("target"),
+      value[Int]("count"))) { p =>
+    val scratch = blockReduction[Int](64)
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    val item = if i < p._3 then p._1(i) else -1000000
+    val best = scratch.reduceTree(item)((a, b) => if a > b then a else b)
+    if i < p._3 then p._2(i) = best
+  }.requiringBlock(LaunchBlock.x(64))
+
+  def blockSumReuse = kernel("quotedBlockReuse", params(input[Double]("data"), output[Double]("target"),
+      value[Int]("count"))) { p =>
+    val scratch = blockReduction[Double](128)
+    val alias = scratch
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    val item = if i < p._3 then p._1(i) else 0.25
+    val total = scratch.sum(item)
+    val smallest = alias.reduceTree(item)((a, b) => if a < b then a else b)
+    if i < p._3 then p._2(i) = total - smallest
+  }.requiringBlock(LaunchBlock.x(128))
+
   def sharedExchange = kernel("quotedSharedExchange", params(input[Float]("data"), output[Float]("target"),
       value[Int]("count"))) { (data, target, count) =>
     val tile = sharedArray[Float](64)

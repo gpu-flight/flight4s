@@ -83,6 +83,14 @@ object ScalaKernel:
   /** Same tree over independent aligned lane groups of the compile-time width. */
   def warpReduceTree[T](mask: Int, value: T, width: Int)(combine: (T, T) => T): T = markerOnly()
 
+  /** Per-block reduction scratch bound to one compile-time 1-D launch shape. */
+  final class DeviceBlockReduction[T] private[frontend] ():
+    def sum(value: T): T = markerOnly()
+    def reduceTree(value: T)(combine: (T, T) => T): T = markerOnly()
+
+  /** Declares power-of-two shared reduction scratch for exactly threads lanes per block. */
+  def blockReduction[T](threads: Int): DeviceBlockReduction[T] = markerOnly()
+
   /** Lazy serial device traversal syntax, not a materialized Scala collection. */
   final class DeviceTraversal[T] private[frontend] ():
     def map[U](transform: T => U): DeviceTraversal[U] = markerOnly()

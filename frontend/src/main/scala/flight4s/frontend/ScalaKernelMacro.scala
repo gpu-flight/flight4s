@@ -2,7 +2,7 @@ package flight4s.frontend
 
 import scala.annotation.experimental
 import scala.quoted.*
-import flight4s.core.dsl.{CudaDsl, DslSourcePosition}
+import flight4s.core.dsl.{BlockReduction, CudaDsl, DslSourcePosition}
 import flight4s.core.ir.{Expr as DeviceExpr, *}
 import flight4s.core.types.*
 
@@ -108,6 +108,10 @@ private[frontend] object ScalaKernelMacro:
     val fullMaskSymbol = TypeRepr.of[ScalaKernel.sync.type].typeSymbol.fieldMember("fullMask")
     val warpReduceMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("warpReduceSum")
     val warpTreeMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("warpReduceTree")
+    val blockReductionSymbol = TypeRepr.of[ScalaKernel.DeviceBlockReduction[Any]].typeSymbol
+    val blockSumMethods = blockReductionSymbol.methodMember("sum")
+    val blockTreeMethods = blockReductionSymbol.methodMember("reduceTree")
+    val blockReductionMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("blockReduction")
 
     def syncReceiver(term: Term): Boolean = unwrapped(term) match
       case reference: Ident => reference.symbol == syncModule
@@ -334,6 +338,9 @@ private[frontend] object ScalaKernelMacro:
           case _ if markerArguments(source, warpReduceMethods).isDefined ||
               markerArguments(source, warpTreeMethods).isDefined =>
             report.errorAndAbort("ScalaKernel warp reductions must directly initialize a primitive val or var; embedded reductions are not supported yet", source.pos)
+          case _ if invocation(source).exists((selection, _) =>
+              blockSumMethods.contains(selection.symbol) || blockTreeMethods.contains(selection.symbol)) =>
+            report.errorAndAbort("ScalaKernel block reductions must directly initialize a primitive val or var; embedded reductions are not supported yet", source.pos)
           case _ => invocation(source) match
             case Some((selection, _)) if traversalFoldMethods.contains(selection.symbol) =>
               report.errorAndAbort("ScalaKernel foldLeft must directly initialize a primitive val or var, or an immutable tuple val; embedded folds are not supported yet", source.pos)
@@ -526,15 +533,22 @@ private[frontend] object ScalaKernelMacro:
         }(using $builder, ${position(source)})
       }
 
-    def warpReductionInstance[T: Type](source: Term)(using Quotes): Expr[CudaType[T]] =
+    def reductionInstance[T: Type](source: Term, label: String)(using Quotes): Expr[CudaType[T]] =
       if !(source.tpe.widen.dealias =:= TypeRepr.of[T]) then
-        report.errorAndAbort("ScalaKernel warp reductions require a matching primitive value type", source.pos)
+        report.errorAndAbort(s"ScalaKernel $label require a matching primitive value type", source.pos)
       val instance = Type.of[T] match
         case '[Int] => '{ I32 }
         case '[Float] => '{ F32 }
         case '[Double] => '{ F64 }
-        case _ => report.errorAndAbort("ScalaKernel warp reductions support Int, Float and Double values only", source.pos)
+        case _ => report.errorAndAbort(s"ScalaKernel $label support Int, Float and Double values only", source.pos)
       instance.asExprOf[CudaType[T]]
+
+    def combineLambda[T: Type](callback: Term, label: String)(using Quotes): (Symbol, Symbol, Term) =
+      unwrapped(callback) match
+        case Lambda(List(left, right), combineBody) if left.tpt.tpe.widen.dealias =:= TypeRepr.of[T] &&
+            right.tpt.tpe.widen.dealias =:= TypeRepr.of[T] => (left.symbol, right.symbol, combineBody)
+        case other => report.errorAndAbort(
+          s"ScalaKernel $label require a literal matching two-parameter combine lambda", other.pos)
 
     def warpReductionGeometry(maskTerm: Term, widthTerm: Option[Term])(using Quotes): (Int, Int) =
       val (bits, maskPosition) = warpMaskBits(maskTerm)
@@ -557,7 +571,7 @@ private[frontend] object ScalaKernelMacro:
 
     def warpReduction[T: Type](source: Term, maskTerm: Term, valueTerm: Term, widthTerm: Option[Term],
         env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[DeviceExpr[T]] =
-      val instance = warpReductionInstance[T](source)
+      val instance = reductionInstance[T](source, "warp reductions")
       val (bits, width) = warpReductionGeometry(maskTerm, widthTerm)
       val value = expression[T](valueTerm, env, bindings)
       '{ CudaDsl.warp.reduceSum[T](UInt.fromBits(${Expr(bits)}), $value, ${Expr(width)})(using
@@ -565,13 +579,9 @@ private[frontend] object ScalaKernelMacro:
 
     def warpTreeReduction[T: Type](source: Term, maskTerm: Term, valueTerm: Term, widthTerm: Option[Term],
         callback: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[DeviceExpr[T]] =
-      val instance = warpReductionInstance[T](source)
+      val instance = reductionInstance[T](source, "warp reductions")
       val (bits, width) = warpReductionGeometry(maskTerm, widthTerm)
-      val (leftInput, rightInput, combineBody) = unwrapped(callback) match
-        case Lambda(List(left, right), body) if left.tpt.tpe.widen.dealias =:= TypeRepr.of[T] &&
-            right.tpt.tpe.widen.dealias =:= TypeRepr.of[T] => (left.symbol, right.symbol, body)
-        case other => report.errorAndAbort(
-          "ScalaKernel warp tree reductions require a literal matching two-parameter combine lambda", other.pos)
+      val (leftInput, rightInput, combineBody) = combineLambda[T](callback, "warp tree reductions")
       val value = expression[T](valueTerm, env, bindings)
       '{ CudaDsl.warp.reduceTree[T](UInt.fromBits(${Expr(bits)}), $value, ${Expr(width)}) {
           (left: DeviceExpr[T], right: DeviceExpr[T]) =>
@@ -581,6 +591,29 @@ private[frontend] object ScalaKernelMacro:
               expression[T](translated, scope, bindings)
             }
         }(using ${instance.asExprOf[WarpShuffleType[T]]}, $builder, ${position(source)}) }
+
+    def blockReductionCall[T: Type](source: Term, selection: Select, valueTerm: Term, callback: Option[Term],
+        env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[DeviceExpr[T]] =
+      val scratch = binding(selection.qualifier, env, bindings).getOrElse(
+        report.errorAndAbort("ScalaKernel block reductions must reference a declared blockReduction handle or immutable alias", selection.pos))
+      val instance = reductionInstance[T](source, "block reductions")
+      scratch.handle.tpe.widen.asType match
+        case '[BlockReduction[t]] if TypeRepr.of[t] =:= TypeRepr.of[T] =>
+          val handle = scratch.handle.asExprOf[BlockReduction[T]]
+          val value = expression[T](valueTerm, env, bindings)
+          callback match
+            case None =>
+              '{ $handle.sum($value)(using ${instance.asExprOf[AdditiveType[T]]}, $builder, ${position(source)}) }
+            case Some(lambda) =>
+              val (leftInput, rightInput, combineBody) = combineLambda[T](lambda, "block reductions")
+              '{ $handle.reduceTree($value) { (left: DeviceExpr[T], right: DeviceExpr[T]) =>
+                  ${
+                    val current = env.updated(leftInput, Binding('left.asTerm)).updated(rightInput, Binding('right.asTerm))
+                    val (translated, scope) = callbackBody(combineBody, current, bindings)
+                    expression[T](translated, scope, bindings)
+                  }
+                }(using $builder, ${position(source)}) }
+        case _ => report.errorAndAbort("ScalaKernel block reductions require a matching primitive value type", source.pos)
 
     def initializer[T: Type](term: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(
         consume: Quotes ?=> Expr[DeviceExpr[T]] => Expr[Unit])(using Quotes): Expr[Unit] =
@@ -592,6 +625,10 @@ private[frontend] object ScalaKernelMacro:
       val treeReduction = markerArguments(source, warpTreeMethods).collect {
         case List(List(mask, value), List(callback)) => (mask, value, None, callback)
         case List(List(mask, value, width), List(callback)) => (mask, value, Some(width), callback)
+      }
+      val blockCall = invocation(source).collect {
+        case (selection, List(List(value))) if blockSumMethods.contains(selection.symbol) => (selection, value, None)
+        case (selection, List(List(value), List(callback))) if blockTreeMethods.contains(selection.symbol) => (selection, value, Some(callback))
       }
       invocation(source) match
         case Some((selection, List(List(initial), List(callback)))) if traversalFoldMethods.contains(selection.symbol) =>
@@ -621,7 +658,10 @@ private[frontend] object ScalaKernelMacro:
           case None => treeReduction match
             case Some((mask, value, width, callback)) =>
               consume(warpTreeReduction[T](source, mask, value, width, callback, env, bindings, builder))
-            case None => consume(expression[T](source, env, bindings))
+            case None => blockCall match
+              case Some((selection, value, callback)) =>
+                consume(blockReductionCall[T](source, selection, value, callback, env, bindings, builder))
+              case None => consume(expression[T](source, env, bindings))
 
     def tupleInitializer(term: Term, stateType: TypeRepr, env: Environment,
         bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(
@@ -896,6 +936,26 @@ private[frontend] object ScalaKernelMacro:
                       }
                     case _ => report.errorAndAbort("ScalaKernel shared arrays support Int, Float, Double and Boolean elements only", value.pos)
                 case _ => report.errorAndAbort(s"ScalaKernel shared arrays require a direct $markerName declaration or immutable alias", rhs.pos)
+          else if ranked(blockReductionSymbol) then
+            if mutable then report.errorAndAbort("ScalaKernel block reduction bindings must be immutable", value.pos)
+            binding(rhs, current, bindings) match
+              case Some(original) => next(tail, result, current.updated(value.symbol, original))
+              case None => markerArguments(rhs, blockReductionMethods) match
+                case Some(List(List(size))) =>
+                  val root = sharedRoot.getOrElse(report.errorAndAbort(
+                    "ScalaKernel block reductions must be declared outside branches and loops", value.pos))
+                  val threads = unwrapped(size) match
+                    case Literal(IntConstant(count)) if count >= 1 && count <= 1024 && (count & (count - 1)) == 0 => count
+                    case other => report.errorAndAbort(
+                      "ScalaKernel block reduction thread counts must be compile-time power-of-two Int constants from 1 through 1024", other.pos)
+                  declaredType.asType match
+                    case '[ScalaKernel.DeviceBlockReduction[t]] if primitive(TypeRepr.of[t]) && !(TypeRepr.of[t] =:= TypeRepr.of[Boolean]) =>
+                      '{
+                        val handle = CudaDsl.block.reduction[t](flight4s.core.launch.Block.x(${Expr(threads)}))(using ${valueType[t]}, $root, ${position(value)})
+                        ${next(tail, result, current.updated(value.symbol, Binding('handle.asTerm)))}
+                      }
+                    case _ => report.errorAndAbort("ScalaKernel block reductions support Int, Float and Double elements only", value.pos)
+                case _ => report.errorAndAbort("ScalaKernel block reductions require a direct blockReduction declaration or immutable alias", rhs.pos)
           else if tupleAlias.isDefined && !mutable then
             next(tail, result, current.updated(value.symbol, tupleAlias.get))
           else if isTupleFold then
