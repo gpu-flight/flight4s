@@ -1217,6 +1217,90 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("quoted block sums reduce whole 256-thread blocks with zeroed tails on both GPU stream paths"):
+    val definition = ScalaKernels.blockSum
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 9 - 4).toFloat * 0.25f)
+          val data = context.allocate[Float](initial.length).toOption.get
+          val target = context.allocate[Float](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(count) { i =>
+              val base = (i / 256) * 256
+              (0 until 256).map(lane => if base + lane < count then initial(base + lane) else 0.0f).sum
+            }
+            assert(function.launch(definition.bind((data, target, count)),
+              LaunchConfig(Grid.x(1), LaunchBlock.x(64))).isLeft)
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999f)), Right(()))
+              launch(context, function, definition.bind((data, target, count)),
+                LaunchConfig(Grid.x(math.max(1, (count + 255) / 256)), LaunchBlock.x(256)), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted block maxima combine whole 64-thread blocks with sentinel tail items on the GPU"):
+    val definition = ScalaKernels.blockTreeMax
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => i % 23 - 11)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val target = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(count) { i =>
+              val base = (i / 64) * 64
+              (0 until 64).map(lane => if base + lane < count then initial(base + lane) else -1000000).max
+            }
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, count)),
+                LaunchConfig(Grid.x(math.max(1, (count + 63) / 64)), LaunchBlock.x(64)), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("reused quoted block scratch keeps Double sums and minima separate per 128-thread block"):
+    val definition = ScalaKernels.blockSumReuse
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 17 - 8).toDouble * 0.25)
+          val data = context.allocate[Double](initial.length).toOption.get
+          val target = context.allocate[Double](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(count) { i =>
+              val base = (i / 128) * 128
+              val items = (0 until 128).map(lane => if base + lane < count then initial(base + lane) else 0.25)
+              items.sum - items.min
+            }
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999.0)), Right(()))
+              launch(context, function, definition.bind((data, target, count)),
+                LaunchConfig(Grid.x(math.max(1, (count + 127) / 128)), LaunchBlock.x(128)), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999.0))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))

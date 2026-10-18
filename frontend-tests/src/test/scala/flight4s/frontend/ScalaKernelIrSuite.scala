@@ -134,8 +134,12 @@ class ScalaKernelIrSuite extends FunSuite:
     val memory = reference.sharedMemory.zip(actual.sharedMemory).map { (left, right) =>
       left.copy(span = right.span)(using left.rankWitness)
     }
+    assertEquals(reference.ir.blockRequirements.size, actual.ir.blockRequirements.size)
+    val requirements = reference.ir.blockRequirements.zip(actual.ir.blockRequirements).map { (left, right) =>
+      left.copy(span = right.span)
+    }
     val aligned = reference.copy(ir = reference.ir.copy(signature = actual.signature,
-      sharedMemory = memory, body = alignBlock(reference.body, actual.body)))
+      sharedMemory = memory, blockRequirements = requirements, body = alignBlock(reference.body, actual.body)))
     assertEquals(actual.ir, aligned.ir)
     assertEquals(EffectAnalysis.block(actual.body), EffectAnalysis.block(aligned.body))
     assertEquals(KernelValidator.validate(actual), KernelValidator.validate(aligned))
@@ -507,6 +511,68 @@ class ScalaKernelIrSuite extends FunSuite:
       }
       when(i < p._3) { p._2(i) := total.read }
     }.requiringBlock(LaunchBlock.x(32))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted block sums exactly match explicit scratch trees with one launch requirement"):
+    val actual = ScalaKernels.blockSum
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"), value[Int]("count"))) { p =>
+      val count = declare(p._3)
+      val scratch = block.reduction[Float](actual.sharedMemory.head.name, LaunchBlock.x(256))
+      scoped {
+        val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+        val item = declare(choose(i < count)(p._1(i).read)(literal(0.0f)))
+        // Reuse the staged reduction's own result base; its rank let derives from it.
+        val base = names.dequeue()
+        assertEquals(names.dequeue(), s"${base}_rank")
+        val total = declare(scratch.sum(base, item))
+        when(i < count) { p._2(i) := total }
+      }
+    }.requiringBlock(LaunchBlock.x(256))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    val effects = EffectAnalysis.block(actual.body)
+    assert(effects.hasBarrier)
+    assert(effects.readSpaces.contains(EffectMemorySpace.Shared))
+    assert(effects.writtenSpaces.contains(EffectMemorySpace.Shared))
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted block maxima exactly match explicit conditional scratch combines"):
+    val actual = ScalaKernels.blockTreeMax
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), output[Int]("target"), value[Int]("count"))) { p =>
+      val scratch = block.reduction[Int](actual.sharedMemory.head.name, LaunchBlock.x(64))
+      val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+      val item = declare(choose(i < p._3)(p._1(i).read)(literal(-1000000)))
+      val base = names.dequeue()
+      assertEquals(names.dequeue(), s"${base}_rank")
+      val best = declare(scratch.reduceTree(base, item)((a, b) => choose(a > b)(a)(b)))
+      when(i < p._3) { p._2(i) := best }
+    }.requiringBlock(LaunchBlock.x(64))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("reused quoted block scratch keeps per-call results and trailing publication barriers"):
+    val actual = ScalaKernels.blockSumReuse
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Double]("data"), output[Double]("target"), value[Int]("count"))) { p =>
+      val scratch = block.reduction[Double](actual.sharedMemory.head.name, LaunchBlock.x(128))
+      val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+      val item = declare(choose(i < p._3)(p._1(i).read)(literal(0.25)))
+      val sumBase = names.dequeue()
+      assertEquals(names.dequeue(), s"${sumBase}_rank")
+      val total = declare(scratch.sum(sumBase, item))
+      val treeBase = names.dequeue()
+      assertEquals(names.dequeue(), s"${treeBase}_rank")
+      val smallest = declare(scratch.reduceTree(treeBase, item)((a, b) => choose(a < b)(a)(b)))
+      when(i < p._3) { p._2(i) := total - smallest }
+    }.requiringBlock(LaunchBlock.x(128))
     assert(names.isEmpty)
     assertReference(actual, reference)
     assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
@@ -1304,7 +1370,8 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.sharedReuse, () => ScalaKernels.sharedFlags,
       () => ScalaKernels.phaseExchange, () => ScalaKernels.phaseReuse,
       () => ScalaKernels.warpExchange, () => ScalaKernels.warpReuse, () => ScalaKernels.warpGroups,
-      () => ScalaKernels.warpSum, () => ScalaKernels.warpGroupSums, () => ScalaKernels.warpSumRounds)
+      () => ScalaKernels.warpSum, () => ScalaKernels.warpGroupSums, () => ScalaKernels.warpSumRounds,
+      () => ScalaKernels.blockSum, () => ScalaKernels.blockTreeMax, () => ScalaKernels.blockSumReuse)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)

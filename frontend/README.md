@@ -363,7 +363,55 @@ for (int distance = 1; distance < 32; distance *= 2) {   // unrolled in practice
 if (i < count) target[i] = current;
 ```
 
-Votes, shuffles and block-level reductions remain separate quoted slices.
+Votes and shuffles remain separate quoted slices.
+
+### Block Reduction Contract
+
+`blockReduction[T](threads)` declares power-of-two shared reduction scratch for
+exactly `threads` lanes per 1-D block (a literal 1 through 1024), staging the
+explicit-DSL `block.reduction`. Like `sharedArray`, the declaration owns shared
+storage: it is immutable, root-scope-only, admits immutable aliases, and supports
+Int, Float and Double elements. `scratch.sum(value)` and
+`scratch.reduceTree(value)((a, b) => ...)` stage the strided scratch tree: every
+thread stores its value, and one barrier follows the store, each combining level
+and the final read, so the scratch is immediately reusable by the next call.
+Results are initializer-only, exactly like the warp reductions, and the combine
+is the same pure literal two-parameter lambda contract as `warpReduceTree`.
+
+Each call records the declared block shape as a launch requirement: the kernel
+must carry a matching `requiringBlock`, and validation rejects a mismatch. Every
+thread of the block must reach every call; the staged barriers make divergent
+calls unsafe, and `BarrierMayDiverge` reports one diagnostic per barrier under
+lane-varying control while block-uniform control stays quiet.
+
+```scala
+val scratch = blockReduction[Float](256)
+val item = if i < count then data(i) else 0.0f
+val total = scratch.sum(item)
+if i < count then target(i) = data(i) / total
+```
+
+Equivalent CUDA C++ (names simplified; the emitter unrolls the levels):
+
+```cpp
+__shared__ float scratch[256];
+const float item = i < count ? data[i] : 0.0f;
+float total = item;
+scratch[rank] = total;                       // rank linearizes threadIdx
+__syncthreads();
+for (int distance = 1; distance < 256; distance *= 2) {
+    if (rank % (distance * 2) == 0)
+        scratch[rank] = scratch[rank] + scratch[rank + distance];
+    __syncthreads();
+}
+total = scratch[0];
+__syncthreads();                             // scratch reusable by the next call
+if (i < count) target[i] = data[i] / total;
+```
+
+This is a tree combine over shared memory, not an ordered fold; for
+floating-point values the two are not interchangeable. Multi-dimensional block
+shapes, votes and shuffles remain separate quoted slices.
 
 ### Generic Tuple Signature Contract
 
