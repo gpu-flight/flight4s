@@ -332,8 +332,38 @@ With `width` 16 or 8 and a full mask, each aligned half or eighth of the warp
 reduces independently and every lane reads its own group's result. Divergence
 diagnostics report `WarpParticipationMayDiverge` per staged shuffle under
 lane-varying control; block-uniform control stays quiet. No new core IR, native
-behavior or launch change; votes, shuffles, custom combiners and block-level
-reductions remain separate quoted slices.
+behavior or launch change.
+
+`warpReduceTree(mask, value)(combine)` and the `width` overload stage the same
+shuffle tree with an explicit combine (`warp.reduceTree`). The combine must be
+a literal two-parameter lambda over the value type, pure like every expression
+callback: stores, barriers, captures and host calls are rejected. Subtree order
+is preserved in every lane, so noncommutative combines are deterministic, and
+`warpReduceTree(mask, value)(_ + _)` lowers identically to `warpReduceSum`.
+Mask, width, value-type and initializer-only admission are shared with the sum
+form.
+
+```scala
+val item = if i < count then data(i) else -1000.0f
+val best = warpReduceTree(sync.fullMask, item)((a, b) => if a > b then a else b)
+if i < count then target(i) = best
+```
+
+Equivalent CUDA C++ (names simplified; one exchange per level):
+
+```cpp
+const float item = i < count ? data[i] : -1000.0f;
+float current = item;
+for (int distance = 1; distance < 32; distance *= 2) {   // unrolled in practice
+    const float partner = ::__shfl_xor_sync(0xffffffffu, current, distance, 32);
+    const float left = lowerLane ? current : partner;     // subtree order per lane
+    const float right = lowerLane ? partner : current;
+    current = left > right ? left : right;
+}
+if (i < count) target[i] = current;
+```
+
+Votes, shuffles and block-level reductions remain separate quoted slices.
 
 ### Generic Tuple Signature Contract
 

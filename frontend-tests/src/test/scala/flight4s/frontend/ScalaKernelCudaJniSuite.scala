@@ -993,6 +993,69 @@ class ScalaKernelCudaJniSuite extends FunSuite:
   private def config32(count: Int): LaunchConfig =
     LaunchConfig(Grid.x(math.max(1, (count + 31) / 32)), LaunchBlock.x(32))
 
+  test("warp tree maxima converge per full warp with partial blocks on both GPU stream paths"):
+    val definition = ScalaKernels.warpTreeMax
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i - 90).toFloat * 0.25f)
+          val data = context.allocate[Float](initial.length).toOption.get
+          val target = context.allocate[Float](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(count) { i =>
+              val base = (i / 32) * 32
+              (0 until 32).map(lane => if base + lane < count then initial(base + lane) else -1000.0f).max
+            }
+            assert(function.launch(definition.bind((data, target, count)), LaunchConfig(Grid.x(1), LaunchBlock.x(64))).isLeft)
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999f)), Right(()))
+              launch(context, function, definition.bind((data, target, count)), config32(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("noncommutative width-8 trees preserve exact subtree order on both GPU stream paths"):
+    val definition = ScalaKernels.warpTreeDifference
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => i % 17 - 8)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val target = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            def tree(group: Vector[Int]): Vector[Int] =
+              Vector(1, 2, 4).foldLeft(group) { (current, distance) =>
+                Vector.tabulate(8) { lane =>
+                  val partner = current(lane ^ distance)
+                  val left = if (lane & distance) == 0 then current(lane) else partner
+                  val right = if (lane & distance) == 0 then partner else current(lane)
+                  left - right
+                }
+              }
+            val expected = Vector.tabulate(count) { i =>
+              val base = (i / 32) * 32 + ((i % 32) / 8) * 8
+              val group = Vector.tabulate(8)(lane => if base + lane < count then initial(base + lane) else 0)
+              tree(group)(i % 8)
+            }
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, count)), config32(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   test("warp phases publish Float tiles to full-mask lanes before cross-lane reads on both GPU stream paths"):
     val definition = ScalaKernels.warpExchange
     withKernel(definition) { (context, function) =>

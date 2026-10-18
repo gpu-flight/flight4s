@@ -433,6 +433,43 @@ class ScalaKernelIrSuite extends FunSuite:
     assert(!effects.hasBarrier)
     assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
 
+  test("quoted warp tree maxima exactly match explicit named conditional shuffle trees"):
+    val actual = ScalaKernels.warpTreeMax
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"), value[Int]("count"))) { p =>
+      val lane = declare(threadIdx.x)
+      val i = declare(blockIdx.x * blockDim.x + lane)
+      val item = declare(choose(i < p._3)(p._1(i).read)(literal(-1000.0f)))
+      val base = names.dequeue().stripSuffix("_input")
+      names.dequeueAll(_.startsWith(base))
+      val best = declare(warp.reduceTree(base, UInt.fromBits(-1), item, 32)((a, b) => choose(a > b)(a)(b)))
+      when(i < p._3) { p._2(i) := best }
+    }.requiringBlock(LaunchBlock.x(32))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    val effects = EffectAnalysis.block(actual.body)
+    assert(effects.hasWarpCollective)
+    assert(!effects.hasBarrier)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted noncommutative width-8 trees preserve subtree order against explicit references"):
+    val actual = ScalaKernels.warpTreeDifference
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), output[Int]("target"), value[Int]("count"))) { p =>
+      val lane = declare(threadIdx.x)
+      val i = declare(blockIdx.x * blockDim.x + lane)
+      val item = declare(choose(i < p._3)(p._1(i).read)(literal(0)))
+      val base = names.dequeue().stripSuffix("_input")
+      names.dequeueAll(_.startsWith(base))
+      val folded = declare(warp.reduceTree(base, UInt.fromBits(-1), item, 8)(_ - _))
+      when(i < p._3) { p._2(i) := folded }
+    }.requiringBlock(LaunchBlock.x(32))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
   test("quoted half-warp group sums exactly match explicit width-16 shuffle trees"):
     val actual = ScalaKernels.warpGroupSums
     val names = namesOf(actual)

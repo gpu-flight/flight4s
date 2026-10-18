@@ -174,6 +174,24 @@ object ScalaKernels:
     if i < p._3 then p._2(i) = cube(layer, row, column)
   }.requiringBlock(LaunchBlock.x(64))
 
+  def warpTreeMax = kernel("quotedWarpTreeMax", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("count"))) { p =>
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    val item = if i < p._3 then p._1(i) else -1000.0f
+    val best = warpReduceTree(sync.fullMask, item)((a, b) => if a > b then a else b)
+    if i < p._3 then p._2(i) = best
+  }.requiringBlock(LaunchBlock.x(32))
+
+  def warpTreeDifference = kernel("quotedWarpTreeDifference", params(input[Int]("data"), output[Int]("target"),
+      value[Int]("count"))) { p =>
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    val item = if i < p._3 then p._1(i) else 0
+    val folded = warpReduceTree(sync.fullMask, item, 8)((a, b) => a - b)
+    if i < p._3 then p._2(i) = folded
+  }.requiringBlock(LaunchBlock.x(32))
+
   def dynamicExchange = kernel("quotedDynamicExchange", params(input[Float]("data"), output[Float]("target"),
       value[Int]("count"))) { p =>
     val tile = dynamicSharedArray[Float]()
