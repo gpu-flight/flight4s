@@ -899,6 +899,65 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("rank-2 shared tiles exchange row-local columns with partial blocks and guarded tight inputs"):
+    val definition = ScalaKernels.sharedTile
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i - 90).toFloat * 0.25f)
+          val data = context.allocate[Float](initial.length).toOption.get
+          val target = context.allocate[Float](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(count) { i =>
+              val lane = i % 64
+              val neighbor = (i / 64) * 64 + (lane / 32) * 32 + (lane % 32 + 1) % 32
+              if neighbor < count then initial(neighbor) else 0.0f
+            }
+            assert(function.launch(definition.bind((data, target, count)), LaunchConfig(Grid.x(1), LaunchBlock.x(32))).isLeft)
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999f)), Right(()))
+              launch(context, function, definition.bind((data, target, count)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("rank-3 shared cubes retain per-round cross-layer snapshots on both GPU stream paths"):
+    val definition = ScalaKernels.sharedCube
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => i % 17 - 8)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val target = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for rounds <- Vector(-1, 0, 1, 2, 33, 65); explicit <- Vector(false, true) do
+              val expected = (0 until count by 64).flatMap { base =>
+                var cube = Vector.tabulate(2, 2, 16) { (layer, row, column) =>
+                  val lane = layer * 32 + row * 16 + column
+                  if base + lane < count then initial(base + lane) else 0
+                }
+                for round <- 0 until rounds do
+                  cube = Vector.tabulate(2, 2, 16)((layer, row, column) => cube((layer + 1) % 2)(row)(column) + round)
+                (0 until math.min(64, count - base)).map(lane => cube(lane / 32)((lane / 16) % 2)(lane % 16))
+              }.toVector
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, count, rounds)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def config32(count: Int): LaunchConfig =
     LaunchConfig(Grid.x(math.max(1, (count + 31) / 32)), LaunchBlock.x(32))
 

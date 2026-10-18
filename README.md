@@ -87,8 +87,37 @@ tail lanes. The final partial block reads zero from an inactive neighbor.
 The explicit launch requirement enforces 64 threads; array size alone does not
 infer it. CUDA names are automatic, so no `"tile"` string is needed.
 
-This slice supports static 1-D arrays of `Int`, `Float`, `Double` and `Boolean`,
-immutable handle aliases, ordinary reads/writes, and explicit block barriers.
+Rank-2 and rank-3 tiles address each logical dimension directly:
+
+```scala
+val tile = sharedArray2D[Float](2, 32)
+val row = lane / 32
+val column = lane % 32
+tile(row, column) = if i < count then data(i) else 0.0f
+sync.block()
+if i < count then target(i) = tile(row, (column + 1) % 32)
+```
+
+Equivalent CUDA C++ with simplified names:
+
+```cpp
+__shared__ float tile[2][32];
+const int row = lane / 32;
+const int column = lane % 32;
+tile[row][column] = i < count ? data[i] : 0.0f;
+__syncthreads();
+if (i < count) target[i] = tile[row][(column + 1) % 32];
+```
+
+`sharedArray3D[T](depth, rows, columns)` declares `[depth][rows][columns]`
+storage the same way. Each dimension is a positive compile-time constant, and
+the physical row stride equals `columns`. The explicit DSL's `rowStride`
+padding overloads are deferred in the quoted subset: declaring wider `columns`
+and leaving the padding cells unused emits identical storage.
+
+These slices support static 1-D, 2-D and 3-D arrays of `Int`, `Float`, `Double`
+and `Boolean`, immutable handle aliases, ordinary reads/writes, and explicit
+block barriers.
 Storage is uninitialized until written. A barrier is neither a lock nor a
 grid-wide synchronization point. Reusing storage after cooperative reads may
 require another barrier before overwriting it. Existing divergence warnings

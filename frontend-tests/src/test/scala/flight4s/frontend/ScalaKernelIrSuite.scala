@@ -208,6 +208,55 @@ class ScalaKernelIrSuite extends FunSuite:
     assertReference(actual, reference)
     assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
 
+  test("rank-2 shared tiles exactly match explicit two-index declarations stores loads and barriers"):
+    val actual = ScalaKernels.sharedTile
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"), value[Int]("count"))) { p =>
+      val tile = sharedArray2D[Float](actual.sharedMemory.head.name, 2, 32)
+      val lane = declare(threadIdx.x)
+      val row = declare(lane / literal(32))
+      val column = declare(lane % literal(32))
+      val i = declare(blockIdx.x * blockDim.x + lane)
+      tile(row, column) := choose(i < p._3)(p._1(i).read)(literal(0.0f))
+      barrier()
+      when(i < p._3) { p._2(i) := tile(row, (column + literal(1)) % literal(32)).read }
+    }.requiringBlock(LaunchBlock.x(64))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    val effects = EffectAnalysis.block(actual.body)
+    assert(effects.readSpaces.contains(EffectMemorySpace.Shared))
+    assert(effects.writtenSpaces.contains(EffectMemorySpace.Shared))
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("rank-3 shared cubes exactly match explicit three-index loops and read-before-overwrite barriers"):
+    val actual = ScalaKernels.sharedCube
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), output[Int]("target"),
+        value[Int]("count"), value[Int]("rounds"))) { p =>
+      val cube = sharedArray3D[Int](actual.sharedMemory.head.name, 2, 2, 16)
+      val lane = declare(threadIdx.x)
+      val layer = declare(lane / literal(32))
+      val row = declare((lane / literal(16)) % literal(2))
+      val column = declare(lane % literal(16))
+      val i = declare(blockIdx.x * blockDim.x + lane)
+      cube(layer, row, column) := choose(i < p._3)(p._1(i).read)(literal(0))
+      barrier()
+      val start = declare(literal(0))
+      val end = declare(p._4)
+      gpuFor(names.dequeue(), start, end) { round =>
+        val previous = declare(cube((layer + literal(1)) % literal(2), row, column).read)
+        barrier()
+        cube(layer, row, column) := previous + round
+        barrier()
+      }
+      when(i < p._3) { p._2(i) := cube(layer, row, column).read }
+    }.requiringBlock(LaunchBlock.x(64))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
   test("phase exchange exactly matches scoped explicit DSL statements and one trailing barrier"):
     val actual = ScalaKernels.phaseExchange
     val names = namesOf(actual)

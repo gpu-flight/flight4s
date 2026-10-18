@@ -86,6 +86,14 @@ private[frontend] object ScalaKernelMacro:
     val sharedReadMethods = sharedSymbol.methodMember("apply")
     val sharedWriteMethods = sharedSymbol.methodMember("update")
     val sharedArrayMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("sharedArray")
+    val shared2Symbol = TypeRepr.of[ScalaKernel.DeviceSharedArray2D[Any]].typeSymbol
+    val shared2ReadMethods = shared2Symbol.methodMember("apply")
+    val shared2WriteMethods = shared2Symbol.methodMember("update")
+    val sharedArray2DMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("sharedArray2D")
+    val shared3Symbol = TypeRepr.of[ScalaKernel.DeviceSharedArray3D[Any]].typeSymbol
+    val shared3ReadMethods = shared3Symbol.methodMember("apply")
+    val shared3WriteMethods = shared3Symbol.methodMember("update")
+    val sharedArray3DMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("sharedArray3D")
     val barrierMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("barrier")
     val markerModule = Symbol.requiredModule("flight4s.frontend.ScalaKernel")
     val syncModule = Symbol.requiredModule("flight4s.frontend.ScalaKernel.sync")
@@ -335,6 +343,27 @@ private[frontend] object ScalaKernelMacro:
                   val handle = array.handle.asExprOf[SharedArray[T, Rank1]]
                   val offset = expression[Int](index, env, bindings)
                   '{ Load(SharedElement($handle.name, Vector($offset), $cudaType, $location), $location) }
+                case _ => report.errorAndAbort("shared array reads require shared storage", selection.pos)
+            case Some((selection, List(List(row, column)))) if shared2ReadMethods.contains(selection.symbol) =>
+              val array = binding(selection.qualifier, env, bindings).getOrElse(
+                report.errorAndAbort("shared array reads must reference a declared shared array or immutable alias", selection.pos))
+              array.handle.tpe.widen.asType match
+                case '[SharedArray[t, Rank2]] =>
+                  val handle = array.handle.asExprOf[SharedArray[T, Rank2]]
+                  val rowOffset = expression[Int](row, env, bindings)
+                  val columnOffset = expression[Int](column, env, bindings)
+                  '{ Load(SharedElement($handle.name, Vector($rowOffset, $columnOffset), $cudaType, $location), $location) }
+                case _ => report.errorAndAbort("shared array reads require shared storage", selection.pos)
+            case Some((selection, List(List(layer, row, column)))) if shared3ReadMethods.contains(selection.symbol) =>
+              val array = binding(selection.qualifier, env, bindings).getOrElse(
+                report.errorAndAbort("shared array reads must reference a declared shared array or immutable alias", selection.pos))
+              array.handle.tpe.widen.asType match
+                case '[SharedArray[t, Rank3]] =>
+                  val handle = array.handle.asExprOf[SharedArray[T, Rank3]]
+                  val layerOffset = expression[Int](layer, env, bindings)
+                  val rowOffset = expression[Int](row, env, bindings)
+                  val columnOffset = expression[Int](column, env, bindings)
+                  '{ Load(SharedElement($handle.name, Vector($layerOffset, $rowOffset, $columnOffset), $cudaType, $location), $location) }
                 case _ => report.errorAndAbort("shared array reads require shared storage", selection.pos)
             case Some((selection, arguments)) if
                 Set("scala.Int", "scala.Float", "scala.Double", "scala.Boolean", "scala.Any").contains(selection.symbol.owner.fullName) =>
@@ -678,6 +707,31 @@ private[frontend] object ScalaKernelMacro:
                 '{ CudaDsl.:=[t, Shared](SharedElement($handle.name, Vector($offset),
                     $handle.valueType, $location))($initial)(using $builder, ${position(source)}) }
               case _ => report.errorAndAbort("shared array writes require shared storage", selection.pos)
+          case Some((selection, List(List(row, column, value)))) if shared2WriteMethods.contains(selection.symbol) =>
+            val array = binding(selection.qualifier, env, bindings).getOrElse(
+              report.errorAndAbort("shared array writes must reference a declared shared array or immutable alias", selection.pos))
+            array.handle.tpe.widen.asType match
+              case '[SharedArray[t, Rank2]] =>
+                val handle = array.handle.asExprOf[SharedArray[t, Rank2]]
+                val rowOffset = expression[Int](row, env, bindings)
+                val columnOffset = expression[Int](column, env, bindings)
+                val initial = expression[t](value, env, bindings)
+                '{ CudaDsl.:=[t, Shared](SharedElement($handle.name, Vector($rowOffset, $columnOffset),
+                    $handle.valueType, $location))($initial)(using $builder, ${position(source)}) }
+              case _ => report.errorAndAbort("shared array writes require shared storage", selection.pos)
+          case Some((selection, List(List(layer, row, column, value)))) if shared3WriteMethods.contains(selection.symbol) =>
+            val array = binding(selection.qualifier, env, bindings).getOrElse(
+              report.errorAndAbort("shared array writes must reference a declared shared array or immutable alias", selection.pos))
+            array.handle.tpe.widen.asType match
+              case '[SharedArray[t, Rank3]] =>
+                val handle = array.handle.asExprOf[SharedArray[t, Rank3]]
+                val layerOffset = expression[Int](layer, env, bindings)
+                val rowOffset = expression[Int](row, env, bindings)
+                val columnOffset = expression[Int](column, env, bindings)
+                val initial = expression[t](value, env, bindings)
+                '{ CudaDsl.:=[t, Shared](SharedElement($handle.name, Vector($layerOffset, $rowOffset, $columnOffset),
+                    $handle.valueType, $location))($initial)(using $builder, ${position(source)}) }
+              case _ => report.errorAndAbort("shared array writes require shared storage", selection.pos)
           case _ => report.errorAndAbort("ScalaKernel supports assignments, if statements and direct until range loops with guards only; other loops and host effects are not supported yet", source.pos)
 
     def statements(term: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder],
@@ -699,31 +753,48 @@ private[frontend] object ScalaKernelMacro:
             case AppliedType(_, _) => true
             case _ => false
           val declaredType = value.tpt.tpe.widen.dealias
-          val isShared = declaredType.baseType(sharedSymbol) match
+          def ranked(marker: Symbol): Boolean = declaredType.baseType(marker) match
             case AppliedType(_, _) => true
             case _ => false
+          val sharedMarker =
+            if ranked(sharedSymbol) then Some((sharedArrayMethods, "sharedArray", 1))
+            else if ranked(shared2Symbol) then Some((sharedArray2DMethods, "sharedArray2D", 2))
+            else if ranked(shared3Symbol) then Some((sharedArray3DMethods, "sharedArray3D", 3))
+            else None
           val isTupleFold = tupleValueType(declaredType) <:< TypeRepr.of[Tuple] && invocation(rhs).exists {
             (selection, _) => traversalFoldMethods.contains(selection.symbol)
           }
-          if isShared then
+          if sharedMarker.isDefined then
+            val (declarationMethods, markerName, rank) = sharedMarker.get
             if mutable then report.errorAndAbort("ScalaKernel shared array bindings must be immutable", value.pos)
             binding(rhs, current, bindings) match
               case Some(original) => next(tail, result, current.updated(value.symbol, original))
-              case None => markerArguments(rhs, sharedArrayMethods) match
-                case Some(List(List(size))) =>
+              case None => markerArguments(rhs, declarationMethods) match
+                case Some(List(dimensions)) if dimensions.size == rank =>
                   val root = sharedRoot.getOrElse(report.errorAndAbort(
                     "ScalaKernel shared arrays must be declared outside branches and loops", value.pos))
-                  val count = unwrapped(size) match
+                  val counts = dimensions.map { dimension => unwrapped(dimension) match
                     case Literal(IntConstant(count)) if count > 0 => count
-                    case _ => report.errorAndAbort("ScalaKernel shared array size must be a positive compile-time Int constant", size.pos)
+                    case _ => report.errorAndAbort("ScalaKernel shared array sizes must be positive compile-time Int constants", dimension.pos)
+                  }
                   declaredType.asType match
-                    case '[ScalaKernel.DeviceSharedArray[t]] if primitive(TypeRepr.of[t]) =>
+                    case '[ScalaKernel.DeviceSharedArray[t]] if rank == 1 && primitive(TypeRepr.of[t]) =>
                       '{
-                        val handle = CudaDsl.sharedArray[t](${Expr(count)})(using ${valueType[t]}, $root, ${position(value)})
+                        val handle = CudaDsl.sharedArray[t](${Expr(counts(0))})(using ${valueType[t]}, $root, ${position(value)})
+                        ${next(tail, result, current.updated(value.symbol, Binding('handle.asTerm)))}
+                      }
+                    case '[ScalaKernel.DeviceSharedArray2D[t]] if rank == 2 && primitive(TypeRepr.of[t]) =>
+                      '{
+                        val handle = CudaDsl.sharedArray2D[t](${Expr(counts(0))}, ${Expr(counts(1))})(using ${valueType[t]}, $root, ${position(value)})
+                        ${next(tail, result, current.updated(value.symbol, Binding('handle.asTerm)))}
+                      }
+                    case '[ScalaKernel.DeviceSharedArray3D[t]] if rank == 3 && primitive(TypeRepr.of[t]) =>
+                      '{
+                        val handle = CudaDsl.sharedArray3D[t](${Expr(counts(0))}, ${Expr(counts(1))}, ${Expr(counts(2))})(using ${valueType[t]}, $root, ${position(value)})
                         ${next(tail, result, current.updated(value.symbol, Binding('handle.asTerm)))}
                       }
                     case _ => report.errorAndAbort("ScalaKernel shared arrays support Int, Float, Double and Boolean elements only", value.pos)
-                case _ => report.errorAndAbort("ScalaKernel shared arrays require a direct sharedArray declaration or immutable alias", rhs.pos)
+                case _ => report.errorAndAbort(s"ScalaKernel shared arrays require a direct $markerName declaration or immutable alias", rhs.pos)
           else if tupleAlias.isDefined && !mutable then
             next(tail, result, current.updated(value.symbol, tupleAlias.get))
           else if isTupleFold then
