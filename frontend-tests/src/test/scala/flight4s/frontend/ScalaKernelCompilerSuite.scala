@@ -495,8 +495,11 @@ class ScalaKernelCompilerSuite extends FunSuite:
     rejected(factory("()", parameters = "output[flight4s.core.types.Float4](\"target\")"), "parameters only")
 
   test("non-literal kernel functions are rejected and markers fail outside capture"):
-    rejected(factory("()", "val body: ((DeviceArray[Int, flight4s.core.ir.ReadOnly], DeviceArray[Int, flight4s.core.ir.ReadWrite], Int)) => Unit = _ => ()")
-      .replace("{ p =>\n        ()\n      }", "(body)"), "literal kernel-body lambda")
+    val fixture = factory("()", "val body: ((DeviceArray[Int, flight4s.core.ir.ReadOnly], DeviceArray[Int, flight4s.core.ir.ReadWrite], Int)) => Unit = _ => ()")
+    // The fixture inherits the checkout's line endings, so match the lambda with \s+.
+    val nonLiteral = fixture.replaceAll("""\{ p =>\s+\(\)\s+\}""", "(body)")
+    assertNotEquals(nonLiteral, fixture, "kernel-body lambda was not replaced")
+    rejected(nonLiteral, "literal kernel-body lambda")
     val error = intercept[IllegalStateException](ScalaKernel.threadIdx.x)
     assert(error.getMessage.contains("inside ScalaKernel.kernel"))
     intercept[IllegalStateException](ScalaKernel.deviceRange(0, 3))
