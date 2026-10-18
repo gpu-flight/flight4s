@@ -77,6 +77,12 @@ object ScalaKernel:
   /** Same reduction over independent aligned lane groups of the compile-time width. */
   def warpReduceSum[T](mask: Int, value: T, width: Int): T = markerOnly()
 
+  /** Warp tree reduction with an explicit combine; subtree order is preserved in every lane. */
+  def warpReduceTree[T](mask: Int, value: T)(combine: (T, T) => T): T = markerOnly()
+
+  /** Same tree over independent aligned lane groups of the compile-time width. */
+  def warpReduceTree[T](mask: Int, value: T, width: Int)(combine: (T, T) => T): T = markerOnly()
+
   /** Lazy serial device traversal syntax, not a materialized Scala collection. */
   final class DeviceTraversal[T] private[frontend] ():
     def map[U](transform: T => U): DeviceTraversal[U] = markerOnly()

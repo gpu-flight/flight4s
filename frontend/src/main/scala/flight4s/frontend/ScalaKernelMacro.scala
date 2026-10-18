@@ -107,6 +107,7 @@ private[frontend] object ScalaKernelMacro:
     val warpAfterMethods = TypeRepr.of[ScalaKernel.sync.type].typeSymbol.methodMember("warpAfter")
     val fullMaskSymbol = TypeRepr.of[ScalaKernel.sync.type].typeSymbol.fieldMember("fullMask")
     val warpReduceMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("warpReduceSum")
+    val warpTreeMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("warpReduceTree")
 
     def syncReceiver(term: Term): Boolean = unwrapped(term) match
       case reference: Ident => reference.symbol == syncModule
@@ -330,7 +331,8 @@ private[frontend] object ScalaKernelMacro:
             val yes = expression[T](conditional.thenp, env, bindings)
             val no = expression[T](conditional.elsep, env, bindings)
             '{ Conditional($condition, $yes, $no, $cudaType, $location) }
-          case _ if markerArguments(source, warpReduceMethods).isDefined =>
+          case _ if markerArguments(source, warpReduceMethods).isDefined ||
+              markerArguments(source, warpTreeMethods).isDefined =>
             report.errorAndAbort("ScalaKernel warp reductions must directly initialize a primitive val or var; embedded reductions are not supported yet", source.pos)
           case _ => invocation(source) match
             case Some((selection, _)) if traversalFoldMethods.contains(selection.symbol) =>
@@ -524,8 +526,7 @@ private[frontend] object ScalaKernelMacro:
         }(using $builder, ${position(source)})
       }
 
-    def warpReduction[T: Type](source: Term, maskTerm: Term, valueTerm: Term, widthTerm: Option[Term],
-        env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[DeviceExpr[T]] =
+    def warpReductionInstance[T: Type](source: Term)(using Quotes): Expr[CudaType[T]] =
       if !(source.tpe.widen.dealias =:= TypeRepr.of[T]) then
         report.errorAndAbort("ScalaKernel warp reductions require a matching primitive value type", source.pos)
       val instance = Type.of[T] match
@@ -533,6 +534,9 @@ private[frontend] object ScalaKernelMacro:
         case '[Float] => '{ F32 }
         case '[Double] => '{ F64 }
         case _ => report.errorAndAbort("ScalaKernel warp reductions support Int, Float and Double values only", source.pos)
+      instance.asExprOf[CudaType[T]]
+
+    def warpReductionGeometry(maskTerm: Term, widthTerm: Option[Term])(using Quotes): (Int, Int) =
       val (bits, maskPosition) = warpMaskBits(maskTerm)
       val width = widthTerm match
         case None => 32
@@ -549,9 +553,34 @@ private[frontend] object ScalaKernelMacro:
       }
       if !complete then report.errorAndAbort(
         "ScalaKernel warp reduction masks must contain complete aligned groups of the reduction width", maskPosition)
+      (bits, width)
+
+    def warpReduction[T: Type](source: Term, maskTerm: Term, valueTerm: Term, widthTerm: Option[Term],
+        env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[DeviceExpr[T]] =
+      val instance = warpReductionInstance[T](source)
+      val (bits, width) = warpReductionGeometry(maskTerm, widthTerm)
       val value = expression[T](valueTerm, env, bindings)
       '{ CudaDsl.warp.reduceSum[T](UInt.fromBits(${Expr(bits)}), $value, ${Expr(width)})(using
         ${instance.asExprOf[WarpShuffleType[T]]}, ${instance.asExprOf[AdditiveType[T]]}, $builder, ${position(source)}) }
+
+    def warpTreeReduction[T: Type](source: Term, maskTerm: Term, valueTerm: Term, widthTerm: Option[Term],
+        callback: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[DeviceExpr[T]] =
+      val instance = warpReductionInstance[T](source)
+      val (bits, width) = warpReductionGeometry(maskTerm, widthTerm)
+      val (leftInput, rightInput, combineBody) = unwrapped(callback) match
+        case Lambda(List(left, right), body) if left.tpt.tpe.widen.dealias =:= TypeRepr.of[T] &&
+            right.tpt.tpe.widen.dealias =:= TypeRepr.of[T] => (left.symbol, right.symbol, body)
+        case other => report.errorAndAbort(
+          "ScalaKernel warp tree reductions require a literal matching two-parameter combine lambda", other.pos)
+      val value = expression[T](valueTerm, env, bindings)
+      '{ CudaDsl.warp.reduceTree[T](UInt.fromBits(${Expr(bits)}), $value, ${Expr(width)}) {
+          (left: DeviceExpr[T], right: DeviceExpr[T]) =>
+            ${
+              val current = env.updated(leftInput, Binding('left.asTerm)).updated(rightInput, Binding('right.asTerm))
+              val (translated, scope) = callbackBody(combineBody, current, bindings)
+              expression[T](translated, scope, bindings)
+            }
+        }(using ${instance.asExprOf[WarpShuffleType[T]]}, $builder, ${position(source)}) }
 
     def initializer[T: Type](term: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(
         consume: Quotes ?=> Expr[DeviceExpr[T]] => Expr[Unit])(using Quotes): Expr[Unit] =
@@ -559,6 +588,10 @@ private[frontend] object ScalaKernelMacro:
       val reduction = markerArguments(source, warpReduceMethods).collect {
         case List(List(mask, value)) => (mask, value, None)
         case List(List(mask, value, width)) => (mask, value, Some(width))
+      }
+      val treeReduction = markerArguments(source, warpTreeMethods).collect {
+        case List(List(mask, value), List(callback)) => (mask, value, None, callback)
+        case List(List(mask, value, width), List(callback)) => (mask, value, Some(width), callback)
       }
       invocation(source) match
         case Some((selection, List(List(initial), List(callback)))) if traversalFoldMethods.contains(selection.symbol) =>
@@ -585,7 +618,10 @@ private[frontend] object ScalaKernelMacro:
         case _ => reduction match
           case Some((mask, value, width)) =>
             consume(warpReduction[T](source, mask, value, width, env, bindings, builder))
-          case None => consume(expression[T](source, env, bindings))
+          case None => treeReduction match
+            case Some((mask, value, width, callback)) =>
+              consume(warpTreeReduction[T](source, mask, value, width, callback, env, bindings, builder))
+            case None => consume(expression[T](source, env, bindings))
 
     def tupleInitializer(term: Term, stateType: TypeRepr, env: Environment,
         bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(
