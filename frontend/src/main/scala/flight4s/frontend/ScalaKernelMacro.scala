@@ -102,6 +102,7 @@ private[frontend] object ScalaKernelMacro:
     val warpSyncMethods = TypeRepr.of[ScalaKernel.sync.type].typeSymbol.methodMember("warp")
     val warpAfterMethods = TypeRepr.of[ScalaKernel.sync.type].typeSymbol.methodMember("warpAfter")
     val fullMaskSymbol = TypeRepr.of[ScalaKernel.sync.type].typeSymbol.fieldMember("fullMask")
+    val warpReduceMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("warpReduceSum")
 
     def syncReceiver(term: Term): Boolean = unwrapped(term) match
       case reference: Ident => reference.symbol == syncModule
@@ -109,14 +110,14 @@ private[frontend] object ScalaKernelMacro:
       case _ => false
 
     // Masks stay compile-time constants; dynamic or host-computed participation is a separate contract.
-    def warpMask(term: Term)(using Quotes): Expr[DeviceExpr[UInt]] =
+    def warpMaskBits(term: Term)(using Quotes): (Int, Position) =
       def reject(position: Position): Nothing = report.errorAndAbort(
         "ScalaKernel warp masks must be compile-time constant Int values; dynamic or host-computed masks are not supported yet", position)
-      def admitted(bits: Int, position: Position): Expr[DeviceExpr[UInt]] =
+      def admitted(bits: Int, position: Position): (Int, Position) =
         if bits == 0 then report.errorAndAbort("ScalaKernel warp masks must name at least one participating lane", position)
-        '{ flight4s.core.ir.Literal(UInt.fromBits(${Expr(bits)}), U32, ${span(position)}) }
+        (bits, position)
       // Inline-val references keep their constant in the type, not as a literal tree.
-      def libraryConstant(reference: Term): Expr[DeviceExpr[UInt]] = reference.tpe.widenTermRefByName.dealias match
+      def libraryConstant(reference: Term): (Int, Position) = reference.tpe.widenTermRefByName.dealias match
         case ConstantType(IntConstant(bits)) => admitted(bits, reference.pos)
         case _ => reject(reference.pos)
       unwrapped(term) match
@@ -124,6 +125,10 @@ private[frontend] object ScalaKernelMacro:
         case reference: Ident if reference.symbol == fullMaskSymbol => libraryConstant(reference)
         case selection: Select if selection.symbol == fullMaskSymbol && syncReceiver(selection.qualifier) => libraryConstant(selection)
         case other => reject(other.pos)
+
+    def warpMask(term: Term)(using Quotes): Expr[DeviceExpr[UInt]] =
+      val (bits, maskPosition) = warpMaskBits(term)
+      '{ flight4s.core.ir.Literal(UInt.fromBits(${Expr(bits)}), U32, ${span(maskPosition)}) }
 
     // Imported markers are Idents; qualified calls must not erase an effectful receiver.
     def markerArguments(term: Term, methods: List[Symbol],
@@ -321,6 +326,8 @@ private[frontend] object ScalaKernelMacro:
             val yes = expression[T](conditional.thenp, env, bindings)
             val no = expression[T](conditional.elsep, env, bindings)
             '{ Conditional($condition, $yes, $no, $cudaType, $location) }
+          case _ if markerArguments(source, warpReduceMethods).isDefined =>
+            report.errorAndAbort("ScalaKernel warp reductions must directly initialize a primitive val or var; embedded reductions are not supported yet", source.pos)
           case _ => invocation(source) match
             case Some((selection, _)) if traversalFoldMethods.contains(selection.symbol) =>
               report.errorAndAbort("ScalaKernel foldLeft must directly initialize a primitive val or var, or an immutable tuple val; embedded folds are not supported yet", source.pos)
@@ -512,9 +519,42 @@ private[frontend] object ScalaKernelMacro:
         }(using $builder, ${position(source)})
       }
 
+    def warpReduction[T: Type](source: Term, maskTerm: Term, valueTerm: Term, widthTerm: Option[Term],
+        env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[DeviceExpr[T]] =
+      if !(source.tpe.widen.dealias =:= TypeRepr.of[T]) then
+        report.errorAndAbort("ScalaKernel warp reductions require a matching primitive value type", source.pos)
+      val instance = Type.of[T] match
+        case '[Int] => '{ I32 }
+        case '[Float] => '{ F32 }
+        case '[Double] => '{ F64 }
+        case _ => report.errorAndAbort("ScalaKernel warp reductions support Int, Float and Double values only", source.pos)
+      val (bits, maskPosition) = warpMaskBits(maskTerm)
+      val width = widthTerm match
+        case None => 32
+        case Some(term) => unwrapped(term) match
+          case Literal(IntConstant(value)) if Set(1, 2, 4, 8, 16, 32).contains(value) => value
+          case other => report.errorAndAbort(
+            "ScalaKernel warp reduction widths must be compile-time constants 1, 2, 4, 8, 16 or 32", other.pos)
+      // Mirror the staged group rule so misuse fails at compile time instead of kernel construction.
+      val lanes = java.lang.Integer.toUnsignedLong(bits)
+      val complete = (0 until 32 by width).forall { start =>
+        val group = ((1L << width) - 1L) << start
+        val selected = lanes & group
+        selected == 0L || selected == group
+      }
+      if !complete then report.errorAndAbort(
+        "ScalaKernel warp reduction masks must contain complete aligned groups of the reduction width", maskPosition)
+      val value = expression[T](valueTerm, env, bindings)
+      '{ CudaDsl.warp.reduceSum[T](UInt.fromBits(${Expr(bits)}), $value, ${Expr(width)})(using
+        ${instance.asExprOf[WarpShuffleType[T]]}, ${instance.asExprOf[AdditiveType[T]]}, $builder, ${position(source)}) }
+
     def initializer[T: Type](term: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(
         consume: Quotes ?=> Expr[DeviceExpr[T]] => Expr[Unit])(using Quotes): Expr[Unit] =
       val source = unwrapped(term)
+      val reduction = markerArguments(source, warpReduceMethods).collect {
+        case List(List(mask, value)) => (mask, value, None)
+        case List(List(mask, value, width)) => (mask, value, Some(width))
+      }
       invocation(source) match
         case Some((selection, List(List(initial), List(callback)))) if traversalFoldMethods.contains(selection.symbol) =>
           if !(source.tpe.widen.dealias =:= TypeRepr.of[T]) then
@@ -537,7 +577,10 @@ private[frontend] object ScalaKernelMacro:
               ${consume('{ Load(accumulator, ${span(source.pos)}) })}
             }
           }
-        case _ => consume(expression[T](source, env, bindings))
+        case _ => reduction match
+          case Some((mask, value, width)) =>
+            consume(warpReduction[T](source, mask, value, width, env, bindings, builder))
+          case None => consume(expression[T](source, env, bindings))
 
     def tupleInitializer(term: Term, stateType: TypeRepr, env: Environment,
         bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(
