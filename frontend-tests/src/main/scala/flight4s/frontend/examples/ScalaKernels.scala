@@ -114,6 +114,36 @@ object ScalaKernels:
     if i < count then target(i) = if flags(neighbor) then values(neighbor) else -7.0
   }.requiringBlock(LaunchBlock.x(64))
 
+  def sharedTile = kernel("quotedSharedTile", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("count"))) { p =>
+    val tile = sharedArray2D[Float](2, 32)
+    val lane = threadIdx.x
+    val row = lane / 32
+    val column = lane % 32
+    val i = blockIdx.x * blockDim.x + lane
+    tile(row, column) = if i < p._3 then p._1(i) else 0.0f
+    barrier()
+    if i < p._3 then p._2(i) = tile(row, (column + 1) % 32)
+  }.requiringBlock(LaunchBlock.x(64))
+
+  def sharedCube = kernel("quotedSharedCube", params(input[Int]("data"), output[Int]("target"),
+      value[Int]("count"), value[Int]("rounds"))) { p =>
+    val cube = sharedArray3D[Int](2, 2, 16)
+    val lane = threadIdx.x
+    val layer = lane / 32
+    val row = (lane / 16) % 2
+    val column = lane % 16
+    val i = blockIdx.x * blockDim.x + lane
+    cube(layer, row, column) = if i < p._3 then p._1(i) else 0
+    barrier()
+    for round <- deviceRange(0, p._4) do
+      val previous = cube((layer + 1) % 2, row, column)
+      barrier()
+      cube(layer, row, column) = previous + round
+      barrier()
+    if i < p._3 then p._2(i) = cube(layer, row, column)
+  }.requiringBlock(LaunchBlock.x(64))
+
   def tupleScale = kernel("quotedTupleScale", params((input[Float]("data"), output[Float]("target"),
       value[Int]("count"), value[Float]("factor"), value[Float]("bias"),
       value[Boolean]("enabled"), value[Double]("cutoff")))) { (data, target, count, factor, bias, enabled, cutoff) =>

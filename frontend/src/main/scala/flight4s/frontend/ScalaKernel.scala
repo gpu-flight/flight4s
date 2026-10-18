@@ -25,8 +25,24 @@ object ScalaKernel:
     def apply(index: Int): T = markerOnly()
     def update(index: Int, value: T): Unit = markerOnly()
 
+  /** Per-block rank-2 storage marker addressed by logical row and column. */
+  final class DeviceSharedArray2D[T] private[frontend] ():
+    def apply(row: Int, column: Int): T = markerOnly()
+    def update(row: Int, column: Int, value: T): Unit = markerOnly()
+
+  /** Per-block rank-3 storage marker addressed by logical layer, row and column. */
+  final class DeviceSharedArray3D[T] private[frontend] ():
+    def apply(layer: Int, row: Int, column: Int): T = markerOnly()
+    def update(layer: Int, row: Int, column: Int, value: T): Unit = markerOnly()
+
   /** Declares uninitialized static storage with a positive compile-time element count. */
   def sharedArray[T](elementCount: Int): DeviceSharedArray[T] = markerOnly()
+
+  /** Declares uninitialized static rank-2 storage; the physical row stride equals columns. */
+  def sharedArray2D[T](rows: Int, columns: Int): DeviceSharedArray2D[T] = markerOnly()
+
+  /** Declares uninitialized static rank-3 storage; the physical row stride equals columns. */
+  def sharedArray3D[T](depth: Int, rows: Int, columns: Int): DeviceSharedArray3D[T] = markerOnly()
 
   /** Block-wide execution and memory barrier; not a lock or a grid-wide barrier. */
   def barrier(): Unit = markerOnly()

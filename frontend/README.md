@@ -114,6 +114,15 @@ initialize an immutable val. Elements are `Int`, `Float`, `Double` or `Boolean`;
 the size must be a positive compile-time Int constant in the typed tree. A normal
 device val, parameter or host capture is not a compile-time size.
 
+`sharedArray2D[T](rows, columns)` and `sharedArray3D[T](depth, rows, columns)`
+return rank-2 and rank-3 markers addressed by logical indices, so
+`tile(row, column)` lowers to a two-index `SharedElement` and emits
+`tile[row][column]`. Every dimension is a positive compile-time Int constant,
+and the declarations follow the same immutability, alias, scope and element-type
+rules as rank 1. The physical row stride equals `columns`; the explicit DSL's
+`rowStride` padding overloads are deliberately deferred in the quoted subset,
+so declare wider `columns` and leave the padding cells unused.
+
 Declarations are admitted in the kernel body and unconditional lexical scopes,
 including the wrapper Scala emits for tupled parameters. They register static
 storage with the root kernel builder, while aliases remain lexically scoped.
@@ -161,9 +170,9 @@ but are not a complete proof. The frontend does not initialize storage, insert
 barriers, prove bounds/capacity/race safety, or infer launch geometry from array size.
 Use an explicit `requiringBlock` contract when an algorithm requires a fixed shape.
 
-Deferred: quoted 2-D/3-D/dynamic shared arrays, local/constant arrays, fences,
-split arrival/wait and collective operations. Existing explicit-DSL APIs
-are unchanged. The quoted `sync.blockAfter { body }` helper below means body followed
+Deferred: quoted dynamic shared arrays, `rowStride` padding overloads,
+local/constant arrays, fences, split arrival/wait and collective operations.
+Existing explicit-DSL APIs are unchanged. The quoted `sync.blockAfter { body }` helper below means body followed
 by one block barrier, not mutual exclusion.
 Other synchronization functions require their own participation, scope and ordering
 contracts rather than automatically sharing that wrapper.
