@@ -292,6 +292,49 @@ shared-memory reuse still needs an explicit read barrier inside the body. Empty
 and nested phases retain every barrier without deduplication. Warp barriers order
 only the named lanes; block-wide publication still requires a block barrier.
 
+### Warp Reduction Contract
+
+`warpReduceSum(mask, value)` and `warpReduceSum(mask, value, width)` stage the
+existing explicit-DSL shuffle-tree reduction (`warp.reduceSum`): one
+`__shfl_xor_sync` exchange per tree level plus order-preserving selects, over
+independent aligned lane groups of the compile-time width (default 32). The
+result must directly initialize a primitive `val` or `var`; embedded reductions
+inside expressions or pure callbacks are rejected, exactly like `foldLeft`.
+Values are Int, Float or Double. This is a parallel reduction tree, not an
+ordered `foldLeft` sum: for floating-point values the two are not interchangeable.
+
+The mask reuses the warp synchronization admission (compile-time constant Int
+literals or `sync.fullMask`) and must additionally contain complete aligned
+groups of the width; the width must be a literal 1, 2, 4, 8, 16 or 32. Both are
+checked at compile time, mirroring the staged core validation. Every calling
+lane must be named by the mask and participate; a mask never filters execution.
+
+```scala
+val item = if i < count then data(i) else 0.0f
+val total = warpReduceSum(sync.fullMask, item)
+if i < count then target(i) = total
+```
+
+Equivalent CUDA C++ (names simplified; one exchange per level):
+
+```cpp
+const float item = i < count ? data[i] : 0.0f;
+float current = item;
+for (int distance = 1; distance < 32; distance *= 2) {   // unrolled in practice
+    const float partner = ::__shfl_xor_sync(0xffffffffu, current, distance, 32);
+    current = current + partner;                          // lane-order-preserving selects elided
+}
+const float total = current;
+if (i < count) target[i] = total;
+```
+
+With `width` 16 or 8 and a full mask, each aligned half or eighth of the warp
+reduces independently and every lane reads its own group's result. Divergence
+diagnostics report `WarpParticipationMayDiverge` per staged shuffle under
+lane-varying control; block-uniform control stays quiet. No new core IR, native
+behavior or launch change; votes, shuffles, custom combiners and block-level
+reductions remain separate quoted slices.
+
 ### Generic Tuple Signature Contract
 
 `params(tuple)`, `CudaDsl.paramsTuple(tuple)` and `KernelSignature.fromTuple(tuple)`

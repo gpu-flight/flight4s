@@ -69,6 +69,11 @@ class ScalaKernelIrSuite extends FunSuite:
       case (left: Barrier, right: Barrier) => left.copy(span = right.span)
       case (left: WarpBarrier, right: WarpBarrier) =>
         left.copy(mask = align(left.mask, right.mask), span = right.span)
+      case (left: WarpShuffle[?, ?], right: WarpShuffle[?, ?]) =>
+        assert(left.operator == right.operator, s"shuffle operators differ: $left / $right")
+        assertEquals(left.width, right.width)
+        left.copy(local = left.local.copy(span = right.local.span), mask = align(left.mask, right.mask),
+          value = align(left.value, right.value), selector = align(left.selector, right.selector), span = right.span)
       case _ => fail(s"statement shapes differ: $left / $right")
     })
 
@@ -402,6 +407,72 @@ class ScalaKernelIrSuite extends FunSuite:
     // Divergent lane-parity branches keep the participation warnings as diagnostics, never proofs.
     assertEquals(KernelValidator.validate(actual).warnings.map(_.code),
       Vector.fill(2)(ValidationWarningCode.WarpParticipationMayDiverge))
+
+  test("quoted warp sums exactly match explicit full-width shuffle trees and snapshots"):
+    val actual = ScalaKernels.warpSum
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"), value[Int]("count"))) { p =>
+      val count = declare(p._3)
+      scoped {
+        val lane = declare(threadIdx.x)
+        val i = declare(blockIdx.x * blockDim.x + lane)
+        val item = declare(choose(i < count)(p._1(i).read)(literal(0.0f)))
+        // Reuse the staged reduction's own fresh base so derived internal names match exactly.
+        val base = names.dequeue().stripSuffix("_input")
+        names.dequeueAll(_.startsWith(base))
+        val total = declare(warp.reduceSum(base, UInt.fromBits(-1), item, 32))
+        when(i < count) { p._2(i) := total }
+      }
+    }.requiringBlock(LaunchBlock.x(32))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    val effects = EffectAnalysis.block(actual.body)
+    assert(effects.hasWarpCollective)
+    assert(!effects.hasWarpBarrier)
+    assert(!effects.hasBarrier)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted half-warp group sums exactly match explicit width-16 shuffle trees"):
+    val actual = ScalaKernels.warpGroupSums
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), output[Int]("target"), value[Int]("count"))) { p =>
+      val lane = declare(threadIdx.x)
+      val i = declare(blockIdx.x * blockDim.x + lane)
+      val item = declare(choose(i < p._3)(p._1(i).read)(literal(0)))
+      val base = names.dequeue().stripSuffix("_input")
+      names.dequeueAll(_.startsWith(base))
+      val total = declare(warp.reduceSum(base, UInt.fromBits(-1), item, 16))
+      when(i < p._3) { p._2(i) := total }
+    }.requiringBlock(LaunchBlock.x(32))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("repeated quoted width-8 sums rebuild per-round snapshots inside serial loops"):
+    val actual = ScalaKernels.warpSumRounds
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(input[Double]("data"), output[Double]("target"),
+        value[Int]("count"), value[Int]("rounds"))) { p =>
+      val lane = declare(threadIdx.x).read
+      val i = declare(blockIdx.x * blockDim.x + lane).read
+      val total = declare(literal(0.0))
+      val start = declare(literal(0)).read
+      val end = declare(p._4).read
+      gpuFor(names.dequeue(), start, end) { round =>
+        val item = declare(choose(i < p._3)(p._1(i).read)(literal(-0.5))).read
+        val base = names.dequeue().stripSuffix("_input")
+        names.dequeueAll(_.startsWith(base))
+        val sum = declare(warp.reduceSum(base, UInt.fromBits(-1), item, 8)).read
+        total := total.read + sum
+      }
+      when(i < p._3) { p._2(i) := total.read }
+    }.requiringBlock(LaunchBlock.x(32))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
 
   test("quoted row loops exactly match ordered explicit DSL loops and bound snapshots"):
     val actual = ScalaKernels.rowSum
@@ -1195,7 +1266,8 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.namedReuse, () => ScalaKernels.sharedExchange,
       () => ScalaKernels.sharedReuse, () => ScalaKernels.sharedFlags,
       () => ScalaKernels.phaseExchange, () => ScalaKernels.phaseReuse,
-      () => ScalaKernels.warpExchange, () => ScalaKernels.warpReuse, () => ScalaKernels.warpGroups)
+      () => ScalaKernels.warpExchange, () => ScalaKernels.warpReuse, () => ScalaKernels.warpGroups,
+      () => ScalaKernels.warpSum, () => ScalaKernels.warpGroupSums, () => ScalaKernels.warpSumRounds)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)

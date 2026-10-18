@@ -71,6 +71,12 @@ object ScalaKernel:
     /** Executes a scoped device body, then one warp barrier; no entry barrier or lane guard. */
     def warpAfter(mask: Int)(body: => Unit): Unit = markerOnly()
 
+  /** Warp tree-reduction sum over aligned mask groups; a shuffle tree, not an ordered foldLeft sum. */
+  def warpReduceSum[T](mask: Int, value: T): T = markerOnly()
+
+  /** Same reduction over independent aligned lane groups of the compile-time width. */
+  def warpReduceSum[T](mask: Int, value: T, width: Int): T = markerOnly()
+
   /** Lazy serial device traversal syntax, not a materialized Scala collection. */
   final class DeviceTraversal[T] private[frontend] ():
     def map[U](transform: T => U): DeviceTraversal[U] = markerOnly()
