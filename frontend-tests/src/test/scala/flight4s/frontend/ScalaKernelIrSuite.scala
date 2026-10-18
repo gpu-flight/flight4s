@@ -577,6 +577,72 @@ class ScalaKernelIrSuite extends FunSuite:
     assertReference(actual, reference)
     assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
 
+  test("quoted shuffle broadcasts and rotations exactly match explicit direct shuffles"):
+    val actual = ScalaKernels.shuffleRotate
+    val names = namesOf(actual)
+    val shuffleNames = scala.collection.mutable.Queue.from(all(actual.body).collect { case s: WarpShuffle[?, ?] => s.local.name })
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), output[Int]("target"), value[Int]("count"))) { p =>
+      val lane = declare(threadIdx.x)
+      val i = declare(blockIdx.x * blockDim.x + lane)
+      val item = declare(choose(i < p._3)(p._1(i).read)(literal(-7)))
+      val full = literal(UInt.fromBits(-1))
+      val first = declare(warp.shuffle(shuffleNames.dequeue(), full, item, literal(0), 32))
+      val source = declare((lane + literal(1)) % literal(32))
+      val next = declare(warp.shuffle(shuffleNames.dequeue(), full, item, source, 32))
+      when(i < p._3) { p._2(i) := first + next }
+    }.requiringBlock(LaunchBlock.x(32))
+    assert(names.isEmpty)
+    assert(shuffleNames.isEmpty)
+    assertReference(actual, reference)
+    val effects = EffectAnalysis.block(actual.body)
+    assert(effects.hasWarpCollective)
+    assert(!effects.hasBarrier)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted shuffle-up prefix scans exactly match explicit guarded accumulation"):
+    val actual = ScalaKernels.shufflePrefix
+    val names = namesOf(actual)
+    val shuffleNames = scala.collection.mutable.Queue.from(all(actual.body).collect { case s: WarpShuffle[?, ?] => s.local.name })
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): LocalVariable[T] = local(names.dequeue(), initial)
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"), value[Int]("count"))) { p =>
+      val count = declare(p._3).read
+      scoped {
+        val lane = declare(threadIdx.x).read
+        val i = declare(blockIdx.x * blockDim.x + lane).read
+        val total = declare(choose(i < count)(p._1(i).read)(literal(0.0f)))
+        val full = literal(UInt.fromBits(-1))
+        for distance <- Vector(1, 2, 4, 8, 16) do
+          val added = declare(warp.shuffleUp(shuffleNames.dequeue(), full, total.read,
+            literal(UInt.fromBits(distance)), 32)).read
+          when(lane >= literal(distance)) { total := total.read + added }
+        when(i < count) { p._2(i) := total.read }
+      }
+    }.requiringBlock(LaunchBlock.x(32))
+    assert(names.isEmpty)
+    assert(shuffleNames.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted width-8 down and xor shuffles exactly match explicit segment exchanges"):
+    val actual = ScalaKernels.shuffleFold
+    val names = namesOf(actual)
+    val shuffleNames = scala.collection.mutable.Queue.from(all(actual.body).collect { case s: WarpShuffle[?, ?] => s.local.name })
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Double]("data"), output[Double]("target"), value[Int]("count"))) { p =>
+      val lane = declare(threadIdx.x)
+      val i = declare(blockIdx.x * blockDim.x + lane)
+      val item = declare(choose(i < p._3)(p._1(i).read)(literal(0.5)))
+      val full = literal(UInt.fromBits(-1))
+      val down = declare(warp.shuffleDown(shuffleNames.dequeue(), full, item, literal(UInt.fromBits(2)), 8))
+      val partner = declare(warp.shuffleXor(shuffleNames.dequeue(), full, item, literal(1), 8))
+      when(i < p._3) { p._2(i) := down - partner }
+    }.requiringBlock(LaunchBlock.x(32))
+    assert(names.isEmpty)
+    assert(shuffleNames.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
   test("quoted row loops exactly match ordered explicit DSL loops and bound snapshots"):
     val actual = ScalaKernels.rowSum
     val names = namesOf(actual)
@@ -1371,7 +1437,8 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.phaseExchange, () => ScalaKernels.phaseReuse,
       () => ScalaKernels.warpExchange, () => ScalaKernels.warpReuse, () => ScalaKernels.warpGroups,
       () => ScalaKernels.warpSum, () => ScalaKernels.warpGroupSums, () => ScalaKernels.warpSumRounds,
-      () => ScalaKernels.blockSum, () => ScalaKernels.blockTreeMax, () => ScalaKernels.blockSumReuse)
+      () => ScalaKernels.blockSum, () => ScalaKernels.blockTreeMax, () => ScalaKernels.blockSumReuse,
+      () => ScalaKernels.shuffleRotate, () => ScalaKernels.shufflePrefix, () => ScalaKernels.shuffleFold)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)

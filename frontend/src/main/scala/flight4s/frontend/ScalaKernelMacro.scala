@@ -108,6 +108,10 @@ private[frontend] object ScalaKernelMacro:
     val fullMaskSymbol = TypeRepr.of[ScalaKernel.sync.type].typeSymbol.fieldMember("fullMask")
     val warpReduceMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("warpReduceSum")
     val warpTreeMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("warpReduceTree")
+    val warpShuffleMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("warpShuffle")
+    val warpShuffleUpMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("warpShuffleUp")
+    val warpShuffleDownMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("warpShuffleDown")
+    val warpShuffleXorMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("warpShuffleXor")
     val blockReductionSymbol = TypeRepr.of[ScalaKernel.DeviceBlockReduction[Any]].typeSymbol
     val blockSumMethods = blockReductionSymbol.methodMember("sum")
     val blockTreeMethods = blockReductionSymbol.methodMember("reduceTree")
@@ -341,6 +345,11 @@ private[frontend] object ScalaKernelMacro:
           case _ if invocation(source).exists((selection, _) =>
               blockSumMethods.contains(selection.symbol) || blockTreeMethods.contains(selection.symbol)) =>
             report.errorAndAbort("ScalaKernel block reductions must directly initialize a primitive val or var; embedded reductions are not supported yet", source.pos)
+          case _ if markerArguments(source, warpShuffleMethods).isDefined ||
+              markerArguments(source, warpShuffleUpMethods).isDefined ||
+              markerArguments(source, warpShuffleDownMethods).isDefined ||
+              markerArguments(source, warpShuffleXorMethods).isDefined =>
+            report.errorAndAbort("ScalaKernel warp shuffles must directly initialize a primitive val or var; embedded shuffles are not supported yet", source.pos)
           case _ => invocation(source) match
             case Some((selection, _)) if traversalFoldMethods.contains(selection.symbol) =>
               report.errorAndAbort("ScalaKernel foldLeft must directly initialize a primitive val or var, or an immutable tuple val; embedded folds are not supported yet", source.pos)
@@ -550,14 +559,16 @@ private[frontend] object ScalaKernelMacro:
         case other => report.errorAndAbort(
           s"ScalaKernel $label require a literal matching two-parameter combine lambda", other.pos)
 
+    def warpWidth(widthTerm: Option[Term], label: String)(using Quotes): Int = widthTerm match
+      case None => 32
+      case Some(term) => unwrapped(term) match
+        case Literal(IntConstant(value)) if Set(1, 2, 4, 8, 16, 32).contains(value) => value
+        case other => report.errorAndAbort(
+          s"ScalaKernel $label widths must be compile-time constants 1, 2, 4, 8, 16 or 32", other.pos)
+
     def warpReductionGeometry(maskTerm: Term, widthTerm: Option[Term])(using Quotes): (Int, Int) =
       val (bits, maskPosition) = warpMaskBits(maskTerm)
-      val width = widthTerm match
-        case None => 32
-        case Some(term) => unwrapped(term) match
-          case Literal(IntConstant(value)) if Set(1, 2, 4, 8, 16, 32).contains(value) => value
-          case other => report.errorAndAbort(
-            "ScalaKernel warp reduction widths must be compile-time constants 1, 2, 4, 8, 16 or 32", other.pos)
+      val width = warpWidth(widthTerm, "warp reduction")
       // Mirror the staged group rule so misuse fails at compile time instead of kernel construction.
       val lanes = java.lang.Integer.toUnsignedLong(bits)
       val complete = (0 until 32 by width).forall { start =>
@@ -591,6 +602,37 @@ private[frontend] object ScalaKernelMacro:
               expression[T](translated, scope, bindings)
             }
         }(using ${instance.asExprOf[WarpShuffleType[T]]}, $builder, ${position(source)}) }
+
+    def warpShuffleCall[T: Type](source: Term, kind: WarpShuffleOperator[?], maskTerm: Term, valueTerm: Term,
+        selectorTerm: Term, widthTerm: Option[Term], env: Environment, bindings: Expr[Params],
+        builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[DeviceExpr[T]] =
+      val instance = reductionInstance[T](source, "warp shuffles")
+      val shuffleType = instance.asExprOf[WarpShuffleType[T]]
+      val mask = warpMask(maskTerm)
+      val width = warpWidth(widthTerm, "warp shuffle")
+      val value = expression[T](valueTerm, env, bindings)
+      def boundedSelector(): Int = unwrapped(selectorTerm) match
+        case Literal(IntConstant(selector)) if selector >= 0 && selector <= 31 => selector
+        case other => report.errorAndAbort(
+          "ScalaKernel warp shuffle deltas and lane masks must be compile-time Int constants in 0 to 31", other.pos)
+      kind match
+        case WarpShuffleOperator.Direct =>
+          unwrapped(selectorTerm) match
+            case negative @ Literal(IntConstant(lane)) if lane < 0 =>
+              report.errorAndAbort("ScalaKernel warp shuffle source lanes must be nonnegative", negative.pos)
+            case _ => ()
+          val sourceLane = expression[Int](selectorTerm, env, bindings)
+          '{ CudaDsl.warp.shuffle[T]($mask, $value, $sourceLane, ${Expr(width)})(using $shuffleType, $builder, ${position(source)}) }
+        case WarpShuffleOperator.Up =>
+          val delta = '{ flight4s.core.ir.Literal(UInt.fromBits(${Expr(boundedSelector())}), U32, ${span(selectorTerm.pos)}) }
+          '{ CudaDsl.warp.shuffleUp[T]($mask, $value, $delta, ${Expr(width)})(using $shuffleType, $builder, ${position(source)}) }
+        case WarpShuffleOperator.Down =>
+          val delta = '{ flight4s.core.ir.Literal(UInt.fromBits(${Expr(boundedSelector())}), U32, ${span(selectorTerm.pos)}) }
+          '{ CudaDsl.warp.shuffleDown[T]($mask, $value, $delta, ${Expr(width)})(using $shuffleType, $builder, ${position(source)}) }
+        case WarpShuffleOperator.Xor =>
+          boundedSelector()
+          val laneMask = expression[Int](selectorTerm, env, bindings)
+          '{ CudaDsl.warp.shuffleXor[T]($mask, $value, $laneMask, ${Expr(width)})(using $shuffleType, $builder, ${position(source)}) }
 
     def blockReductionCall[T: Type](source: Term, selection: Select, valueTerm: Term, callback: Option[Term],
         env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[DeviceExpr[T]] =
@@ -630,6 +672,15 @@ private[frontend] object ScalaKernelMacro:
         case (selection, List(List(value))) if blockSumMethods.contains(selection.symbol) => (selection, value, None)
         case (selection, List(List(value), List(callback))) if blockTreeMethods.contains(selection.symbol) => (selection, value, Some(callback))
       }
+      def shuffleArguments(methods: List[Symbol], kind: WarpShuffleOperator[?]) =
+        markerArguments(source, methods).collect {
+          case List(List(mask, value, selector)) => (kind, mask, value, selector, None)
+          case List(List(mask, value, selector, width)) => (kind, mask, value, selector, Some(width))
+        }
+      val shuffleCall = shuffleArguments(warpShuffleMethods, WarpShuffleOperator.Direct)
+        .orElse(shuffleArguments(warpShuffleUpMethods, WarpShuffleOperator.Up))
+        .orElse(shuffleArguments(warpShuffleDownMethods, WarpShuffleOperator.Down))
+        .orElse(shuffleArguments(warpShuffleXorMethods, WarpShuffleOperator.Xor))
       invocation(source) match
         case Some((selection, List(List(initial), List(callback)))) if traversalFoldMethods.contains(selection.symbol) =>
           if !(source.tpe.widen.dealias =:= TypeRepr.of[T]) then
@@ -661,7 +712,10 @@ private[frontend] object ScalaKernelMacro:
             case None => blockCall match
               case Some((selection, value, callback)) =>
                 consume(blockReductionCall[T](source, selection, value, callback, env, bindings, builder))
-              case None => consume(expression[T](source, env, bindings))
+              case None => shuffleCall match
+                case Some((kind, mask, value, selector, width)) =>
+                  consume(warpShuffleCall[T](source, kind, mask, value, selector, width, env, bindings, builder))
+                case None => consume(expression[T](source, env, bindings))
 
     def tupleInitializer(term: Term, stateType: TypeRepr, env: Environment,
         bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(
