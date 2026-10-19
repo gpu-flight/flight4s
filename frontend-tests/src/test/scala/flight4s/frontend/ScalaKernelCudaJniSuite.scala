@@ -1557,6 +1557,118 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("quoted scoped minima and maxima return exact old values and clamp every element"):
+    val definition = ScalaKernels.scopedBounds
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => i % 19 - 9)
+          val floorSeeds = Array.tabulate(math.max(1, count))(i => i % 13 - 6)
+          val ceilingSeeds = Array.tabulate(math.max(1, count))(i => i % 7 - 3)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val floors = context.allocate[Int](floorSeeds.length).toOption.get
+          val ceilings = context.allocate[Int](ceilingSeeds.length).toOption.get
+          val out = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expectedFloors = Vector.tabulate(floorSeeds.length)(i =>
+              if i < count then math.min(floorSeeds(i), initial(i)) else floorSeeds(i))
+            val expectedCeilings = Vector.tabulate(ceilingSeeds.length)(i =>
+              if i < count then math.max(ceilingSeeds(i), initial(i)) else ceilingSeeds(i))
+            val expectedOut = Vector.tabulate(count)(i => floorSeeds(i) + ceilingSeeds(i))
+            for explicit <- Vector(false, true) do
+              assertEquals(floors.copyFrom(floorSeeds), Right(()))
+              assertEquals(ceilings.copyFrom(ceilingSeeds), Right(()))
+              assertEquals(out.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, floors, ceilings, out, count)), config(count), stream, explicit)
+              assertEquals(out.copyToArray().toOption.get.toVector, expectedOut ++ Vector.fill(32)(-999))
+              assertEquals(floors.copyToArray().toOption.get.toVector, expectedFloors)
+              assertEquals(ceilings.copyToArray().toOption.get.toVector, expectedCeilings)
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            out.close()
+            ceilings.close()
+            floors.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted scoped bitwise fetches thread old values through chained masks per element"):
+    val definition = ScalaKernels.scopedBitmask
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => i % 19 - 9)
+          val maskSeeds = Array.tabulate(math.max(1, count))(i => i % 23 - 11)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val masks = context.allocate[Int](maskSeeds.length).toOption.get
+          val andOld = context.allocate[Int](count + 32).toOption.get
+          val orOld = context.allocate[Int](count + 32).toOption.get
+          val xorOld = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val afterAnd = Vector.tabulate(count)(i => maskSeeds(i) & initial(i))
+            val afterOr = afterAnd.map(_ | 5)
+            val expectedMasks = Vector.tabulate(maskSeeds.length)(i =>
+              if i < count then afterOr(i) ^ 3 else maskSeeds(i))
+            for explicit <- Vector(false, true) do
+              assertEquals(masks.copyFrom(maskSeeds), Right(()))
+              for buffer <- Vector(andOld, orOld, xorOld) do
+                assertEquals(buffer.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, masks, andOld, orOld, xorOld, count)), config(count), stream, explicit)
+              assertEquals(andOld.copyToArray().toOption.get.toVector,
+                Vector.tabulate(count)(maskSeeds(_)) ++ Vector.fill(32)(-999))
+              assertEquals(orOld.copyToArray().toOption.get.toVector, afterAnd ++ Vector.fill(32)(-999))
+              assertEquals(xorOld.copyToArray().toOption.get.toVector, afterOr ++ Vector.fill(32)(-999))
+              assertEquals(masks.copyToArray().toOption.get.toVector, expectedMasks)
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            xorOld.close()
+            orOld.close()
+            andOld.close()
+            masks.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted compare exchanges claim one winner per block and swap exactly the matching elements"):
+    val definition = ScalaKernels.scopedClaim
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val blocks = math.max(1, (count + 63) / 64)
+          val initial = Array.tabulate(math.max(1, count))(i => i % 19 - 9)
+          val cellSeeds = Array.tabulate(math.max(1, count))(i => i % 13 - 6)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val cells = context.allocate[Int](cellSeeds.length).toOption.get
+          val winners = context.allocate[Int](blocks).toOption.get
+          val out = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expectedCells = Vector.tabulate(cellSeeds.length)(i =>
+              if i < count && i % 2 == 0 then initial(i) else cellSeeds(i))
+            val expectedOut = Vector.tabulate(count)(cellSeeds(_)) ++
+              Vector.fill(31)(-999) :+ 0
+            for explicit <- Vector(false, true) do
+              assertEquals(cells.copyFrom(cellSeeds), Right(()))
+              assertEquals(winners.copyFrom(Array.fill(blocks)(0)), Right(()))
+              assertEquals(out.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, cells, winners, out, count)), config(count), stream, explicit)
+              assertEquals(out.copyToArray().toOption.get.toVector, expectedOut)
+              assertEquals(cells.copyToArray().toOption.get.toVector, expectedCells)
+              assertEquals(winners.copyToArray().toOption.get.toVector, Vector.fill(blocks)(1))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            out.close()
+            winners.close()
+            cells.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))

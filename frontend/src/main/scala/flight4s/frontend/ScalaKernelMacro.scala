@@ -122,7 +122,16 @@ private[frontend] object ScalaKernelMacro:
     val scopedExchangeMethods = scopedAtomicSymbol.methodMember("exchange")
     val scopedFetchAddMethods = scopedAtomicSymbol.methodMember("fetchAdd")
     val scopedFetchSubMethods = scopedAtomicSymbol.methodMember("fetchSub")
-    val scopedResultMethods = scopedLoadMethods ++ scopedExchangeMethods ++ scopedFetchAddMethods ++ scopedFetchSubMethods
+    val scopedFetchMinMethods = scopedAtomicSymbol.methodMember("fetchMin")
+    val scopedFetchMaxMethods = scopedAtomicSymbol.methodMember("fetchMax")
+    val scopedFetchAndMethods = scopedAtomicSymbol.methodMember("fetchAnd")
+    val scopedFetchOrMethods = scopedAtomicSymbol.methodMember("fetchOr")
+    val scopedFetchXorMethods = scopedAtomicSymbol.methodMember("fetchXor")
+    val scopedCompareExchangeMethods = scopedAtomicSymbol.methodMember("compareExchange")
+    val scopedIntegralFetchMethods = scopedFetchMinMethods ++ scopedFetchMaxMethods ++
+      scopedFetchAndMethods ++ scopedFetchOrMethods ++ scopedFetchXorMethods
+    val scopedResultMethods = scopedLoadMethods ++ scopedExchangeMethods ++ scopedFetchAddMethods ++
+      scopedFetchSubMethods ++ scopedIntegralFetchMethods ++ scopedCompareExchangeMethods
     val atomicDeviceMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("atomicDevice")
     val atomicBlockMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("atomicBlock")
     val memoryOrderModule = Symbol.requiredModule("flight4s.core.ir.MemoryOrder")
@@ -753,6 +762,11 @@ private[frontend] object ScalaKernelMacro:
         case _ => report.errorAndAbort("ScalaKernel scoped atomics support Int, Float and Double elements only", position)
       instance.asExprOf[AtomicValueType[t]]
 
+    def scopedIntegralInstance[t: Type](position: Position)(using Quotes): Expr[AtomicIntegralType[t]] =
+      Type.of[t] match
+        case '[Int] => '{ I32 }.asExprOf[AtomicIntegralType[t]]
+        case _ => report.errorAndAbort("ScalaKernel scoped integral atomics support Int elements only", position)
+
     def scopedAtomicTarget(selection: Select)(using Quotes): (Boolean, Term) =
       markerArguments(selection.qualifier, atomicDeviceMethods) match
         case Some(List(List(target))) => (true, unwrapped(target))
@@ -803,26 +817,52 @@ private[frontend] object ScalaKernelMacro:
           "ScalaKernel atomics require a read-write buffer element or rank-1 shared element target", selection.pos)
 
     def scopedResultInitializer[T: Type](source: Term, selection: Select, operands: List[Term], orderTerm: Term,
-        env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[DeviceExpr[T]] =
+        failureTerm: Option[Term], env: Environment, bindings: Expr[Params],
+        builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[DeviceExpr[T]] =
       if !(source.tpe.widen.dealias =:= TypeRepr.of[T]) then
         report.errorAndAbort("ScalaKernel atomics require a matching primitive value type", source.pos)
       val (device, target) = scopedAtomicTarget(selection)
       val (order, orderExpr) = memoryOrder(orderTerm)
       if scopedLoadMethods.contains(selection.symbol) && !order.validForLoad then report.errorAndAbort(
         "ScalaKernel atomic loads allow Relaxed, Acquire or SequentiallyConsistent orders only", orderTerm.pos)
+      // Mirrors core permitsFailure so illegal pairs fail at expansion, not validation.
+      val failureExpr = failureTerm.map { term =>
+        val (failureOrder, failure) = memoryOrder(term)
+        if !order.permitsFailure(failureOrder) then report.errorAndAbort(
+          "ScalaKernel compareExchange failure orders must be Relaxed, Acquire or SequentiallyConsistent and no stronger than the success order", term.pos)
+        failure
+      }
+      val integral = scopedIntegralFetchMethods.contains(selection.symbol) ||
+        scopedCompareExchangeMethods.contains(selection.symbol)
       val location = span(source.pos)
       val instance = scopedAtomicInstance[T](source.pos)
+      val integralInstance = if integral then Some(scopedIntegralInstance[T](source.pos)) else None
       def staged[S <: Global | Shared: Type](ref: Expr[AtomicRef[T, S]]): Expr[DeviceExpr[T]] =
         if scopedLoadMethods.contains(selection.symbol) then
           '{ $ref.load($orderExpr)(using $builder, ${position(source)}) }
+        else if scopedCompareExchangeMethods.contains(selection.symbol) then
+          val expected = expression[T](operands(0), env, bindings)
+          val desired = expression[T](operands(1), env, bindings)
+          '{ $ref.compareExchange($expected, $desired, $orderExpr, ${failureExpr.get})(using
+              ${integralInstance.get}, $builder, ${position(source)}) }
         else
           val value = expression[T](operands.head, env, bindings)
           if scopedExchangeMethods.contains(selection.symbol) then
             '{ $ref.exchange($value, $orderExpr)(using $builder, ${position(source)}) }
           else if scopedFetchAddMethods.contains(selection.symbol) then
             '{ $ref.fetchAdd($value, $orderExpr)(using $builder, ${position(source)}) }
-          else
+          else if scopedFetchSubMethods.contains(selection.symbol) then
             '{ $ref.fetchSub($value, $orderExpr)(using $builder, ${position(source)}) }
+          else if scopedFetchMinMethods.contains(selection.symbol) then
+            '{ $ref.fetchMin($value, $orderExpr)(using ${integralInstance.get}, $builder, ${position(source)}) }
+          else if scopedFetchMaxMethods.contains(selection.symbol) then
+            '{ $ref.fetchMax($value, $orderExpr)(using ${integralInstance.get}, $builder, ${position(source)}) }
+          else if scopedFetchAndMethods.contains(selection.symbol) then
+            '{ $ref.fetchAnd($value, $orderExpr)(using ${integralInstance.get}, $builder, ${position(source)}) }
+          else if scopedFetchOrMethods.contains(selection.symbol) then
+            '{ $ref.fetchOr($value, $orderExpr)(using ${integralInstance.get}, $builder, ${position(source)}) }
+          else
+            '{ $ref.fetchXor($value, $orderExpr)(using ${integralInstance.get}, $builder, ${position(source)}) }
       invocation(target) match
         case Some((access, List(List(index)))) if readMethods.contains(access.symbol) =>
           val array = binding(access.qualifier, env, bindings).getOrElse(
@@ -902,9 +942,13 @@ private[frontend] object ScalaKernelMacro:
       }
       val scopedResult = invocation(source).collect {
         case (selection, List(List(order))) if scopedLoadMethods.contains(selection.symbol) =>
-          (selection, Nil, order)
+          (selection, Nil, order, None)
         case (selection, List(List(value, order))) if scopedResultMethods.contains(selection.symbol) &&
-            !scopedLoadMethods.contains(selection.symbol) => (selection, List(value), order)
+            !scopedLoadMethods.contains(selection.symbol) &&
+            !scopedCompareExchangeMethods.contains(selection.symbol) => (selection, List(value), order, None)
+        case (selection, List(List(expected, desired, success, failure)))
+            if scopedCompareExchangeMethods.contains(selection.symbol) =>
+          (selection, List(expected, desired), success, Some(failure))
       }
       invocation(source) match
         case Some((selection, List(List(initial), List(callback)))) if traversalFoldMethods.contains(selection.symbol) =>
@@ -944,8 +988,8 @@ private[frontend] object ScalaKernelMacro:
                   case Some((selection, value)) =>
                     consume(atomicFetchInitializer[T](source, selection, value, env, bindings, builder))
                   case None => scopedResult match
-                    case Some((selection, operands, order)) =>
-                      consume(scopedResultInitializer[T](source, selection, operands, order, env, bindings, builder))
+                    case Some((selection, operands, order, failure)) =>
+                      consume(scopedResultInitializer[T](source, selection, operands, order, failure, env, bindings, builder))
                     case None => consume(expression[T](source, env, bindings))
 
     def tupleInitializer(term: Term, stateType: TypeRepr, env: Environment,
