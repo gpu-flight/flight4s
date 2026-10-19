@@ -363,7 +363,43 @@ for (int distance = 1; distance < 32; distance *= 2) {   // unrolled in practice
 if (i < count) target[i] = current;
 ```
 
-Votes and shuffles remain separate quoted slices.
+Votes remain a separate quoted slice.
+
+### Warp Shuffle Contract
+
+`warpShuffle`, `warpShuffleUp`, `warpShuffleDown` and `warpShuffleXor` stage the
+four explicit-DSL shuffle primitives: register exchanges between the lanes of a
+warp, with no shared memory, no barrier and no memory ordering. Masks and widths
+reuse the warp admission (compile-time constant masks, literal widths 1 through
+32; shuffles need no aligned-group rule, only a nonempty mask). Direct source
+lanes admit any admitted Int expression, and a literal source must be
+nonnegative; up/down deltas and xor lane masks are compile-time literals in
+0 to 31, because core deltas are UInt and quoted code admits no conversions.
+Values are Int, Float or Double; results are initializer-only.
+
+```scala
+var total = if i < count then data(i) else 0.0f
+val add1 = warpShuffleUp(sync.fullMask, total, 1)
+if lane >= 1 then total += add1
+val add2 = warpShuffleUp(sync.fullMask, total, 2)
+if lane >= 2 then total += add2
+// ... distances 4, 8, 16 complete the inclusive prefix sum.
+```
+
+Equivalent CUDA C++ (names simplified; one step shown):
+
+```cpp
+float total = i < count ? data[i] : 0.0f;
+const float add1 = ::__shfl_up_sync(0xffffffffu, total, 1u, 32);
+if (lane >= 1) total = total + add1;
+```
+
+The width splits the warp into independent segments and lane movement wraps
+within each segment; up/down lanes outside the segment keep their own value.
+Every calling lane must be named by the mask, and reading from an inactive or
+unnamed lane is undefined: `WarpParticipationMayDiverge` stays a diagnostic per
+shuffle under lane-varying control. Dynamic deltas and lane masks, UInt values
+and votes/ballots remain deferred.
 
 ### Block Reduction Contract
 

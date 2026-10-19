@@ -133,6 +133,45 @@ object ScalaKernels:
     if i < p._3 then p._2(i) = total - smallest
   }.requiringBlock(LaunchBlock.x(128))
 
+  def shuffleRotate = kernel("quotedShuffleRotate", params(input[Int]("data"), output[Int]("target"),
+      value[Int]("count"))) { p =>
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    val item = if i < p._3 then p._1(i) else -7
+    val first = warpShuffle(sync.fullMask, item, 0)
+    val source = (lane + 1) % 32
+    val next = warpShuffle(sync.fullMask, item, source)
+    if i < p._3 then p._2(i) = first + next
+  }.requiringBlock(LaunchBlock.x(32))
+
+  def shufflePrefix = kernel("quotedShufflePrefix", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("count"))) { (data, target, count) =>
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    var total = if i < count then data(i) else 0.0f
+    val add1 = warpShuffleUp(sync.fullMask, total, 1)
+    if lane >= 1 then total += add1
+    val add2 = warpShuffleUp(sync.fullMask, total, 2)
+    if lane >= 2 then total += add2
+    val add4 = warpShuffleUp(sync.fullMask, total, 4)
+    if lane >= 4 then total += add4
+    val add8 = warpShuffleUp(sync.fullMask, total, 8)
+    if lane >= 8 then total += add8
+    val add16 = warpShuffleUp(sync.fullMask, total, 16)
+    if lane >= 16 then total += add16
+    if i < count then target(i) = total
+  }.requiringBlock(LaunchBlock.x(32))
+
+  def shuffleFold = kernel("quotedShuffleFold", params(input[Double]("data"), output[Double]("target"),
+      value[Int]("count"))) { p =>
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    val item = if i < p._3 then p._1(i) else 0.5
+    val down = warpShuffleDown(sync.fullMask, item, 2, 8)
+    val partner = warpShuffleXor(sync.fullMask, item, 1, 8)
+    if i < p._3 then p._2(i) = down - partner
+  }.requiringBlock(LaunchBlock.x(32))
+
   def sharedExchange = kernel("quotedSharedExchange", params(input[Float]("data"), output[Float]("target"),
       value[Int]("count"))) { (data, target, count) =>
     val tile = sharedArray[Float](64)

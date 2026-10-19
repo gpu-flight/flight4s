@@ -83,6 +83,22 @@ object ScalaKernel:
   /** Same tree over independent aligned lane groups of the compile-time width. */
   def warpReduceTree[T](mask: Int, value: T, width: Int)(combine: (T, T) => T): T = markerOnly()
 
+  /** Receives the value the source lane passed into this call; a register exchange, not a barrier. */
+  def warpShuffle[T](mask: Int, value: T, sourceLane: Int): T = markerOnly()
+  def warpShuffle[T](mask: Int, value: T, sourceLane: Int, width: Int): T = markerOnly()
+
+  /** Lane i receives from lane i - delta inside its width segment; low lanes keep their own value. */
+  def warpShuffleUp[T](mask: Int, value: T, delta: Int): T = markerOnly()
+  def warpShuffleUp[T](mask: Int, value: T, delta: Int, width: Int): T = markerOnly()
+
+  /** Lane i receives from lane i + delta inside its width segment; high lanes keep their own value. */
+  def warpShuffleDown[T](mask: Int, value: T, delta: Int): T = markerOnly()
+  def warpShuffleDown[T](mask: Int, value: T, delta: Int, width: Int): T = markerOnly()
+
+  /** Exchanges with lane i XOR laneMask inside the width segment; one butterfly step. */
+  def warpShuffleXor[T](mask: Int, value: T, laneMask: Int): T = markerOnly()
+  def warpShuffleXor[T](mask: Int, value: T, laneMask: Int, width: Int): T = markerOnly()
+
   /** Per-block reduction scratch bound to one compile-time 1-D launch shape. */
   final class DeviceBlockReduction[T] private[frontend] ():
     def sum(value: T): T = markerOnly()

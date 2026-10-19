@@ -1301,6 +1301,90 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("quoted direct shuffles broadcast and rotate Int lanes within each warp on both GPU stream paths"):
+    val definition = ScalaKernels.shuffleRotate
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => i % 23 - 11)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val target = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            def item(index: Int): Int = if index < count then initial(index) else -7
+            val expected = Vector.tabulate(count) { i =>
+              val base = (i / 32) * 32
+              item(base) + item(base + (i % 32 + 1) % 32)
+            }
+            assert(function.launch(definition.bind((data, target, count)), LaunchConfig(Grid.x(1), LaunchBlock.x(64))).isLeft)
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, target, count)), config32(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted shuffle-up scans compute exact inclusive Float prefix sums per warp"):
+    val definition = ScalaKernels.shufflePrefix
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 9 - 4).toFloat * 0.25f)
+          val data = context.allocate[Float](initial.length).toOption.get
+          val target = context.allocate[Float](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(count) { i =>
+              val base = (i / 32) * 32
+              (base to i).map(k => if k < count then initial(k) else 0.0f).sum
+            }
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999f)), Right(()))
+              launch(context, function, definition.bind((data, target, count)), config32(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted width-8 down and xor shuffles exchange Double segments with sentinel tails"):
+    val definition = ScalaKernels.shuffleFold
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 17 - 8).toDouble * 0.25)
+          val data = context.allocate[Double](initial.length).toOption.get
+          val target = context.allocate[Double](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            def item(index: Int): Double = if index < count then initial(index) else 0.5
+            val expected = Vector.tabulate(count) { i =>
+              val segment = (i / 8) * 8
+              val j = i % 8
+              val down = if j + 2 < 8 then item(segment + j + 2) else item(i)
+              val partner = item(segment + (j ^ 1))
+              down - partner
+            }
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999.0)), Right(()))
+              launch(context, function, definition.bind((data, target, count)), config32(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999.0))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))
