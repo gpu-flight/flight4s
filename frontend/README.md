@@ -401,6 +401,40 @@ unnamed lane is undefined: `WarpParticipationMayDiverge` stays a diagnostic per
 shuffle under lane-varying control. Dynamic deltas and lane masks, UInt values
 and votes/ballots remain deferred.
 
+### Atomic Contract
+
+`atomic(target)` wraps one mutable element for exactly one atomic operation:
+`atomic(target).add(value)` is a statement with no result, and
+`val old = atomic(target).fetchAdd(value)` binds CUDA's returned old value (the
+pre-add contents, not the sum) to a device local, initializer-only like every
+value-producing marker. Both lower to plain CUDA `atomicAdd`: device-scope,
+relaxed ordering. Scoped and order-aware operations (block scope, min/max,
+compare-exchange, explicit memory orders) are a separate upcoming slice.
+
+Targets are read-write buffer elements or rank-1 shared elements; elements are
+Int or Float (core `AtomicAddType` has no Double). The atomic view must be
+consumed immediately where it is written: it cannot be bound, aliased or
+escape. Atomics are divergence-safe, so no participation warnings apply, but
+they order nothing: visibility across threads still needs the existing
+barriers. In `fetchAdd`, when N threads add 1 to the same element, the returned
+old values are N distinct reservations in unspecified order.
+
+```scala
+val bin = ((data(i) % 8) + 8) % 8
+atomic(bins(bin)).add(1)
+val slot = atomic(cursor(0)).fetchAdd(1)
+packed(slot) = data(i)
+```
+
+Equivalent CUDA C++ (names simplified):
+
+```cpp
+const int bin = ((data[i] % 8) + 8) % 8;
+atomicAdd(&bins[bin], 1);
+const int slot = atomicAdd(&cursor[0], 1);
+packed[slot] = data[i];
+```
+
 ### Block Reduction Contract
 
 `blockReduction[T](threads)` declares power-of-two shared reduction scratch for
