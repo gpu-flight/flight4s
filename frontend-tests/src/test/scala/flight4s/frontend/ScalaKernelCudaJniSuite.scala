@@ -1467,6 +1467,96 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("quoted scoped release stores publish payloads that acquire loads observe across every block"):
+    val definition = ScalaKernels.scopedFlag
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val blocks = math.max(1, (count + 63) / 64)
+          val initial = Array.tabulate(math.max(1, count))(i => i % 19 - 9)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val cell = context.allocate[Int](blocks).toOption.get
+          val flag = context.allocate[Int](blocks).toOption.get
+          val out = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(count) { i =>
+              val base = (i / 64) * 64
+              if base < count then initial(base) else -5
+            }
+            for explicit <- Vector(false, true) do
+              assertEquals(cell.copyFrom(Array.fill(blocks)(-111)), Right(()))
+              assertEquals(flag.copyFrom(Array.fill(blocks)(0)), Right(()))
+              assertEquals(out.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, cell, flag, out, count)), config(count), stream, explicit)
+              assertEquals(out.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999))
+              assertEquals(flag.copyToArray().toOption.get.toVector, Vector.fill(blocks)(1))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            out.close()
+            flag.close()
+            cell.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted scoped exchanges and fetch subtractions return exact old values per element"):
+    val definition = ScalaKernels.scopedExchange
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => i % 19 - 9)
+          val seeds = Array.tabulate(math.max(1, count))(i => i % 13 - 6)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val cells = context.allocate[Int](seeds.length).toOption.get
+          val out = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expectedOut = Vector.tabulate(count)(i => seeds(i) + initial(i))
+            val expectedCells = Vector.tabulate(seeds.length)(i => if i < count then initial(i) - seeds(i) else seeds(i))
+            for explicit <- Vector(false, true) do
+              assertEquals(cells.copyFrom(seeds), Right(()))
+              assertEquals(out.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+              launch(context, function, definition.bind((data, cells, out, count)), config(count), stream, explicit)
+              assertEquals(out.copyToArray().toOption.get.toVector, expectedOut ++ Vector.fill(32)(-999))
+              assertEquals(cells.copyToArray().toOption.get.toVector, expectedCells)
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            out.close()
+            cells.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted block-scope shared counters accumulate exact Double totals through scoped atomics"):
+    val definition = ScalaKernels.scopedSharedCounter
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val blocks = math.max(1, (count + 63) / 64)
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 17 - 8).toDouble * 0.25)
+          val data = context.allocate[Double](initial.length).toOption.get
+          val totals = context.allocate[Double](blocks).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(blocks) { block =>
+              (0 until 64).map(lane => if block * 64 + lane < count then initial(block * 64 + lane) else 0.25).sum
+            }
+            assert(function.launch(definition.bind((data, totals, count)), LaunchConfig(Grid.x(1), LaunchBlock.x(32))).isLeft)
+            for explicit <- Vector(false, true) do
+              assertEquals(totals.copyFrom(Array.fill(blocks)(-999.0)), Right(()))
+              launch(context, function, definition.bind((data, totals, count)), config(count), stream, explicit)
+              assertEquals(totals.copyToArray().toOption.get.toVector, expected)
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            totals.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))
