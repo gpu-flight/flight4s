@@ -22,11 +22,9 @@ private[ml] object MlValidation:
     requireFinite(x.values, what)
 
   def requireFinite(values: Array[Double], what: String): Unit =
-    var index = 0
-    while index < values.length do
-      if !java.lang.Double.isFinite(values(index)) then
-        throw IllegalArgumentException(s"$what contains a nonfinite value at index $index")
-      index += 1
+    values.indices.find(index => !java.lang.Double.isFinite(values(index))).foreach { index =>
+      throw IllegalArgumentException(s"$what contains a nonfinite value at index $index")
+    }
 
   def requireFinite(value: Double, what: String): Unit =
     requireThat(java.lang.Double.isFinite(value), s"$what must be finite")

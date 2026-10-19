@@ -34,6 +34,16 @@ class MlpMathSuite extends FunSuite:
     // Biases are excluded: 2.5 + (0.1 / 2) * (4 + 9).
     assertEquals(MlpMath.objective(fixed, 2.5, 0.1), 2.5 + 0.05 * 13.0)
 
+  test("loss reductions preserve sequential addition across widely different magnitudes"):
+    val large = 134217728.0 // 2^27: its square is 2^54, where adding 1.0 rounds away.
+    val predictions = Array(large) ++ Array.fill(8)(1.0)
+    assertEquals(MlpMath.meanSquaredError(predictions, Array.fill(9)(0.0)), large * large / 9.0)
+
+    val current = MlpMath.Parameters(1, 8,
+      Array(large) ++ Array.fill(7)(0.0), Array.fill(8)(0.0), Array.fill(8)(1.0), 0.0)
+    // Summing W2 separately would retain its 8.0 and change the reference result.
+    assertEquals(MlpMath.objective(current, mse = 0.0, l2 = 2.0), large * large)
+
   private def objectiveOf(current: MlpMath.Parameters, x: DenseMatrix, y: Array[Double], l2: Double): Double =
     val forward = MlpMath.forward(current, x)
     MlpMath.objective(current, MlpMath.meanSquaredError(forward.predictions, y), l2)

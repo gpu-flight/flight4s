@@ -5,21 +5,20 @@ package flight4s.ml
 private[ml] object MlpJson:
   def write(model: MlpModel): String =
     MlpModel.validate(model)
-    val builder = StringBuilder()
-    builder ++= "{\n"
-    builder ++= s"""  "format": "${MlpModel.FormatName}",\n"""
-    builder ++= s"""  "version": ${MlpModel.FormatVersion},\n"""
-    builder ++= s"""  "inputSize": ${model.inputSize},\n"""
-    builder ++= s"""  "hiddenSize": ${model.hiddenSize},\n"""
-    builder ++= s"""  "activation": "${MlpModel.Activation}",\n"""
-    builder ++= s"""  "output": "${MlpModel.Output}",\n"""
-    builder ++= s"""  "precision": "${MlpModel.Precision}",\n"""
-    builder ++= s"""  "w1": ${numbers(model.w1)},\n"""
-    builder ++= s"""  "b1": ${numbers(model.b1)},\n"""
-    builder ++= s"""  "w2": ${numbers(model.w2)},\n"""
-    builder ++= s"""  "b2": ${model.b2}\n"""
-    builder ++= "}\n"
-    builder.result()
+    s"""|{
+        |  "format": "${MlpModel.FormatName}",
+        |  "version": ${MlpModel.FormatVersion},
+        |  "inputSize": ${model.inputSize},
+        |  "hiddenSize": ${model.hiddenSize},
+        |  "activation": "${MlpModel.Activation}",
+        |  "output": "${MlpModel.Output}",
+        |  "precision": "${MlpModel.Precision}",
+        |  "w1": ${numbers(model.w1)},
+        |  "b1": ${numbers(model.b1)},
+        |  "w2": ${numbers(model.w2)},
+        |  "b2": ${model.b2}
+        |}
+        |""".stripMargin
 
   private def numbers(values: Array[Double]): String =
     values.mkString("[", ", ", "]")

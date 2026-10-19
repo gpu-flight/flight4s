@@ -31,49 +31,44 @@ private[ml] object MlpMath:
     val rows = x.rows
     val inputSize = parameters.inputSize
     val hiddenSize = parameters.hiddenSize
-    val hidden = new Array[Double](rows * hiddenSize)
-    val predictions = new Array[Double](rows)
-    var row = 0
-    while row < rows do
-      val rowBase = row * inputSize
-      var output = parameters.b2
-      var h = 0
-      while h < hiddenSize do
-        var z = parameters.b1(h)
-        var d = 0
-        while d < inputSize do
-          z += x.values(rowBase + d) * parameters.w1(d * hiddenSize + h)
-          d += 1
-        val activation = math.tanh(z)
-        hidden(row * hiddenSize + h) = activation
-        output += activation * parameters.w2(h)
-        h += 1
-      predictions(row) = output
-      row += 1
+    val inputIndices = 0 until inputSize
+    val hiddenIndices = 0 until hiddenSize
+
+    val hidden = Array.tabulate(rows * hiddenSize) { index =>
+      val rowBase = (index / hiddenSize) * inputSize
+      val h = index % hiddenSize
+      val z = inputIndices.foldLeft(parameters.b1(h)) { (sum, d) =>
+        sum + x.values(rowBase + d) * parameters.w1(d * hiddenSize + h)
+      }
+      math.tanh(z)
+    }
+
+    val predictions = Array.tabulate(rows) { row =>
+      val hiddenBase = row * hiddenSize
+      hiddenIndices.foldLeft(parameters.b2) { (sum, h) =>
+        sum + hidden(hiddenBase + h) * parameters.w2(h)
+      }
+    }
     Forward(hidden, predictions)
 
   def meanSquaredError(predictions: Array[Double], targets: Array[Double]): Double =
-    var sum = 0.0
-    var index = 0
-    while index < predictions.length do
+    val sum = predictions.indices.foldLeft(0.0) { (sum, index) =>
       val difference = predictions(index) - targets(index)
-      sum += difference * difference
-      index += 1
+      sum + difference * difference
+    }
     sum / predictions.length
 
   /** objective = mse + (l2 / 2) * (sum W1^2 + sum W2^2); biases excluded. */
   def objective(parameters: Parameters, mse: Double, l2: Double): Double =
     if l2 == 0.0 then mse
     else
-      var weights = 0.0
-      var index = 0
-      while index < parameters.w1.length do
-        weights += parameters.w1(index) * parameters.w1(index)
-        index += 1
-      index = 0
-      while index < parameters.w2.length do
-        weights += parameters.w2(index) * parameters.w2(index)
-        index += 1
+      val inputWeights = parameters.w1.foldLeft(0.0) { (sum, weight) =>
+        sum + weight * weight
+      }
+      // Continue the same accumulator to preserve W1-then-W2 addition order.
+      val weights = parameters.w2.foldLeft(inputWeights) { (sum, weight) =>
+        sum + weight * weight
+      }
       mse + (l2 / 2.0) * weights
 
   /** Analytical full-batch gradients of the objective; L2 flows through the weight gradients. */
@@ -86,33 +81,23 @@ private[ml] object MlpMath:
     val b1Gradient = new Array[Double](hiddenSize)
     val w2Gradient = new Array[Double](hiddenSize)
     var b2Gradient = 0.0
-    var row = 0
-    while row < rows do
+    for row <- 0 until rows do
       val outputGradient = 2.0 * (forward.predictions(row) - targets(row)) / rows
       b2Gradient += outputGradient
       val hiddenBase = row * hiddenSize
       val rowBase = row * inputSize
-      var h = 0
-      while h < hiddenSize do
+      for h <- 0 until hiddenSize do
         val activation = forward.hidden(hiddenBase + h)
         w2Gradient(h) += activation * outputGradient
         val hiddenGradient = outputGradient * parameters.w2(h) * (1.0 - activation * activation)
         b1Gradient(h) += hiddenGradient
-        var d = 0
-        while d < inputSize do
+        for d <- 0 until inputSize do
           w1Gradient(d * hiddenSize + h) += x.values(rowBase + d) * hiddenGradient
-          d += 1
-        h += 1
-      row += 1
     if l2 != 0.0 then
-      var index = 0
-      while index < w1Gradient.length do
+      for index <- w1Gradient.indices do
         w1Gradient(index) += l2 * parameters.w1(index)
-        index += 1
-      var h = 0
-      while h < hiddenSize do
+      for h <- w2Gradient.indices do
         w2Gradient(h) += l2 * parameters.w2(h)
-        h += 1
     Gradients(w1Gradient, b1Gradient, w2Gradient, b2Gradient)
 
   /** One Adam update with bias correction for both moments; increments state.step once. */
@@ -127,13 +112,11 @@ private[ml] object MlpMath:
       (value - step, nextM, nextV)
     def updateArray(values: Array[Double], gradientValues: Array[Double],
         m: Array[Double], v: Array[Double]): Unit =
-      var index = 0
-      while index < values.length do
+      for index <- values.indices do
         val (value, nextM, nextV) = updated(values(index), gradientValues(index), m(index), v(index))
         values(index) = value
         m(index) = nextM
         v(index) = nextV
-        index += 1
     updateArray(parameters.w1, gradients.w1, state.w1M, state.w1V)
     updateArray(parameters.b1, gradients.b1, state.b1M, state.b1V)
     updateArray(parameters.w2, gradients.w2, state.w2M, state.w2V)
