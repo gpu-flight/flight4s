@@ -172,6 +172,34 @@ object ScalaKernels:
     if i < p._3 then p._2(i) = down - partner
   }.requiringBlock(LaunchBlock.x(32))
 
+  def atomicHistogram = kernel("quotedAtomicHistogram", params(input[Int]("data"), inOut[Int]("bins"),
+      value[Int]("count"))) { p =>
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    if i < p._3 then
+      val bin = ((p._1(i) % 8) + 8) % 8
+      atomic(p._2(bin)).add(1)
+  }
+
+  def atomicCompact = kernel("quotedAtomicCompact", params(input[Float]("data"), output[Float]("packed"),
+      inOut[Int]("cursor"), value[Int]("count"))) { p =>
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    if i < p._4 && p._1(i) > 0.0f then
+      val slot = atomic(p._3(0)).fetchAdd(1)
+      p._2(slot) = p._1(i)
+  }
+
+  def atomicSharedSum = kernel("quotedAtomicSharedSum", params(input[Float]("data"), output[Float]("totals"),
+      value[Int]("count"))) { (data, totals, count) =>
+    val tile = sharedArray[Float](1)
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    sync.blockAfter { if lane == 0 then tile(0) = 0.0f }
+    val item = if i < count then data(i) else 0.0f
+    atomic(tile(0)).add(item)
+    sync.block()
+    if lane == 0 then totals(blockIdx.x) = tile(0)
+  }.requiringBlock(LaunchBlock.x(64))
+
   def sharedExchange = kernel("quotedSharedExchange", params(input[Float]("data"), output[Float]("target"),
       value[Int]("count"))) { (data, target, count) =>
     val tile = sharedArray[Float](64)

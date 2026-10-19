@@ -1385,6 +1385,88 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("quoted atomic adds count Int histogram bins race-free across blocks on both GPU stream paths"):
+    val definition = ScalaKernels.atomicHistogram
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => i % 20 - 7)
+          val data = context.allocate[Int](initial.length).toOption.get
+          val bins = context.allocate[Int](8).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(8) { bin =>
+              bin * 100 + initial.take(count).count(value => ((value % 8) + 8) % 8 == bin)
+            }
+            for explicit <- Vector(false, true) do
+              assertEquals(bins.copyFrom(Array.tabulate(8)(bin => bin * 100)), Right(()))
+              launch(context, function, definition.bind((data, bins, count)), config(count), stream, explicit)
+              assertEquals(bins.copyToArray().toOption.get.toVector, expected)
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            bins.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted atomic fetch adds reserve unique compaction slots holding every positive Float"):
+    val definition = ScalaKernels.atomicCompact
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 9 - 4).toFloat * 0.25f)
+          val positives = initial.take(count).filter(_ > 0.0f)
+          val data = context.allocate[Float](initial.length).toOption.get
+          val packed = context.allocate[Float](count + 32).toOption.get
+          val cursor = context.allocate[Int](1).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for explicit <- Vector(false, true) do
+              assertEquals(packed.copyFrom(Array.fill(count + 32)(-999f)), Right(()))
+              assertEquals(cursor.copyFrom(Array(0)), Right(()))
+              launch(context, function, definition.bind((data, packed, cursor, count)), config(count), stream, explicit)
+              assertEquals(cursor.copyToArray().toOption.get.toVector, Vector(positives.length))
+              val packedOut = packed.copyToArray().toOption.get
+              // Slot order is unspecified; the packed prefix must be a permutation of the positives.
+              assertEquals(packedOut.take(positives.length).sorted.toVector, positives.sorted.toVector)
+              assert(packedOut.drop(positives.length).forall(_ == -999f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            cursor.close()
+            packed.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted shared atomic adds accumulate exact per-block Float totals with zeroed tails"):
+    val definition = ScalaKernels.atomicSharedSum
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val blocks = math.max(1, (count + 63) / 64)
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 9 - 4).toFloat * 0.25f)
+          val data = context.allocate[Float](initial.length).toOption.get
+          val totals = context.allocate[Float](blocks).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(blocks) { block =>
+              (0 until 64).map(lane => if block * 64 + lane < count then initial(block * 64 + lane) else 0.0f).sum
+            }
+            assert(function.launch(definition.bind((data, totals, count)), LaunchConfig(Grid.x(1), LaunchBlock.x(32))).isLeft)
+            for explicit <- Vector(false, true) do
+              assertEquals(totals.copyFrom(Array.fill(blocks)(-999f)), Right(()))
+              launch(context, function, definition.bind((data, totals, count)), config(count), stream, explicit)
+              assertEquals(totals.copyToArray().toOption.get.toVector, expected)
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            totals.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))

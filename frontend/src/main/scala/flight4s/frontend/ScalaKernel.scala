@@ -99,6 +99,17 @@ object ScalaKernel:
   def warpShuffleXor[T](mask: Int, value: T, laneMask: Int): T = markerOnly()
   def warpShuffleXor[T](mask: Int, value: T, laneMask: Int, width: Int): T = markerOnly()
 
+  /** One-shot atomic view over a mutable element; consumed immediately by one operation. */
+  final class DeviceAtomic[T] private[frontend] ():
+    /** Device-scope relaxed read-modify-write add; no result. */
+    def add(value: T): Unit = markerOnly()
+
+    /** The same transaction, binding CUDA's returned old value, not the new one. */
+    def fetchAdd(value: T): T = markerOnly()
+
+  /** Wraps a read-write buffer element or rank-1 shared element for one atomic operation. */
+  def atomic[T](target: T): DeviceAtomic[T] = markerOnly()
+
   /** Per-block reduction scratch bound to one compile-time 1-D launch shape. */
   final class DeviceBlockReduction[T] private[frontend] ():
     def sum(value: T): T = markerOnly()

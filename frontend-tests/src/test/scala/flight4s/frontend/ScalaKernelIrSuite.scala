@@ -69,6 +69,11 @@ class ScalaKernelIrSuite extends FunSuite:
       case (left: Barrier, right: Barrier) => left.copy(span = right.span)
       case (left: WarpBarrier, right: WarpBarrier) =>
         left.copy(mask = align(left.mask, right.mask), span = right.span)
+      case (left: AtomicAdd[?, ?], right: AtomicAdd[?, ?]) =>
+        left.copy(target = alignPlace(left.target, right.target), value = align(left.value, right.value), span = right.span)
+      case (left: AtomicFetchAdd[?, ?], right: AtomicFetchAdd[?, ?]) =>
+        left.copy(local = left.local.copy(span = right.local.span), target = alignPlace(left.target, right.target),
+          value = align(left.value, right.value), span = right.span)
       case (left: WarpShuffle[?, ?], right: WarpShuffle[?, ?]) =>
         assert(left.operator == right.operator, s"shuffle operators differ: $left / $right")
         assertEquals(left.width, right.width)
@@ -641,6 +646,64 @@ class ScalaKernelIrSuite extends FunSuite:
     assert(names.isEmpty)
     assert(shuffleNames.isEmpty)
     assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted atomic adds exactly match explicit global accumulation statements"):
+    val actual = ScalaKernels.atomicHistogram
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), inOut[Int]("bins"), value[Int]("count"))) { p =>
+      val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+      when(i < p._3) {
+        val bin = declare(((p._1(i).read % literal(8)) + literal(8)) % literal(8))
+        atomicAdd(p._2(bin), literal(1))
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted atomic fetch adds exactly match explicit named cursor reservations"):
+    val actual = ScalaKernels.atomicCompact
+    val names = namesOf(actual)
+    val resultNames = scala.collection.mutable.Queue.from(all(actual.body).collect { case a: AtomicFetchAdd[?, ?] => a.local.name })
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("packed"),
+        inOut[Int]("cursor"), value[Int]("count"))) { p =>
+      val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+      when((i < p._4) && (p._1(i).read > literal(0.0f))) {
+        val slot = declare(atomicFetchAdd(resultNames.dequeue(), p._3(literal(0)), literal(1)))
+        p._2(slot) := p._1(i).read
+      }
+    }
+    assert(names.isEmpty)
+    assert(resultNames.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted shared atomic adds exactly match explicit tile accumulation with barriers"):
+    val actual = ScalaKernels.atomicSharedSum
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("totals"), value[Int]("count"))) { p =>
+      val tile = sharedArray[Float](actual.sharedMemory.head.name, 1)
+      val count = declare(p._3)
+      scoped {
+        val lane = declare(threadIdx.x)
+        val i = declare(blockIdx.x * blockDim.x + lane)
+        scoped { when(lane === literal(0)) { tile(literal(0)) := literal(0.0f) } }
+        barrier()
+        val item = declare(choose(i < count)(p._1(i).read)(literal(0.0f)))
+        atomicAdd(tile(literal(0)), item)
+        barrier()
+        when(lane === literal(0)) { p._2(blockIdx.x) := tile(literal(0)).read }
+      }
+    }.requiringBlock(LaunchBlock.x(64))
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    val effects = EffectAnalysis.block(actual.body)
+    assert(effects.writtenSpaces.contains(EffectMemorySpace.Shared))
+    assert(effects.hasBarrier)
     assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
 
   test("quoted row loops exactly match ordered explicit DSL loops and bound snapshots"):
@@ -1438,7 +1501,8 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.warpExchange, () => ScalaKernels.warpReuse, () => ScalaKernels.warpGroups,
       () => ScalaKernels.warpSum, () => ScalaKernels.warpGroupSums, () => ScalaKernels.warpSumRounds,
       () => ScalaKernels.blockSum, () => ScalaKernels.blockTreeMax, () => ScalaKernels.blockSumReuse,
-      () => ScalaKernels.shuffleRotate, () => ScalaKernels.shufflePrefix, () => ScalaKernels.shuffleFold)
+      () => ScalaKernels.shuffleRotate, () => ScalaKernels.shufflePrefix, () => ScalaKernels.shuffleFold,
+      () => ScalaKernels.atomicHistogram, () => ScalaKernels.atomicCompact, () => ScalaKernels.atomicSharedSum)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)
