@@ -7,9 +7,16 @@ application owns feature engineering, normalization, chronological splits and
 model selection; this module owns parameters, forward propagation, loss,
 backpropagation, Adam, persistence and inference.
 
-Status: the CPU reference backend, model format and public API are implemented
-(this slice). The CUDA trainer backend arrives in the next slices and will be
-verified against this reference.
+Status: the CPU reference backend, model format, public API and the CUDA
+trainer's forward path (`CudaMlpTrainer` with GPU `predict`) are implemented.
+GPU predictions are verified against the CPU reference within an absolute
+tolerance of 1e-10 (CUDA and JVM `tanh` may differ in the last ulps). GPU
+training (backpropagation and Adam) arrives in the next slice; until then
+`trainEpoch` on the CUDA backend throws `UnsupportedOperationException` rather
+than silently using the CPU. Create it with
+`CudaMlpTrainer(config, optimizer)`; creation fails with an actionable error
+when CUDA or the native library is unavailable. GPU tests are gated by
+`-Dflight4s.cuda.native.path` and report skips otherwise.
 
 ## Data contract
 
@@ -82,5 +89,5 @@ the repository's `flight4s.cuda.native.path` gating when the CUDA trainer lands.
 ## Known limitations
 
 One hidden layer, scalar output, full-batch training, Double precision only.
-No CUDA backend yet (next slices), no resumable optimizer checkpoints, no
-gradient clipping, no mini-batches.
+GPU training is not implemented yet (next slice; GPU prediction works), no
+resumable optimizer checkpoints, no gradient clipping, no mini-batches.
