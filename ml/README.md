@@ -84,8 +84,38 @@ try
 finally trainer.close()
 ```
 
-Tests: `sbt ml/test` runs fully portable with no GPU. GPU-backed tests will use
-the repository's `flight4s.cuda.native.path` gating when the CUDA trainer lands.
+## Integration
+
+flight4s publishes no remote artifacts; consume the module as a pinned source
+dependency. Either reference the project directly:
+
+```scala
+// In the consuming build.sbt, with flight4s checked out at a pinned commit:
+lazy val flight4sMl = ProjectRef(file("../flight4s"), "ml")
+lazy val app = (project in file(".")).dependsOn(flight4sMl)
+```
+
+or publish locally from the flight4s checkout and depend on the coordinates:
+
+```bash
+sbt ml/publishLocal   # publishes io.github.gpu-flight %% flight4s-ml % 0.1.0-SNAPSHOT
+```
+
+Supported and tested environment: Scala 3.8.1, sbt 1.12.2, JDK 25 (Amazon
+Corretto), CUDA 13.3 on Windows x64 with an sm_120 device. The GPU backend
+needs the flight4s native library: build it per the repository instructions
+(CMake under `native/`, producing `flight4s_cuda.dll` or the platform
+equivalent) and pass `-Dflight4s.cuda.native.path=<path to the library>` to the
+JVM. CPU inference (`CpuInference`, `MlpModel.load`) needs neither CUDA nor the
+native library.
+
+Commands:
+
+```bash
+sbt ml/test                                                   # portable tests, no GPU needed
+sbt -Dflight4s.cuda.native.path=<lib> ml/test                 # portable plus GPU tests
+sbt -Dflight4s.cuda.native.path=<lib> "examples/runMain flight4s.examples.MlpRegressionExample 200"
+```
 
 ## Known limitations
 

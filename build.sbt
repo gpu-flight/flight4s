@@ -45,7 +45,7 @@ lazy val ml = (project in file("ml"))
   )
 
 lazy val examples = (project in file("examples"))
-  .dependsOn(runtime)
+  .dependsOn(runtime, ml)
   .settings(
     name := "flight4s-examples",
     publish / skip := true,
