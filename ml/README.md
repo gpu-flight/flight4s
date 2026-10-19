@@ -7,15 +7,16 @@ application owns feature engineering, normalization, chronological splits and
 model selection; this module owns parameters, forward propagation, loss,
 backpropagation, Adam, persistence and inference.
 
-Status: the CPU reference backend, model format, public API and the CUDA
-trainer's forward path (`CudaMlpTrainer` with GPU `predict`) are implemented.
-GPU predictions are verified against the CPU reference within an absolute
-tolerance of 1e-10 (CUDA and JVM `tanh` may differ in the last ulps). GPU
-training (backpropagation and Adam) arrives in the next slice; until then
-`trainEpoch` on the CUDA backend throws `UnsupportedOperationException` rather
-than silently using the CPU. Create it with
-`CudaMlpTrainer(config, optimizer)`; creation fails with an actionable error
-when CUDA or the native library is unavailable. GPU tests are gated by
+Status: both backends are fully implemented. `CudaMlpTrainer(config, optimizer)`
+runs forward propagation, backpropagation, gradient aggregation and Adam
+updates on the GPU over one flat device-resident parameter buffer; the dataset
+and parameters stay on the device across epochs, and only the per-epoch
+predictions (plus one scalar when L2 is active) are downloaded for metrics.
+GPU results are verified against the CPU reference within an absolute 1e-10 per
+update (CUDA and JVM `tanh` may differ in the last ulps; Adam arithmetic is
+otherwise written in the identical order), 1e-8 per epoch over multi-epoch
+runs. Creation fails with an actionable error when CUDA or the native library
+is unavailable; nothing silently falls back to the CPU. GPU tests are gated by
 `-Dflight4s.cuda.native.path` and report skips otherwise.
 
 ## Data contract
@@ -89,5 +90,4 @@ the repository's `flight4s.cuda.native.path` gating when the CUDA trainer lands.
 ## Known limitations
 
 One hidden layer, scalar output, full-batch training, Double precision only.
-GPU training is not implemented yet (next slice; GPU prediction works), no
-resumable optimizer checkpoints, no gradient clipping, no mini-batches.
+No resumable optimizer checkpoints, no gradient clipping, no mini-batches.

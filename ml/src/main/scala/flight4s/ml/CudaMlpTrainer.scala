@@ -1,31 +1,46 @@
 package flight4s.ml
 
-import flight4s.core.codegen.{CudaCodegen, GeneratedCudaModule}
-import flight4s.core.ir.Kernel
 import flight4s.core.launch.{Block as LaunchBlock, Grid, LaunchConfig}
 import flight4s.runtime.cuda.{CudaContext, CudaDeviceBuffer, CudaFunction, CudaModule, NvrtcCompiler}
 
-/** CUDA-backed trainer; this slice implements upload, GPU forward prediction, snapshots and
-  * lifecycle. GPU training (backpropagation and Adam updates) lands in the next slice and
-  * trainEpoch reports that honestly instead of falling back to the CPU. Parameters stay
-  * resident in device buffers and are re-uploaded only when they change. */
+/** CUDA-backed trainer: forward propagation, backpropagation, gradient aggregation and Adam
+  * updates all run on the GPU over one flat device-resident parameter buffer. Only the
+  * predictions (and the weight-square scalar when L2 is active) come back per epoch; the
+  * dataset and parameters stay on the device. Metrics are measured on a fresh forward pass
+  * after the update, and loadModel resets the Adam moments and step count. */
 final class CudaMlpTrainer private (
     config: MlpConfig,
     optimizer: AdamConfig,
-    definition: Kernel[MlpKernels.ForwardArgs],
     context: CudaContext,
     module: CudaModule,
-    forwardFunction: CudaFunction[MlpKernels.ForwardArgs],
-    w1Buffer: CudaDeviceBuffer[Double],
-    b1Buffer: CudaDeviceBuffer[Double],
-    w2Buffer: CudaDeviceBuffer[Double]
+    kernels: MlpKernels.GeneratedKernels,
+    predictFunction: CudaFunction[MlpKernels.PredictArgs],
+    trainingForwardFunction: CudaFunction[MlpKernels.TrainingForwardArgs],
+    gradientsFunction: CudaFunction[MlpKernels.GradientArgs],
+    adamFunction: CudaFunction[MlpKernels.AdamArgs],
+    squaresFunction: CudaFunction[MlpKernels.SquaresArgs],
+    parametersBuffer: CudaDeviceBuffer[Double],
+    gradientsBuffer: CudaDeviceBuffer[Double],
+    moments1Buffer: CudaDeviceBuffer[Double],
+    moments2Buffer: CudaDeviceBuffer[Double],
+    squaresBuffer: CudaDeviceBuffer[Double]
 ) extends MlpTrainer:
-  private var parameters = MlpMath.Parameters.fromModel(MlpModel.initialized(config))
+  private val totalParameters = MlpKernels.parameterCount(config.inputSize, config.hiddenSize)
+  private val w1Count = config.inputSize * config.hiddenSize
+  private var adamStep = 0
+  private var epochs = 0
   private var closed = false
   private var batches = List.empty[CudaBatch]
 
-  private final class CudaBatch(val xBuffer: CudaDeviceBuffer[Double], val yBuffer: CudaDeviceBuffer[Double],
-      val rows: Int, val columns: Int) extends TrainingBatch:
+  private final class CudaBatch(
+      val xBuffer: CudaDeviceBuffer[Double],
+      val yBuffer: CudaDeviceBuffer[Double],
+      val hiddenBuffer: CudaDeviceBuffer[Double],
+      val predictionsBuffer: CudaDeviceBuffer[Double],
+      val targets: Array[Double],
+      val rows: Int,
+      val columns: Int
+  ) extends TrainingBatch:
     private[CudaMlpTrainer] var batchClosed = false
     private[CudaMlpTrainer] val owner: CudaMlpTrainer = CudaMlpTrainer.this
     def close(): Unit =
@@ -33,6 +48,8 @@ final class CudaMlpTrainer private (
         batchClosed = true
         xBuffer.close()
         yBuffer.close()
+        hiddenBuffer.close()
+        predictionsBuffer.close()
 
   private def requireOpen(): Unit =
     MlValidation.requireThat(!closed, "this trainer is closed")
@@ -44,11 +61,23 @@ final class CudaMlpTrainer private (
   private def allocate(count: Int, what: String): CudaDeviceBuffer[Double] =
     run(s"allocating $what")(context.allocate[Double](count))
 
+  private def gridFor(count: Int): LaunchConfig =
+    LaunchConfig(Grid.x(math.max(1, (count + 127) / 128)), LaunchBlock.x(128))
+
+  private def flatten(model: MlpModel): Array[Double] =
+    val flat = new Array[Double](totalParameters)
+    System.arraycopy(model.w1, 0, flat, 0, w1Count)
+    System.arraycopy(model.b1, 0, flat, w1Count, config.hiddenSize)
+    System.arraycopy(model.w2, 0, flat, w1Count + config.hiddenSize, config.hiddenSize)
+    flat(totalParameters - 1) = model.b2
+    flat
+
   private[ml] def installParameters(model: MlpModel): Unit =
-    parameters = MlpMath.Parameters.fromModel(model)
-    run("uploading w1")(w1Buffer.copyFrom(parameters.w1))
-    run("uploading b1")(b1Buffer.copyFrom(parameters.b1))
-    run("uploading w2")(w2Buffer.copyFrom(parameters.w2))
+    run("uploading the parameters")(parametersBuffer.copyFrom(flatten(model)))
+    val zeros = new Array[Double](totalParameters)
+    run("resetting the first moments")(moments1Buffer.copyFrom(zeros))
+    run("resetting the second moments")(moments2Buffer.copyFrom(zeros))
+    adamStep = 0
 
   def upload(x: DenseMatrix, y: Array[Double]): TrainingBatch =
     requireOpen()
@@ -57,24 +86,26 @@ final class CudaMlpTrainer private (
       s"x has ${x.columns} columns but the model expects ${config.inputSize}")
     MlValidation.requireThat(y.length == x.rows, s"y length ${y.length} does not match ${x.rows} rows")
     MlValidation.requireFinite(y, "y")
-    val xBuffer = allocate(x.values.length, "the training features")
-    val yBuffer =
-      try allocate(y.length, "the training targets")
-      catch
-        case error: Throwable =>
-          xBuffer.close()
-          throw error
+    var allocated = List.empty[CudaDeviceBuffer[Double]]
     try
+      def tracked(count: Int, what: String): CudaDeviceBuffer[Double] =
+        val buffer = allocate(count, what)
+        allocated = buffer :: allocated
+        buffer
+      val xBuffer = tracked(x.values.length, "the training features")
+      val yBuffer = tracked(y.length, "the training targets")
+      val hiddenBuffer = tracked(MlValidation.checkedSize(x.rows, config.hiddenSize, "hidden activations"),
+        "the hidden activations")
+      val predictionsBuffer = tracked(x.rows, "the training predictions")
       run("uploading the training features")(xBuffer.copyFrom(x.values))
       run("uploading the training targets")(yBuffer.copyFrom(y))
+      val batch = CudaBatch(xBuffer, yBuffer, hiddenBuffer, predictionsBuffer, y.clone(), x.rows, x.columns)
+      batches = batch :: batches
+      batch
     catch
       case error: Throwable =>
-        xBuffer.close()
-        yBuffer.close()
+        allocated.foreach(_.close())
         throw error
-    val batch = CudaBatch(xBuffer, yBuffer, x.rows, x.columns)
-    batches = batch :: batches
-    batch
 
   def trainEpoch(batch: TrainingBatch): TrainingMetrics =
     requireOpen()
@@ -82,8 +113,37 @@ final class CudaMlpTrainer private (
       case cuda: CudaBatch if cuda.owner eq this => cuda
       case _ => throw IllegalArgumentException("this batch belongs to a different trainer")
     MlValidation.requireThat(!owned.batchClosed, "this batch is closed")
-    throw UnsupportedOperationException(
-      "GPU training is not implemented yet; the backpropagation and Adam slice follows this one")
+    def forward(): Unit =
+      run("launching the training forward kernel")(trainingForwardFunction.launch(
+        kernels.trainingForwardDefinition.bind((parametersBuffer, owned.xBuffer, owned.hiddenBuffer,
+          owned.predictionsBuffer, owned.rows, config.inputSize, config.hiddenSize)), gridFor(owned.rows)))
+    forward()
+    run("launching the gradient kernel")(gradientsFunction.launch(
+      kernels.gradientsDefinition.bind((parametersBuffer, owned.xBuffer, owned.yBuffer, owned.hiddenBuffer,
+        owned.predictionsBuffer, gradientsBuffer, owned.rows.toDouble, optimizer.l2,
+        owned.rows, config.inputSize, config.hiddenSize)), gridFor(totalParameters)))
+    adamStep += 1
+    val moment1Correction = 1.0 - math.pow(optimizer.beta1, adamStep)
+    val moment2Correction = 1.0 - math.pow(optimizer.beta2, adamStep)
+    run("launching the Adam kernel")(adamFunction.launch(
+      kernels.adamDefinition.bind((parametersBuffer, gradientsBuffer, moments1Buffer, moments2Buffer,
+        optimizer.learningRate, optimizer.beta1, optimizer.beta2, optimizer.epsilon,
+        moment1Correction, moment2Correction, totalParameters)), gridFor(totalParameters)))
+    forward()
+    run("synchronizing the training epoch")(context.synchronize())
+    val predictions = run("downloading the post-update predictions")(owned.predictionsBuffer.copyToArray())
+    val mse = MlpMath.meanSquaredError(predictions, owned.targets)
+    val objective =
+      if optimizer.l2 == 0.0 then mse
+      else
+        run("launching the weight-square kernel")(squaresFunction.launch(
+          kernels.squaresDefinition.bind((parametersBuffer, squaresBuffer, config.inputSize, config.hiddenSize)),
+          LaunchConfig(Grid.x(1), LaunchBlock.x(1))))
+        run("synchronizing the weight squares")(context.synchronize())
+        val squares = run("downloading the weight squares")(squaresBuffer.copyToArray())
+        mse + (optimizer.l2 / 2.0) * squares(0)
+    epochs += 1
+    TrainingMetrics(epochs, mse, objective)
 
   def predict(x: DenseMatrix): Array[Double] =
     requireOpen()
@@ -95,10 +155,9 @@ final class CudaMlpTrainer private (
       val predictions = allocate(x.rows, "the predictions")
       try
         run("uploading the prediction features")(xBuffer.copyFrom(x.values))
-        val launch = LaunchConfig(Grid.x(math.max(1, (x.rows + 127) / 128)), LaunchBlock.x(128))
-        run("launching the forward kernel")(forwardFunction.launch(definition.bind((
-          xBuffer, w1Buffer, b1Buffer, w2Buffer, parameters.b2, predictions,
-          x.rows, config.inputSize, config.hiddenSize)), launch))
+        run("launching the forward kernel")(predictFunction.launch(
+          kernels.predictDefinition.bind((parametersBuffer, xBuffer, predictions,
+            x.rows, config.inputSize, config.hiddenSize)), gridFor(x.rows)))
         run("synchronizing the forward kernel")(context.synchronize())
         run("downloading the predictions")(predictions.copyToArray())
       finally predictions.close()
@@ -106,7 +165,12 @@ final class CudaMlpTrainer private (
 
   def snapshotModel(): MlpModel =
     requireOpen()
-    parameters.toModel
+    run("synchronizing before the snapshot")(context.synchronize())
+    val flat = run("downloading the parameters")(parametersBuffer.copyToArray())
+    val w1 = java.util.Arrays.copyOfRange(flat, 0, w1Count)
+    val b1 = java.util.Arrays.copyOfRange(flat, w1Count, w1Count + config.hiddenSize)
+    val w2 = java.util.Arrays.copyOfRange(flat, w1Count + config.hiddenSize, w1Count + 2 * config.hiddenSize)
+    MlpModel(config.inputSize, config.hiddenSize, w1, b1, w2, flat(totalParameters - 1))
 
   def loadModel(model: MlpModel): Unit =
     requireOpen()
@@ -126,9 +190,11 @@ final class CudaMlpTrainer private (
       closed = true
       batches.foreach(_.close())
       batches = Nil
-      w1Buffer.close()
-      b1Buffer.close()
-      w2Buffer.close()
+      squaresBuffer.close()
+      moments2Buffer.close()
+      moments1Buffer.close()
+      gradientsBuffer.close()
+      parametersBuffer.close()
       module.close()
       context.close()
 
@@ -154,23 +220,26 @@ object CudaMlpTrainer:
       def run[A](what: String)(result: Either[?, A]): A = result match
         case Right(value) => value
         case Left(failure) => throw IllegalStateException(s"$what failed: $failure")
-      val definition = MlpKernels.forward
-      val generated = CudaCodegen.generate(definition) match
+      val kernels = MlpKernels.generateAll() match
         case Right(value) => value
-        case Left(error) => throw IllegalStateException(s"generating the forward kernel failed: ${error.message}")
-      val artifact = NvrtcCompiler.compile(
-        GeneratedCudaModule(generated.cudaSource, generated.sourceMap, generated.compilerOptions, Vector(generated)),
-        context.computeCapability, "flight4s_ml.cu") match
+        case Left(message) => throw IllegalStateException(s"generating the ML kernels failed: $message")
+      val artifact = NvrtcCompiler.compile(kernels.module, context.computeCapability, "flight4s_ml.cu") match
         case Right(value) => value
         case Left(failure) => throw IllegalStateException(
-          s"compiling the forward kernel failed: ${failure.message}\n${failure.compileLog}")
-      val module = run("loading the forward kernel module")(context.load(artifact))
-      val function = run("resolving the forward kernel")(module.function(generated))
-      val w1Buffer = run("allocating w1")(context.allocate[Double](config.inputSize * config.hiddenSize))
-      val b1Buffer = run("allocating b1")(context.allocate[Double](config.hiddenSize))
-      val w2Buffer = run("allocating w2")(context.allocate[Double](config.hiddenSize))
-      val trainer = new CudaMlpTrainer(config, optimizer, definition, context, module, function,
-        w1Buffer, b1Buffer, w2Buffer)
+          s"compiling the ML kernels failed: ${failure.message}\n${failure.compileLog}")
+      val module = run("loading the ML kernel module")(context.load(artifact))
+      val totalParameters = MlpKernels.parameterCount(config.inputSize, config.hiddenSize)
+      val trainer = new CudaMlpTrainer(config, optimizer, context, module, kernels,
+        run("resolving the predict kernel")(module.function(kernels.predict)),
+        run("resolving the training forward kernel")(module.function(kernels.trainingForward)),
+        run("resolving the gradient kernel")(module.function(kernels.gradients)),
+        run("resolving the Adam kernel")(module.function(kernels.adam)),
+        run("resolving the weight-square kernel")(module.function(kernels.squares)),
+        run("allocating the parameters")(context.allocate[Double](totalParameters)),
+        run("allocating the gradients")(context.allocate[Double](totalParameters)),
+        run("allocating the first moments")(context.allocate[Double](totalParameters)),
+        run("allocating the second moments")(context.allocate[Double](totalParameters)),
+        run("allocating the weight-square scratch")(context.allocate[Double](1)))
       trainer.installParameters(MlpModel.initialized(config))
       constructed = trainer
       trainer
