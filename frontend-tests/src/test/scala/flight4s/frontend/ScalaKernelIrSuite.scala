@@ -74,6 +74,15 @@ class ScalaKernelIrSuite extends FunSuite:
       case (left: AtomicFetchAdd[?, ?], right: AtomicFetchAdd[?, ?]) =>
         left.copy(local = left.local.copy(span = right.local.span), target = alignPlace(left.target, right.target),
           value = align(left.value, right.value), span = right.span)
+      case (left: AtomicStore[?, ?], right: AtomicStore[?, ?]) =>
+        assert(left.order == right.order && left.scope == right.scope, s"atomic semantics differ: $left / $right")
+        left.copy(target = alignPlace(left.target, right.target), value = align(left.value, right.value), span = right.span)
+      case (left: AtomicResult[?, ?], right: AtomicResult[?, ?]) =>
+        assert(left.operation == right.operation && left.order == right.order && left.scope == right.scope &&
+          left.failureOrder == right.failureOrder, s"atomic semantics differ: $left / $right")
+        assertEquals(left.operands.size, right.operands.size)
+        left.copy(local = left.local.copy(span = right.local.span), target = alignPlace(left.target, right.target),
+          operands = left.operands.zip(right.operands).map(align), span = right.span)
       case (left: WarpShuffle[?, ?], right: WarpShuffle[?, ?]) =>
         assert(left.operator == right.operator, s"shuffle operators differ: $left / $right")
         assertEquals(left.width, right.width)
@@ -704,6 +713,74 @@ class ScalaKernelIrSuite extends FunSuite:
     val effects = EffectAnalysis.block(actual.body)
     assert(effects.writtenSpaces.contains(EffectMemorySpace.Shared))
     assert(effects.hasBarrier)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted scoped flag handshakes exactly match explicit release stores and acquire loads"):
+    val actual = ScalaKernels.scopedFlag
+    val names = namesOf(actual)
+    val resultNames = scala.collection.mutable.Queue.from(all(actual.body).collect { case a: AtomicResult[?, ?] => a.local.name })
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), inOut[Int]("cell"),
+        inOut[Int]("flag"), output[Int]("out"), value[Int]("count"))) { p =>
+      val lane = declare(threadIdx.x)
+      val i = declare(blockIdx.x * blockDim.x + lane)
+      when(lane === literal(0)) {
+        p._2(blockIdx.x) := choose(i < p._5)(p._1(i).read)(literal(-5))
+        atomic.device(p._3(blockIdx.x)).store(literal(1), MemoryOrder.Release)
+      }
+      barrier()
+      val ready = declare(atomic.device(p._3(blockIdx.x)).load(resultNames.dequeue(), MemoryOrder.Acquire))
+      when(i < p._5) { p._4(i) := choose(ready === literal(1))(p._2(blockIdx.x).read)(literal(-9)) }
+    }
+    assert(names.isEmpty)
+    assert(resultNames.isEmpty)
+    assertReference(actual, reference)
+    val effects = EffectAnalysis.block(actual.body)
+    assert(effects.hasBarrier)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted scoped exchanges and fetch subtractions exactly match explicit named results"):
+    val actual = ScalaKernels.scopedExchange
+    val names = namesOf(actual)
+    val resultNames = scala.collection.mutable.Queue.from(all(actual.body).collect { case a: AtomicResult[?, ?] => a.local.name })
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), inOut[Int]("cells"),
+        output[Int]("out"), value[Int]("count"))) { p =>
+      val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+      when(i < p._4) {
+        val previous = declare(atomic.device(p._2(i)).exchange(resultNames.dequeue(), p._1(i).read, MemoryOrder.Relaxed))
+        val before = declare(atomic.device(p._2(i)).fetchSub(resultNames.dequeue(), previous, MemoryOrder.Relaxed))
+        p._3(i) := previous + before
+      }
+    }
+    assert(names.isEmpty)
+    assert(resultNames.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted block-scope shared counters exactly match explicit scoped stores adds and loads"):
+    val actual = ScalaKernels.scopedSharedCounter
+    val names = namesOf(actual)
+    val resultNames = scala.collection.mutable.Queue.from(all(actual.body).collect { case a: AtomicResult[?, ?] => a.local.name })
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Double]("data"), output[Double]("totals"), value[Int]("count"))) { p =>
+      val tile = sharedArray[Double](actual.sharedMemory.head.name, 1)
+      val count = declare(p._3)
+      scoped {
+        val lane = declare(threadIdx.x)
+        val i = declare(blockIdx.x * blockDim.x + lane)
+        scoped { when(lane === literal(0)) { atomic.block(tile(literal(0))).store(literal(0.0), MemoryOrder.Relaxed) } }
+        barrier()
+        val item = declare(choose(i < count)(p._1(i).read)(literal(0.25)))
+        val before = declare(atomic.block(tile(literal(0))).fetchAdd(resultNames.dequeue(), item, MemoryOrder.Relaxed))
+        barrier()
+        val total = declare(atomic.block(tile(literal(0))).load(resultNames.dequeue(), MemoryOrder.Acquire))
+        when(lane === literal(0)) { p._2(blockIdx.x) := total + before * literal(0.0) }
+      }
+    }.requiringBlock(LaunchBlock.x(64))
+    assert(names.isEmpty)
+    assert(resultNames.isEmpty)
+    assertReference(actual, reference)
     assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
 
   test("quoted row loops exactly match ordered explicit DSL loops and bound snapshots"):
@@ -1502,7 +1579,8 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.warpSum, () => ScalaKernels.warpGroupSums, () => ScalaKernels.warpSumRounds,
       () => ScalaKernels.blockSum, () => ScalaKernels.blockTreeMax, () => ScalaKernels.blockSumReuse,
       () => ScalaKernels.shuffleRotate, () => ScalaKernels.shufflePrefix, () => ScalaKernels.shuffleFold,
-      () => ScalaKernels.atomicHistogram, () => ScalaKernels.atomicCompact, () => ScalaKernels.atomicSharedSum)
+      () => ScalaKernels.atomicHistogram, () => ScalaKernels.atomicCompact, () => ScalaKernels.atomicSharedSum,
+      () => ScalaKernels.scopedFlag, () => ScalaKernels.scopedExchange, () => ScalaKernels.scopedSharedCounter)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)

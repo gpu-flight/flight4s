@@ -435,6 +435,53 @@ const int slot = atomicAdd(&cursor[0], 1);
 packed[slot] = data[i];
 ```
 
+### Scoped Atomic Contract
+
+`atomicDevice(target)` and `atomicBlock(target)` wrap one element for exactly one
+scoped, order-aware operation: `store(value, order)` as a statement, and
+`load(order)`, `exchange(value, order)`, `fetchAdd(value, order)` and
+`fetchSub(value, order)` as initializer-only results binding the observed old
+value. They stage the explicit-DSL `atomic.device`/`atomic.block` refs onto the
+`__nv_atomic_*` builtins with explicit `__NV_ATOMIC_*` orders and
+`__NV_THREAD_SCOPE_*` scopes; nothing defaults.
+
+Device scope orders against every GPU thread and requires a global read-write
+buffer element; block scope orders within one block and also admits rank-1
+shared elements. Elements are Int, Float or Double. Orders are direct
+`MemoryOrder` case references (imported bare or qualified), checked at compile
+time against the model: stores reject `Acquire`/`AcquireRelease`, loads reject
+`Release`/`AcquireRelease`. Views are one-shot like `atomic(...)`, and atomics
+remain divergence-safe statements that order memory without synchronizing
+execution.
+
+```scala
+import flight4s.core.ir.MemoryOrder
+
+cell(blockIdx.x) = payload
+atomicDevice(flag(blockIdx.x)).store(1, MemoryOrder.Release)
+sync.block()
+val ready = atomicDevice(flag(blockIdx.x)).load(MemoryOrder.Acquire)
+if ready == 1 then out(i) = cell(blockIdx.x)
+```
+
+Equivalent CUDA C++ (names simplified):
+
+```cpp
+cell[blockIdx.x] = payload;
+{
+    int value = 1;
+    ::__nv_atomic_store(&(flag[blockIdx.x]), &value, __NV_ATOMIC_RELEASE, __NV_THREAD_SCOPE_DEVICE);
+}
+__syncthreads();
+int ready;
+::__nv_atomic_load(&(flag[blockIdx.x]), &ready, __NV_ATOMIC_ACQUIRE, __NV_THREAD_SCOPE_DEVICE);
+if (ready == 1) out[i] = cell[blockIdx.x];
+```
+
+Integral `fetchMin/Max/And/Or/Xor` and `compareExchange` with success and
+failure orders remain the next slice; system scope and dynamic orders stay
+deferred.
+
 ### Block Reduction Contract
 
 `blockReduction[T](threads)` declares power-of-two shared reduction scratch for

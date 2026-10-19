@@ -2,7 +2,7 @@ package flight4s.frontend
 
 import scala.annotation.experimental
 import scala.quoted.*
-import flight4s.core.dsl.{BlockReduction, CudaDsl, DslSourcePosition}
+import flight4s.core.dsl.{AtomicRef, BlockReduction, CudaDsl, DslSourcePosition}
 import flight4s.core.ir.{Expr as DeviceExpr, *}
 import flight4s.core.types.*
 
@@ -116,6 +116,16 @@ private[frontend] object ScalaKernelMacro:
     val atomicAddMethods = deviceAtomicSymbol.methodMember("add")
     val atomicFetchMethods = deviceAtomicSymbol.methodMember("fetchAdd")
     val atomicMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("atomic")
+    val scopedAtomicSymbol = TypeRepr.of[ScalaKernel.DeviceScopedAtomic[Any]].typeSymbol
+    val scopedStoreMethods = scopedAtomicSymbol.methodMember("store")
+    val scopedLoadMethods = scopedAtomicSymbol.methodMember("load")
+    val scopedExchangeMethods = scopedAtomicSymbol.methodMember("exchange")
+    val scopedFetchAddMethods = scopedAtomicSymbol.methodMember("fetchAdd")
+    val scopedFetchSubMethods = scopedAtomicSymbol.methodMember("fetchSub")
+    val scopedResultMethods = scopedLoadMethods ++ scopedExchangeMethods ++ scopedFetchAddMethods ++ scopedFetchSubMethods
+    val atomicDeviceMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("atomicDevice")
+    val atomicBlockMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("atomicBlock")
+    val memoryOrderModule = Symbol.requiredModule("flight4s.core.ir.MemoryOrder")
     val blockReductionSymbol = TypeRepr.of[ScalaKernel.DeviceBlockReduction[Any]].typeSymbol
     val blockSumMethods = blockReductionSymbol.methodMember("sum")
     val blockTreeMethods = blockReductionSymbol.methodMember("reduceTree")
@@ -354,8 +364,9 @@ private[frontend] object ScalaKernelMacro:
               markerArguments(source, warpShuffleDownMethods).isDefined ||
               markerArguments(source, warpShuffleXorMethods).isDefined =>
             report.errorAndAbort("ScalaKernel warp shuffles must directly initialize a primitive val or var; embedded shuffles are not supported yet", source.pos)
-          case _ if invocation(source).exists((selection, _) => atomicFetchMethods.contains(selection.symbol)) =>
-            report.errorAndAbort("ScalaKernel atomic fetch operations must directly initialize a primitive val or var; embedded atomics are not supported yet", source.pos)
+          case _ if invocation(source).exists((selection, _) => atomicFetchMethods.contains(selection.symbol) ||
+              scopedResultMethods.contains(selection.symbol)) =>
+            report.errorAndAbort("ScalaKernel atomic results must directly initialize a primitive val or var; embedded atomics are not supported yet", source.pos)
           case _ => invocation(source) match
             case Some((selection, _)) if traversalFoldMethods.contains(selection.symbol) =>
               report.errorAndAbort("ScalaKernel foldLeft must directly initialize a primitive val or var, or an immutable tuple val; embedded folds are not supported yet", source.pos)
@@ -716,6 +727,129 @@ private[frontend] object ScalaKernelMacro:
         case _ => report.errorAndAbort(
           "ScalaKernel atomics require a read-write buffer element or rank-1 shared element target", selection.pos)
 
+    def memoryOrder(term: Term)(using Quotes): (MemoryOrder, Expr[MemoryOrder]) =
+      val reference = unwrapped(term)
+      val pure = reference match
+        case _: Ident => reference.symbol.owner == memoryOrderModule.moduleClass
+        case selection: Select => selection.qualifier.symbol == memoryOrderModule &&
+          reference.symbol.owner == memoryOrderModule.moduleClass
+        case _ => false
+      if !pure then report.errorAndAbort(
+        "ScalaKernel atomic orders must be direct MemoryOrder case references; dynamic or host-computed orders are not supported", reference.pos)
+      reference.symbol.name match
+        case "Relaxed" => (MemoryOrder.Relaxed, '{ MemoryOrder.Relaxed })
+        case "Acquire" => (MemoryOrder.Acquire, '{ MemoryOrder.Acquire })
+        case "Release" => (MemoryOrder.Release, '{ MemoryOrder.Release })
+        case "AcquireRelease" => (MemoryOrder.AcquireRelease, '{ MemoryOrder.AcquireRelease })
+        case "SequentiallyConsistent" => (MemoryOrder.SequentiallyConsistent, '{ MemoryOrder.SequentiallyConsistent })
+        case _ => report.errorAndAbort(
+          "ScalaKernel atomic orders must be direct MemoryOrder case references; dynamic or host-computed orders are not supported", reference.pos)
+
+    def scopedAtomicInstance[t: Type](position: Position)(using Quotes): Expr[AtomicValueType[t]] =
+      val instance = Type.of[t] match
+        case '[Int] => '{ I32 }
+        case '[Float] => '{ F32 }
+        case '[Double] => '{ F64 }
+        case _ => report.errorAndAbort("ScalaKernel scoped atomics support Int, Float and Double elements only", position)
+      instance.asExprOf[AtomicValueType[t]]
+
+    def scopedAtomicTarget(selection: Select)(using Quotes): (Boolean, Term) =
+      markerArguments(selection.qualifier, atomicDeviceMethods) match
+        case Some(List(List(target))) => (true, unwrapped(target))
+        case _ => markerArguments(selection.qualifier, atomicBlockMethods) match
+          case Some(List(List(target))) => (false, unwrapped(target))
+          case _ => report.errorAndAbort(
+            "ScalaKernel atomic operations require a direct pure atomic(target) receiver declared where they are used", selection.pos)
+
+    def scopedStoreStatement(source: Term, selection: Select, valueTerm: Term, orderTerm: Term,
+        env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[Unit] =
+      val (device, target) = scopedAtomicTarget(selection)
+      val (order, orderExpr) = memoryOrder(orderTerm)
+      if !order.validForStore then report.errorAndAbort(
+        "ScalaKernel atomic stores allow Relaxed, Release or SequentiallyConsistent orders only", orderTerm.pos)
+      val location = span(source.pos)
+      invocation(target) match
+        case Some((access, List(List(index)))) if readMethods.contains(access.symbol) =>
+          val array = binding(access.qualifier, env, bindings).getOrElse(
+            report.errorAndAbort("ScalaKernel atomics require a read-write buffer element or rank-1 shared element target", access.pos))
+          array.handle.tpe.widen.asType match
+            case '[BufferParam[t, ReadWrite]] =>
+              val instance = scopedAtomicInstance[t](source.pos)
+              val handle = array.handle.asExprOf[BufferParam[t, ReadWrite]]
+              val offset = expression[Int](index, env, bindings)
+              val value = expression[t](valueTerm, env, bindings)
+              if device then
+                '{ CudaDsl.atomic.device[t](BufferElement[t, ReadWrite]($handle.name, $offset, $handle.valueType, $location))(using
+                    $instance).store($value, $orderExpr)(using $builder, ${position(source)}) }
+              else
+                '{ CudaDsl.atomic.block[t, Global](BufferElement[t, ReadWrite]($handle.name, $offset, $handle.valueType, $location))(using
+                    $instance).store($value, $orderExpr)(using $builder, ${position(source)}) }
+            case _ => report.errorAndAbort("ScalaKernel atomics require a read-write buffer element target", access.pos)
+        case Some((access, List(List(index)))) if sharedReadMethods.contains(access.symbol) =>
+          if device then report.errorAndAbort(
+            "ScalaKernel device-scope atomics require a global read-write buffer element target", access.pos)
+          val array = binding(access.qualifier, env, bindings).getOrElse(
+            report.errorAndAbort("ScalaKernel atomics require a read-write buffer element or rank-1 shared element target", access.pos))
+          array.handle.tpe.widen.asType match
+            case '[SharedArray[t, Rank1]] =>
+              val instance = scopedAtomicInstance[t](source.pos)
+              val handle = array.handle.asExprOf[SharedArray[t, Rank1]]
+              val offset = expression[Int](index, env, bindings)
+              val value = expression[t](valueTerm, env, bindings)
+              '{ CudaDsl.atomic.block[t, Shared](SharedElement($handle.name, Vector($offset), $handle.valueType, $location))(using
+                  $instance).store($value, $orderExpr)(using $builder, ${position(source)}) }
+            case _ => report.errorAndAbort("ScalaKernel atomics require a rank-1 shared element target", access.pos)
+        case _ => report.errorAndAbort(
+          "ScalaKernel atomics require a read-write buffer element or rank-1 shared element target", selection.pos)
+
+    def scopedResultInitializer[T: Type](source: Term, selection: Select, operands: List[Term], orderTerm: Term,
+        env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[DeviceExpr[T]] =
+      if !(source.tpe.widen.dealias =:= TypeRepr.of[T]) then
+        report.errorAndAbort("ScalaKernel atomics require a matching primitive value type", source.pos)
+      val (device, target) = scopedAtomicTarget(selection)
+      val (order, orderExpr) = memoryOrder(orderTerm)
+      if scopedLoadMethods.contains(selection.symbol) && !order.validForLoad then report.errorAndAbort(
+        "ScalaKernel atomic loads allow Relaxed, Acquire or SequentiallyConsistent orders only", orderTerm.pos)
+      val location = span(source.pos)
+      val instance = scopedAtomicInstance[T](source.pos)
+      def staged[S <: Global | Shared: Type](ref: Expr[AtomicRef[T, S]]): Expr[DeviceExpr[T]] =
+        if scopedLoadMethods.contains(selection.symbol) then
+          '{ $ref.load($orderExpr)(using $builder, ${position(source)}) }
+        else
+          val value = expression[T](operands.head, env, bindings)
+          if scopedExchangeMethods.contains(selection.symbol) then
+            '{ $ref.exchange($value, $orderExpr)(using $builder, ${position(source)}) }
+          else if scopedFetchAddMethods.contains(selection.symbol) then
+            '{ $ref.fetchAdd($value, $orderExpr)(using $builder, ${position(source)}) }
+          else
+            '{ $ref.fetchSub($value, $orderExpr)(using $builder, ${position(source)}) }
+      invocation(target) match
+        case Some((access, List(List(index)))) if readMethods.contains(access.symbol) =>
+          val array = binding(access.qualifier, env, bindings).getOrElse(
+            report.errorAndAbort("ScalaKernel atomics require a read-write buffer element or rank-1 shared element target", access.pos))
+          array.handle.tpe.widen.asType match
+            case '[BufferParam[t, ReadWrite]] if TypeRepr.of[t] =:= TypeRepr.of[T] =>
+              val handle = array.handle.asExprOf[BufferParam[T, ReadWrite]]
+              val offset = expression[Int](index, env, bindings)
+              val place = '{ BufferElement[T, ReadWrite]($handle.name, $offset, $handle.valueType, $location) }
+              if device then staged[Global]('{ CudaDsl.atomic.device[T]($place)(using $instance) })
+              else staged[Global]('{ CudaDsl.atomic.block[T, Global]($place)(using $instance) })
+            case _ => report.errorAndAbort("ScalaKernel atomics require a read-write buffer element target", access.pos)
+        case Some((access, List(List(index)))) if sharedReadMethods.contains(access.symbol) =>
+          if device then report.errorAndAbort(
+            "ScalaKernel device-scope atomics require a global read-write buffer element target", access.pos)
+          val array = binding(access.qualifier, env, bindings).getOrElse(
+            report.errorAndAbort("ScalaKernel atomics require a read-write buffer element or rank-1 shared element target", access.pos))
+          array.handle.tpe.widen.asType match
+            case '[SharedArray[t, Rank1]] if TypeRepr.of[t] =:= TypeRepr.of[T] =>
+              val handle = array.handle.asExprOf[SharedArray[T, Rank1]]
+              val offset = expression[Int](index, env, bindings)
+              val place = '{ SharedElement($handle.name, Vector($offset), $handle.valueType, $location) }
+              staged[Shared]('{ CudaDsl.atomic.block[T, Shared]($place)(using $instance) })
+            case _ => report.errorAndAbort("ScalaKernel atomics require a rank-1 shared element target", access.pos)
+        case _ => report.errorAndAbort(
+          "ScalaKernel atomics require a read-write buffer element or rank-1 shared element target", selection.pos)
+
     def blockReductionCall[T: Type](source: Term, selection: Select, valueTerm: Term, callback: Option[Term],
         env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(using Quotes): Expr[DeviceExpr[T]] =
       val scratch = binding(selection.qualifier, env, bindings).getOrElse(
@@ -766,6 +900,12 @@ private[frontend] object ScalaKernelMacro:
       val atomicFetch = invocation(source).collect {
         case (selection, List(List(value))) if atomicFetchMethods.contains(selection.symbol) => (selection, value)
       }
+      val scopedResult = invocation(source).collect {
+        case (selection, List(List(order))) if scopedLoadMethods.contains(selection.symbol) =>
+          (selection, Nil, order)
+        case (selection, List(List(value, order))) if scopedResultMethods.contains(selection.symbol) &&
+            !scopedLoadMethods.contains(selection.symbol) => (selection, List(value), order)
+      }
       invocation(source) match
         case Some((selection, List(List(initial), List(callback)))) if traversalFoldMethods.contains(selection.symbol) =>
           if !(source.tpe.widen.dealias =:= TypeRepr.of[T]) then
@@ -803,7 +943,10 @@ private[frontend] object ScalaKernelMacro:
                 case None => atomicFetch match
                   case Some((selection, value)) =>
                     consume(atomicFetchInitializer[T](source, selection, value, env, bindings, builder))
-                  case None => consume(expression[T](source, env, bindings))
+                  case None => scopedResult match
+                    case Some((selection, operands, order)) =>
+                      consume(scopedResultInitializer[T](source, selection, operands, order, env, bindings, builder))
+                    case None => consume(expression[T](source, env, bindings))
 
     def tupleInitializer(term: Term, stateType: TypeRepr, env: Environment,
         bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(
@@ -953,6 +1096,8 @@ private[frontend] object ScalaKernelMacro:
             }
           case Some((selection, List(List(value)))) if atomicAddMethods.contains(selection.symbol) =>
             atomicAddStatement(source, selection, value, env, bindings, builder)
+          case Some((selection, List(List(value, order)))) if scopedStoreMethods.contains(selection.symbol) =>
+            scopedStoreStatement(source, selection, value, order, env, bindings, builder)
           case Some((selection, List(List(index, value), _))) if writeMethods.contains(selection.symbol) =>
             val array = binding(selection.qualifier, env, bindings).getOrElse(
               report.errorAndAbort("device array writes must reference a kernel parameter", selection.pos))
@@ -1080,8 +1225,8 @@ private[frontend] object ScalaKernelMacro:
                       }
                     case _ => report.errorAndAbort("ScalaKernel shared arrays support Int, Float, Double and Boolean elements only", value.pos)
                 case _ => report.errorAndAbort(s"ScalaKernel shared arrays require a direct $markerName declaration or immutable alias", rhs.pos)
-          else if ranked(deviceAtomicSymbol) then
-            report.errorAndAbort("ScalaKernel atomic views must be consumed immediately by add or fetchAdd", value.pos)
+          else if ranked(deviceAtomicSymbol) || ranked(scopedAtomicSymbol) then
+            report.errorAndAbort("ScalaKernel atomic views must be consumed immediately by one atomic operation", value.pos)
           else if ranked(blockReductionSymbol) then
             if mutable then report.errorAndAbort("ScalaKernel block reduction bindings must be immutable", value.pos)
             binding(rhs, current, bindings) match

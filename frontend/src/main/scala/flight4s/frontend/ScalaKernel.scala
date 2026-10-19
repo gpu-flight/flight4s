@@ -110,6 +110,20 @@ object ScalaKernel:
   /** Wraps a read-write buffer element or rank-1 shared element for one atomic operation. */
   def atomic[T](target: T): DeviceAtomic[T] = markerOnly()
 
+  /** One-shot scoped atomic view; every operation names its memory order explicitly. */
+  final class DeviceScopedAtomic[T] private[frontend] ():
+    def store(value: T, order: MemoryOrder): Unit = markerOnly()
+    def load(order: MemoryOrder): T = markerOnly()
+    def exchange(value: T, order: MemoryOrder): T = markerOnly()
+    def fetchAdd(value: T, order: MemoryOrder): T = markerOnly()
+    def fetchSub(value: T, order: MemoryOrder): T = markerOnly()
+
+  /** Device-scope view over a global read-write element; orders against every GPU thread. */
+  def atomicDevice[T](target: T): DeviceScopedAtomic[T] = markerOnly()
+
+  /** Block-scope view over a global or rank-1 shared element; orders within one block only. */
+  def atomicBlock[T](target: T): DeviceScopedAtomic[T] = markerOnly()
+
   /** Per-block reduction scratch bound to one compile-time 1-D launch shape. */
   final class DeviceBlockReduction[T] private[frontend] ():
     def sum(value: T): T = markerOnly()

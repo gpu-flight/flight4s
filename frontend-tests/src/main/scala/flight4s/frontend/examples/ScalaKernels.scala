@@ -2,6 +2,7 @@ package flight4s.frontend.examples
 
 import scala.annotation.experimental
 import flight4s.frontend.ScalaKernel.*
+import flight4s.core.ir.MemoryOrder
 import flight4s.core.launch.{Block as LaunchBlock}
 
 @experimental
@@ -198,6 +199,40 @@ object ScalaKernels:
     atomic(tile(0)).add(item)
     sync.block()
     if lane == 0 then totals(blockIdx.x) = tile(0)
+  }.requiringBlock(LaunchBlock.x(64))
+
+  def scopedFlag = kernel("quotedScopedFlag", params(input[Int]("data"), inOut[Int]("cell"),
+      inOut[Int]("flag"), output[Int]("out"), value[Int]("count"))) { p =>
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    if lane == 0 then
+      p._2(blockIdx.x) = if i < p._5 then p._1(i) else -5
+      atomicDevice(p._3(blockIdx.x)).store(1, MemoryOrder.Release)
+    sync.block()
+    val ready = atomicDevice(p._3(blockIdx.x)).load(MemoryOrder.Acquire)
+    if i < p._5 then p._4(i) = if ready == 1 then p._2(blockIdx.x) else -9
+  }
+
+  def scopedExchange = kernel("quotedScopedExchange", params(input[Int]("data"), inOut[Int]("cells"),
+      output[Int]("out"), value[Int]("count"))) { p =>
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    if i < p._4 then
+      val previous = atomicDevice(p._2(i)).exchange(p._1(i), MemoryOrder.Relaxed)
+      val before = atomicDevice(p._2(i)).fetchSub(previous, MemoryOrder.Relaxed)
+      p._3(i) = previous + before
+  }
+
+  def scopedSharedCounter = kernel("quotedScopedCounter", params(input[Double]("data"), output[Double]("totals"),
+      value[Int]("count"))) { (data, totals, count) =>
+    val tile = sharedArray[Double](1)
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    sync.blockAfter { if lane == 0 then atomicBlock(tile(0)).store(0.0, MemoryOrder.Relaxed) }
+    val item = if i < count then data(i) else 0.25
+    val before = atomicBlock(tile(0)).fetchAdd(item, MemoryOrder.Relaxed)
+    sync.block()
+    val total = atomicBlock(tile(0)).load(MemoryOrder.Acquire)
+    if lane == 0 then totals(blockIdx.x) = total + before * 0.0
   }.requiringBlock(LaunchBlock.x(64))
 
   def sharedExchange = kernel("quotedSharedExchange", params(input[Float]("data"), output[Float]("target"),
