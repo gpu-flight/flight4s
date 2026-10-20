@@ -47,6 +47,9 @@ class ScalaKernelIrSuite extends FunSuite:
       case (left: Conditional[?], right: Conditional[?]) =>
         left.copy(condition = align(left.condition, right.condition), whenTrue = align(left.whenTrue, right.whenTrue),
           whenFalse = align(left.whenFalse, right.whenFalse), span = right.span)
+      case (left: UnaryMath[?], right: UnaryMath[?]) =>
+        assert(left.operator == right.operator, s"math operators differ: $left / $right")
+        left.copy(value = align(left.value, right.value), span = right.span)
       case _ => fail(s"expression shapes differ: $expected / $actual")
     result.asInstanceOf[Expr[T]]
 
@@ -859,6 +862,54 @@ class ScalaKernelIrSuite extends FunSuite:
     assert(effects.hasBarrier)
     assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
 
+  test("quoted activation math exactly matches explicit rsqrt and tanh staging"):
+    val actual = ScalaKernels.mathActivation
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"),
+        value[Float]("mean"), value[Float]("variance"), value[Int]("count"))) { p =>
+      val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+      when(i < p._5) {
+        val scale = declare(rsqrt(p._4 + literal(0.00001f)))
+        p._2(i) := tanh((p._1(i).read - p._3) * scale)
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted logistic math exactly matches explicit exp and log staging on Doubles"):
+    val actual = ScalaKernels.mathLogistic
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Double]("data"), output[Double]("sigmoid"),
+        output[Double]("logs"), value[Int]("count"))) { p =>
+      val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+      when(i < p._4) {
+        p._2(i) := literal(1.0) / (literal(1.0) + exp(literal(0.0) - p._1(i).read))
+        p._3(i) := log(p._1(i).read * p._1(i).read + literal(1.0))
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted distance math exactly matches explicit sqrt staging with conditional log branches"):
+    val actual = ScalaKernels.mathDistance
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("xs"), input[Float]("ys"),
+        output[Float]("out"), value[Float]("cutoff"), value[Int]("count"))) { p =>
+      val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+      when(i < p._5) {
+        val radius = declare(sqrt(p._1(i).read * p._1(i).read + p._2(i).read * p._2(i).read))
+        p._3(i) := choose(radius > p._4)(radius)(log(radius + literal(1.0f)))
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
   test("quoted row loops exactly match ordered explicit DSL loops and bound snapshots"):
     val actual = ScalaKernels.rowSum
     val names = namesOf(actual)
@@ -1657,7 +1708,8 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.shuffleRotate, () => ScalaKernels.shufflePrefix, () => ScalaKernels.shuffleFold,
       () => ScalaKernels.atomicHistogram, () => ScalaKernels.atomicCompact, () => ScalaKernels.atomicSharedSum,
       () => ScalaKernels.scopedFlag, () => ScalaKernels.scopedExchange, () => ScalaKernels.scopedSharedCounter,
-      () => ScalaKernels.scopedBounds, () => ScalaKernels.scopedBitmask, () => ScalaKernels.scopedClaim)
+      () => ScalaKernels.scopedBounds, () => ScalaKernels.scopedBitmask, () => ScalaKernels.scopedClaim,
+      () => ScalaKernels.mathActivation, () => ScalaKernels.mathLogistic, () => ScalaKernels.mathDistance)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)

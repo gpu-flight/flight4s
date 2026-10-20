@@ -273,6 +273,30 @@ object ScalaKernels:
       p._4(i) = witnessed
   }.requiringBlock(LaunchBlock.x(64))
 
+  def mathActivation = kernel("quotedMathActivation", params(input[Float]("data"), output[Float]("target"),
+      value[Float]("mean"), value[Float]("variance"), value[Int]("count"))) { p =>
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    if i < p._5 then
+      val scale = rsqrt(p._4 + 0.00001f)
+      p._2(i) = tanh((p._1(i) - p._3) * scale)
+  }
+
+  def mathLogistic = kernel("quotedMathLogistic", params(input[Double]("data"), output[Double]("sigmoid"),
+      output[Double]("logs"), value[Int]("count"))) { p =>
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    if i < p._4 then
+      p._2(i) = 1.0 / (1.0 + exp(0.0 - p._1(i)))
+      p._3(i) = log(p._1(i) * p._1(i) + 1.0)
+  }
+
+  def mathDistance = kernel("quotedMathDistance", params(input[Float]("xs"), input[Float]("ys"),
+      output[Float]("out"), value[Float]("cutoff"), value[Int]("count"))) { p =>
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    if i < p._5 then
+      val radius = sqrt(p._1(i) * p._1(i) + p._2(i) * p._2(i))
+      p._3(i) = if radius > p._4 then radius else log(radius + 1.0f)
+  }
+
   def sharedExchange = kernel("quotedSharedExchange", params(input[Float]("data"), output[Float]("target"),
       value[Int]("count"))) { (data, target, count) =>
     val tile = sharedArray[Float](64)

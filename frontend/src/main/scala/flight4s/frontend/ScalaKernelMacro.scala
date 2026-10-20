@@ -135,6 +135,9 @@ private[frontend] object ScalaKernelMacro:
     val atomicDeviceMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("atomicDevice")
     val atomicBlockMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("atomicBlock")
     val memoryOrderModule = Symbol.requiredModule("flight4s.core.ir.MemoryOrder")
+    val deviceMathMethods = Vector("exp", "log", "sqrt", "rsqrt", "tanh").map { name =>
+      name -> TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember(name)
+    }
     val blockReductionSymbol = TypeRepr.of[ScalaKernel.DeviceBlockReduction[Any]].typeSymbol
     val blockSumMethods = blockReductionSymbol.methodMember("sum")
     val blockTreeMethods = blockReductionSymbol.methodMember("reduceTree")
@@ -362,6 +365,16 @@ private[frontend] object ScalaKernelMacro:
             val yes = expression[T](conditional.thenp, env, bindings)
             val no = expression[T](conditional.elsep, env, bindings)
             '{ Conditional($condition, $yes, $no, $cudaType, $location) }
+          case _ if deviceMathArguments(source).isDefined =>
+            val (operator, valueTerm) = deviceMathArguments(source).get
+            val instance = floatingMathInstance[T](source.pos)
+            val operand = expression[T](valueTerm, env, bindings)
+            operator match
+              case "exp" => '{ CudaDsl.exp[T]($operand)(using $instance, ${position(source)}) }
+              case "log" => '{ CudaDsl.log[T]($operand)(using $instance, ${position(source)}) }
+              case "sqrt" => '{ CudaDsl.sqrt[T]($operand)(using $instance, ${position(source)}) }
+              case "rsqrt" => '{ CudaDsl.rsqrt[T]($operand)(using $instance, ${position(source)}) }
+              case _ => '{ CudaDsl.tanh[T]($operand)(using $instance, ${position(source)}) }
           case _ if markerArguments(source, warpReduceMethods).isDefined ||
               markerArguments(source, warpTreeMethods).isDefined =>
             report.errorAndAbort("ScalaKernel warp reductions must directly initialize a primitive val or var; embedded reductions are not supported yet", source.pos)
@@ -766,6 +779,17 @@ private[frontend] object ScalaKernelMacro:
       Type.of[t] match
         case '[Int] => '{ I32 }.asExprOf[AtomicIntegralType[t]]
         case _ => report.errorAndAbort("ScalaKernel scoped integral atomics support Int elements only", position)
+
+    def floatingMathInstance[t: Type](position: Position)(using Quotes): Expr[FloatingMathType[t]] =
+      Type.of[t] match
+        case '[Float] => '{ F32 }.asExprOf[FloatingMathType[t]]
+        case '[Double] => '{ F64 }.asExprOf[FloatingMathType[t]]
+        case _ => report.errorAndAbort("ScalaKernel device math supports Float and Double values only", position)
+
+    def deviceMathArguments(term: Term): Option[(String, Term)] =
+      deviceMathMethods.iterator.flatMap { (name, methods) =>
+        markerArguments(term, methods).collect { case List(List(value)) => (name, value) }
+      }.nextOption()
 
     def scopedAtomicTarget(selection: Select)(using Quotes): (Boolean, Term) =
       markerArguments(selection.qualifier, atomicDeviceMethods) match
