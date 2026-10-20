@@ -118,6 +118,16 @@ object ScalaKernel:
     def fetchAdd(value: T, order: MemoryOrder): T = markerOnly()
     def fetchSub(value: T, order: MemoryOrder): T = markerOnly()
 
+    /** Integral-only read-modify-write operations; each binds the old value. */
+    def fetchMin(value: T, order: MemoryOrder): T = markerOnly()
+    def fetchMax(value: T, order: MemoryOrder): T = markerOnly()
+    def fetchAnd(value: T, order: MemoryOrder): T = markerOnly()
+    def fetchOr(value: T, order: MemoryOrder): T = markerOnly()
+    def fetchXor(value: T, order: MemoryOrder): T = markerOnly()
+
+    /** Binds the observed old value; equality with expected means the exchange happened. */
+    def compareExchange(expected: T, desired: T, success: MemoryOrder, failure: MemoryOrder): T = markerOnly()
+
   /** Device-scope view over a global read-write element; orders against every GPU thread. */
   def atomicDevice[T](target: T): DeviceScopedAtomic[T] = markerOnly()
 

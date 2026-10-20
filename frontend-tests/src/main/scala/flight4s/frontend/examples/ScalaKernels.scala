@@ -235,6 +235,44 @@ object ScalaKernels:
     if lane == 0 then totals(blockIdx.x) = total + before * 0.0
   }.requiringBlock(LaunchBlock.x(64))
 
+  def scopedBounds = kernel("quotedScopedBounds", params(input[Int]("data"), inOut[Int]("floors"),
+      inOut[Int]("ceilings"), output[Int]("out"), value[Int]("count"))) { p =>
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    if i < p._5 then
+      val belowOld = atomicDevice(p._2(i)).fetchMin(p._1(i), MemoryOrder.Relaxed)
+      val aboveOld = atomicDevice(p._3(i)).fetchMax(p._1(i), MemoryOrder.Relaxed)
+      p._4(i) = belowOld + aboveOld
+  }
+
+  def scopedBitmask = kernel("quotedScopedBitmask", params(input[Int]("data"), inOut[Int]("masks"),
+      output[Int]("andOld"), output[Int]("orOld"), output[Int]("xorOld"), value[Int]("count"))) { p =>
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    if i < p._6 then
+      val cleared = atomicDevice(p._2(i)).fetchAnd(p._1(i), MemoryOrder.Relaxed)
+      val merged = atomicDevice(p._2(i)).fetchOr(5, MemoryOrder.Relaxed)
+      val flipped = atomicDevice(p._2(i)).fetchXor(3, MemoryOrder.Relaxed)
+      p._3(i) = cleared
+      p._4(i) = merged
+      p._5(i) = flipped
+  }
+
+  def scopedClaim = kernel("quotedScopedClaim", params(input[Int]("data"), inOut[Int]("cells"),
+      inOut[Int]("winners"), output[Int]("out"), value[Int]("count"))) { p =>
+    val gate = sharedArray[Int](1)
+    val lane = threadIdx.x
+    val i = blockIdx.x * blockDim.x + lane
+    sync.blockAfter { if lane == 0 then atomicBlock(gate(0)).store(0, MemoryOrder.Relaxed) }
+    val ticket = atomicBlock(gate(0)).compareExchange(0, 1, MemoryOrder.AcquireRelease, MemoryOrder.Acquire)
+    if ticket == 0 then
+      val slot = atomicDevice(p._3(blockIdx.x)).fetchAdd(1, MemoryOrder.Relaxed)
+      p._4(p._5 + 31) = slot
+    if i < p._5 then
+      val current = p._2(i)
+      val expected = if i % 2 == 0 then current else current + 1
+      val witnessed = atomicBlock(p._2(i)).compareExchange(expected, p._1(i), MemoryOrder.Relaxed, MemoryOrder.Relaxed)
+      p._4(i) = witnessed
+  }.requiringBlock(LaunchBlock.x(64))
+
   def sharedExchange = kernel("quotedSharedExchange", params(input[Float]("data"), output[Float]("target"),
       value[Int]("count"))) { (data, target, count) =>
     val tile = sharedArray[Float](64)

@@ -783,6 +783,82 @@ class ScalaKernelIrSuite extends FunSuite:
     assertReference(actual, reference)
     assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
 
+  test("quoted scoped minima and maxima exactly match explicit integral fetch results"):
+    val actual = ScalaKernels.scopedBounds
+    val names = namesOf(actual)
+    val resultNames = scala.collection.mutable.Queue.from(all(actual.body).collect { case a: AtomicResult[?, ?] => a.local.name })
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), inOut[Int]("floors"),
+        inOut[Int]("ceilings"), output[Int]("out"), value[Int]("count"))) { p =>
+      val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+      when(i < p._5) {
+        val belowOld = declare(atomic.device(p._2(i)).fetchMin(resultNames.dequeue(), p._1(i).read, MemoryOrder.Relaxed))
+        val aboveOld = declare(atomic.device(p._3(i)).fetchMax(resultNames.dequeue(), p._1(i).read, MemoryOrder.Relaxed))
+        p._4(i) := belowOld + aboveOld
+      }
+    }
+    assert(names.isEmpty)
+    assert(resultNames.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted scoped bitwise operations exactly match explicit integral fetch results"):
+    val actual = ScalaKernels.scopedBitmask
+    val names = namesOf(actual)
+    val resultNames = scala.collection.mutable.Queue.from(all(actual.body).collect { case a: AtomicResult[?, ?] => a.local.name })
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), inOut[Int]("masks"),
+        output[Int]("andOld"), output[Int]("orOld"), output[Int]("xorOld"), value[Int]("count"))) { p =>
+      val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+      when(i < p._6) {
+        val cleared = declare(atomic.device(p._2(i)).fetchAnd(resultNames.dequeue(), p._1(i).read, MemoryOrder.Relaxed))
+        val merged = declare(atomic.device(p._2(i)).fetchOr(resultNames.dequeue(), literal(5), MemoryOrder.Relaxed))
+        val flipped = declare(atomic.device(p._2(i)).fetchXor(resultNames.dequeue(), literal(3), MemoryOrder.Relaxed))
+        p._3(i) := cleared
+        p._4(i) := merged
+        p._5(i) := flipped
+      }
+    }
+    assert(names.isEmpty)
+    assert(resultNames.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted scoped compare exchanges exactly match explicit success and failure orders"):
+    val actual = ScalaKernels.scopedClaim
+    val names = namesOf(actual)
+    val resultNames = scala.collection.mutable.Queue.from(all(actual.body).collect { case a: AtomicResult[?, ?] => a.local.name })
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), inOut[Int]("cells"),
+        inOut[Int]("winners"), output[Int]("out"), value[Int]("count"))) { p =>
+      val gate = sharedArray[Int](actual.sharedMemory.head.name, 1)
+      val lane = declare(threadIdx.x)
+      val i = declare(blockIdx.x * blockDim.x + lane)
+      scoped { when(lane === literal(0)) { atomic.block(gate(literal(0))).store(literal(0), MemoryOrder.Relaxed) } }
+      barrier()
+      val ticket = declare(atomic.block(gate(literal(0))).compareExchange(resultNames.dequeue(),
+        literal(0), literal(1), MemoryOrder.AcquireRelease, MemoryOrder.Acquire))
+      when(ticket === literal(0)) {
+        val slot = declare(atomic.device(p._3(blockIdx.x)).fetchAdd(resultNames.dequeue(), literal(1), MemoryOrder.Relaxed))
+        p._4(p._5 + literal(31)) := slot
+      }
+      when(i < p._5) {
+        val current = declare(p._2(i).read)
+        val expected = declare(choose(i % literal(2) === literal(0))(current)(current + literal(1)))
+        val witnessed = declare(atomic.block(p._2(i)).compareExchange(resultNames.dequeue(),
+          expected, p._1(i).read, MemoryOrder.Relaxed, MemoryOrder.Relaxed))
+        p._4(i) := witnessed
+      }
+    }.requiringBlock(LaunchBlock.x(64))
+    assert(names.isEmpty)
+    assert(resultNames.isEmpty)
+    assertReference(actual, reference)
+    val casResults = all(actual.body).collect { case a: AtomicResult[?, ?] if a.operation == AtomicOperation.CompareExchange => a }
+    assertEquals(casResults.map(_.failureOrder), Vector(Some(MemoryOrder.Acquire), Some(MemoryOrder.Relaxed)))
+    val effects = EffectAnalysis.block(actual.body)
+    assert(effects.hasBarrier)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
   test("quoted row loops exactly match ordered explicit DSL loops and bound snapshots"):
     val actual = ScalaKernels.rowSum
     val names = namesOf(actual)
@@ -1580,7 +1656,8 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.blockSum, () => ScalaKernels.blockTreeMax, () => ScalaKernels.blockSumReuse,
       () => ScalaKernels.shuffleRotate, () => ScalaKernels.shufflePrefix, () => ScalaKernels.shuffleFold,
       () => ScalaKernels.atomicHistogram, () => ScalaKernels.atomicCompact, () => ScalaKernels.atomicSharedSum,
-      () => ScalaKernels.scopedFlag, () => ScalaKernels.scopedExchange, () => ScalaKernels.scopedSharedCounter)
+      () => ScalaKernels.scopedFlag, () => ScalaKernels.scopedExchange, () => ScalaKernels.scopedSharedCounter,
+      () => ScalaKernels.scopedBounds, () => ScalaKernels.scopedBitmask, () => ScalaKernels.scopedClaim)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)
