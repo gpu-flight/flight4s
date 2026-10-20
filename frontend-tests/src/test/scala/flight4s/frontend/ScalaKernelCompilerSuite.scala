@@ -485,11 +485,10 @@ class ScalaKernelCompilerSuite extends FunSuite:
     rejected(factory("val f = (i: Int) => i + 1; p._2(0) = f(p._3)"), "primitive locals")
     rejected(factory("var alias = p._2; alias(0) = 1"), "immutable buffer aliases")
 
-  test("expression branches remain pure and dynamic floating negation is not approximated"):
+  // Floating negation is now admitted as an exact sign flip; see ScalaKernelShiftCompilerSuite.
+  test("expression branches remain pure"):
     rejected(factory("var total = 0; val result = { total = 1; total }; p._2(0) = result"), "expression blocks")
     rejected(factory("p._2(0) = if p._3 > 0 then { p._2(1) = 7; 1 } else 0"), "expression blocks")
-    rejected(factory("p._2(0) = -p._3", parameters = "input[Float](\"data\"), output[Float](\"target\"), value[Float](\"scalar\")"),
-      "primitive operation")
 
   test("unsupported existing CUDA value types are rejected at the frontend boundary"):
     rejected(factory("()", parameters = "output[flight4s.core.types.Float4](\"target\")"), "parameters only")
