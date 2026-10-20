@@ -96,7 +96,7 @@ class ScalaKernelTupleFoldCompilerSuite extends FunSuite:
     rejected("val result = deviceRange(0, p._3).foldLeft(host)((state, i) => state)", "direct standard tuple constructor", "val host = (0, 1)")
     rejected("val result = deviceRange(0, p._3).foldLeft((0, 1))((state, i) => helper(i))", "direct standard tuple constructor", "def helper(i: Int): (Int, Int) = (i, i)")
     rejected("val result = deviceRange(0, p._3).foldLeft(Tuple2(0, 1))((state, i) => state)", "direct standard tuple constructor", "object Tuple2 { def apply(a: Int, b: Int): (Int, Int) = (a, b) }")
-    rejected("val result = deviceRange(0, p._3).foldLeft((0, 1.0f))((state, i) => (i, i.toFloat))", "primitive operation")
+    rejected("val result = deviceRange(0, p._3).foldLeft((0, 1.0f))((state, i) => (i, i.toFloat.toInt.toFloat))", "primitive operation")
 
   test("tuple seeds and steps reject effects and arbitrary expression blocks"):
     rejected("val result = deviceRange(0, p._3).foldLeft((0, { p._2(0) = 1; 1 }))((state, i) => state)", "expression blocks")

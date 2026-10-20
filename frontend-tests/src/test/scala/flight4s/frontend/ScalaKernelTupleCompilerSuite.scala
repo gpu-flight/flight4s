@@ -99,7 +99,7 @@ class ScalaKernelTupleCompilerSuite extends FunSuite:
   test("unused tuple fields validate captures helper calls conversions and embedded folds"):
     rejected("val unused = deviceRange(0, p._3).map(i => (i, host))", "captures", "val host = 7")
     rejected("val unused = deviceRange(0, p._3).map(i => (i, helper(i)))", "captures", "def helper(i: Int): Int = i")
-    rejected("val unused = deviceRange(0, p._3).map(i => (i, i.toFloat))", "primitive operation")
+    rejected("val unused = deviceRange(0, p._3).map(i => (i, i.toDouble.toInt))", "primitive operation")
     rejected("val unused = deviceRange(0, p._3).map(i => (i, deviceRange(0, i).foldLeft(0)(_ + _)))", "directly initialize")
     rejected("val unused = deviceRange(0, p._3).flatMap(i => deviceRange(0, i).map(j => (i, host)))", "captures", "val host = 7")
 
