@@ -142,6 +142,13 @@ object ScalaKernel:
   /** Declares power-of-two shared reduction scratch for exactly threads lanes per block. */
   def blockReduction[T](threads: Int): DeviceBlockReduction[T] = markerOnly()
 
+  /** Device libm math staged as pure expressions; exact precision, no fast-math. */
+  def exp[T](value: T): T = markerOnly()
+  def log[T](value: T): T = markerOnly()
+  def sqrt[T](value: T): T = markerOnly()
+  def rsqrt[T](value: T): T = markerOnly()
+  def tanh[T](value: T): T = markerOnly()
+
   /** Lazy serial device traversal syntax, not a materialized Scala collection. */
   final class DeviceTraversal[T] private[frontend] ():
     def map[U](transform: T => U): DeviceTraversal[U] = markerOnly()

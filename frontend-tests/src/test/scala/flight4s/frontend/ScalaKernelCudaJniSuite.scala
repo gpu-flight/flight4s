@@ -1669,6 +1669,104 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("quoted activation math matches JVM references within documented libm tolerances"):
+    val definition = ScalaKernels.mathActivation
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 19 - 9) * 0.25f)
+          val mean = 0.5f
+          val variance = 2.0f
+          val data = context.allocate[Float](initial.length).toOption.get
+          val target = context.allocate[Float](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(count)(i =>
+              math.tanh((initial(i) - mean) / math.sqrt(variance + 0.00001f)))
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999.0f)), Right(()))
+              launch(context, function, definition.bind((data, target, mean, variance, count)), config(count), stream, explicit)
+              val produced = target.copyToArray().toOption.get
+              for i <- 0 until count do
+                assert(math.abs(produced(i) - expected(i)) <= 1e-4f, s"$i: ${produced(i)} vs ${expected(i)}")
+              for i <- count until count + 32 do assertEquals(produced(i), -999.0f)
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted logistic math matches JVM exp and log references in Double precision"):
+    val definition = ScalaKernels.mathLogistic
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 19 - 9) * 0.5)
+          val data = context.allocate[Double](initial.length).toOption.get
+          val sigmoid = context.allocate[Double](count + 32).toOption.get
+          val logs = context.allocate[Double](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expectedSigmoid = Vector.tabulate(count)(i => 1.0 / (1.0 + math.exp(0.0 - initial(i))))
+            val expectedLogs = Vector.tabulate(count)(i => math.log(initial(i) * initial(i) + 1.0))
+            for explicit <- Vector(false, true) do
+              assertEquals(sigmoid.copyFrom(Array.fill(count + 32)(-999.0)), Right(()))
+              assertEquals(logs.copyFrom(Array.fill(count + 32)(-999.0)), Right(()))
+              launch(context, function, definition.bind((data, sigmoid, logs, count)), config(count), stream, explicit)
+              val producedSigmoid = sigmoid.copyToArray().toOption.get
+              val producedLogs = logs.copyToArray().toOption.get
+              for i <- 0 until count do
+                assert(math.abs(producedSigmoid(i) - expectedSigmoid(i)) <= 1e-12, s"sigmoid $i: ${producedSigmoid(i)} vs ${expectedSigmoid(i)}")
+                assert(math.abs(producedLogs(i) - expectedLogs(i)) <= 1e-12, s"log $i: ${producedLogs(i)} vs ${expectedLogs(i)}")
+              for i <- count until count + 32 do
+                assertEquals(producedSigmoid(i), -999.0)
+                assertEquals(producedLogs(i), -999.0)
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            logs.close()
+            sigmoid.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted distance math branches on sqrt results and logs the short radii"):
+    val definition = ScalaKernels.mathDistance
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val xs = Array.tabulate(math.max(1, count))(i => (i % 19 - 9) * 0.5f)
+          val ys = Array.tabulate(math.max(1, count))(i => (i % 13 - 6) * 0.5f)
+          val cutoff = 3.0f
+          val xBuffer = context.allocate[Float](xs.length).toOption.get
+          val yBuffer = context.allocate[Float](ys.length).toOption.get
+          val out = context.allocate[Float](count + 32).toOption.get
+          try
+            assertEquals(xBuffer.copyFrom(xs), Right(()))
+            assertEquals(yBuffer.copyFrom(ys), Right(()))
+            val expected = Vector.tabulate(count) { i =>
+              val radius = math.sqrt(xs(i).toDouble * xs(i) + ys(i).toDouble * ys(i))
+              if radius > cutoff then radius else math.log(radius + 1.0)
+            }
+            for explicit <- Vector(false, true) do
+              assertEquals(out.copyFrom(Array.fill(count + 32)(-999.0f)), Right(()))
+              launch(context, function, definition.bind((xBuffer, yBuffer, out, cutoff, count)), config(count), stream, explicit)
+              val produced = out.copyToArray().toOption.get
+              for i <- 0 until count do
+                assert(math.abs(produced(i) - expected(i)) <= 1e-4f, s"$i: ${produced(i)} vs ${expected(i)}")
+              for i <- count until count + 32 do assertEquals(produced(i), -999.0f)
+              assertEquals(xBuffer.copyToArray().toOption.get.toVector, xs.toVector)
+              assertEquals(yBuffer.copyToArray().toOption.get.toVector, ys.toVector)
+          finally
+            out.close()
+            yBuffer.close()
+            xBuffer.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))
