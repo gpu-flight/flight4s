@@ -490,13 +490,34 @@ private[frontend] object ScalaKernelMacro:
           case "||" => '{ Conditional($left, $yes, ${expression[Boolean](arguments.head, env, bindings)}, Bool, $location) }
           case _ => '{ Conditional($left, $no, $yes, Bool, $location) }
         result.asExprOf[DeviceExpr[T]]
-      else if Set("unary_-", "unary_+").contains(operation) && numeric && arguments.isEmpty &&
-          (operation == "unary_+" || operandType =:= TypeRepr.of[Int]) then
+      else if Set("<<", ">>", ">>>").contains(operation) && operandType =:= TypeRepr.of[Int] &&
+          arguments.size == 1 && arguments.head.tpe.widen.dealias =:= TypeRepr.of[Int] then
+        val bits = expression[Int](selection.qualifier, env, bindings)
+        val distance = expression[Int](arguments.head, env, bindings)
+        val operator = operation match
+          case "<<" => '{ SignedShiftOperator.Left }
+          case ">>" => '{ SignedShiftOperator.ArithmeticRight }
+          case _ => '{ SignedShiftOperator.LogicalRight }
+        '{ SignedShift($operator, $bits, $distance, $location) }.asExprOf[DeviceExpr[T]]
+      else if operation == "unary_~" && operandType =:= TypeRepr.of[Int] && arguments.isEmpty then
+        // Matches the explicit DSL complement: XOR with the type's all-bits-set literal.
+        val operand = expression[T](selection.qualifier, env, bindings)
+        val allBits = '{ flight4s.core.ir.Literal(-1, I32, $location) }
+        '{ Binary(BinaryOperator.BitXor, $operand, ${allBits.asExprOf[DeviceExpr[T]]}, ${valueType[T]}, $location) }
+      else if Set("unary_-", "unary_+").contains(operation) && numeric && arguments.isEmpty then
         val operand = expression[T](selection.qualifier, env, bindings)
         if operation == "unary_+" then operand
-        else
-          val zero = '{ flight4s.core.ir.Literal(0, I32, $location) }
-          '{ Binary(BinaryOperator.Subtract, ${zero.asExprOf[DeviceExpr[T]]}, $operand, ${valueType[T]}, $location) }
+        else Type.of[T] match
+          // Multiplying by -1 is an exact IEEE sign flip, including signed zeros and NaN.
+          case '[Float] =>
+            val flip = '{ flight4s.core.ir.Literal(-1.0f, F32, $location) }
+            '{ Binary(BinaryOperator.Multiply, ${flip.asExprOf[DeviceExpr[T]]}, $operand, ${valueType[T]}, $location) }
+          case '[Double] =>
+            val flip = '{ flight4s.core.ir.Literal(-1.0, F64, $location) }
+            '{ Binary(BinaryOperator.Multiply, ${flip.asExprOf[DeviceExpr[T]]}, $operand, ${valueType[T]}, $location) }
+          case _ =>
+            val zero = '{ flight4s.core.ir.Literal(0, I32, $location) }
+            '{ Binary(BinaryOperator.Subtract, ${zero.asExprOf[DeviceExpr[T]]}, $operand, ${valueType[T]}, $location) }
       else report.errorAndAbort("ScalaKernel does not support this primitive operation or conversion yet", source.pos)
 
     def traversal(term: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(

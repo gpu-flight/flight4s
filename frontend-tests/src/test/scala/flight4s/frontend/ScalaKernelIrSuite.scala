@@ -50,6 +50,9 @@ class ScalaKernelIrSuite extends FunSuite:
       case (left: UnaryMath[?], right: UnaryMath[?]) =>
         assert(left.operator == right.operator, s"math operators differ: $left / $right")
         left.copy(value = align(left.value, right.value), span = right.span)
+      case (left: SignedShift, right: SignedShift) =>
+        assert(left.operator == right.operator, s"shift operators differ: $left / $right")
+        left.copy(value = align(left.value, right.value), distance = align(left.distance, right.distance), span = right.span)
       case _ => fail(s"expression shapes differ: $expected / $actual")
     result.asInstanceOf[Expr[T]]
 
@@ -910,6 +913,39 @@ class ScalaKernelIrSuite extends FunSuite:
     assertReference(actual, reference)
     assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
 
+  test("quoted shifts and complement exactly match explicit signed-shift and XOR staging"):
+    val actual = ScalaKernels.bitPack
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("data"), output[Int]("packed"),
+        value[Int]("rotate"), value[Int]("count"))) { p =>
+      val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+      when(i < p._4) {
+        val rotated = declare((p._1(i).read << p._3) | (p._1(i).read >>> (literal(32) - p._3)))
+        val arithmetic = declare(p._1(i).read >> literal(2))
+        p._2(i) := rotated ^ ~arithmetic
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
+  test("quoted Float and Double negations exactly match explicit minus-one multiplication"):
+    val actual = ScalaKernels.negateBlend
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("floats"), output[Float]("outF"),
+        input[Double]("doubles"), output[Double]("outD"), value[Float]("weight"), value[Int]("count"))) { p =>
+      val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+      when(i < p._6) {
+        p._2(i) := literal(-1.0f) * p._1(i).read * p._5 + literal(-1.0f) * (p._1(i).read - p._5)
+        p._4(i) := literal(-1.0) * p._3(i).read * literal(0.5) + literal(-1.0) * (p._3(i).read * p._3(i).read)
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
   test("quoted row loops exactly match ordered explicit DSL loops and bound snapshots"):
     val actual = ScalaKernels.rowSum
     val names = namesOf(actual)
@@ -1709,7 +1745,8 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.atomicHistogram, () => ScalaKernels.atomicCompact, () => ScalaKernels.atomicSharedSum,
       () => ScalaKernels.scopedFlag, () => ScalaKernels.scopedExchange, () => ScalaKernels.scopedSharedCounter,
       () => ScalaKernels.scopedBounds, () => ScalaKernels.scopedBitmask, () => ScalaKernels.scopedClaim,
-      () => ScalaKernels.mathActivation, () => ScalaKernels.mathLogistic, () => ScalaKernels.mathDistance)
+      () => ScalaKernels.mathActivation, () => ScalaKernels.mathLogistic, () => ScalaKernels.mathDistance,
+      () => ScalaKernels.bitPack, () => ScalaKernels.negateBlend)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)

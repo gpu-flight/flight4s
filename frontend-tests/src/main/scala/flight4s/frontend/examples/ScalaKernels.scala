@@ -297,6 +297,23 @@ object ScalaKernels:
       p._3(i) = if radius > p._4 then radius else log(radius + 1.0f)
   }
 
+  def bitPack = kernel("quotedBitPack", params(input[Int]("data"), output[Int]("packed"),
+      value[Int]("rotate"), value[Int]("count"))) { p =>
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    if i < p._4 then
+      val rotated = (p._1(i) << p._3) | (p._1(i) >>> (32 - p._3))
+      val arithmetic = p._1(i) >> 2
+      p._2(i) = rotated ^ ~arithmetic
+  }
+
+  def negateBlend = kernel("quotedNegateBlend", params(input[Float]("floats"), output[Float]("outF"),
+      input[Double]("doubles"), output[Double]("outD"), value[Float]("weight"), value[Int]("count"))) { p =>
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    if i < p._6 then
+      p._2(i) = -p._1(i) * p._5 + -(p._1(i) - p._5)
+      p._4(i) = -p._3(i) * 0.5 + -(p._3(i) * p._3(i))
+  }
+
   def sharedExchange = kernel("quotedSharedExchange", params(input[Float]("data"), output[Float]("target"),
       value[Int]("count"))) { (data, target, count) =>
     val tile = sharedArray[Float](64)
