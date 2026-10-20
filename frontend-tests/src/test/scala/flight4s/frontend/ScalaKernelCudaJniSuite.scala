@@ -1767,6 +1767,67 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("quoted shifts rotate pack and complement exactly like JVM Int semantics"):
+    val definition = ScalaKernels.bitPack
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => i * 2654435761L.toInt + (i % 19 - 9))
+          val data = context.allocate[Int](initial.length).toOption.get
+          val packed = context.allocate[Int](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            for rotate <- Vector(0, 7, 31) do
+              val expected = Vector.tabulate(count) { i =>
+                val x = initial(i)
+                ((x << rotate) | (x >>> (32 - rotate))) ^ ~(x >> 2)
+              }
+              for explicit <- Vector(false, true) do
+                assertEquals(packed.copyFrom(Array.fill(count + 32)(-999)), Right(()))
+                launch(context, function, definition.bind((data, packed, rotate, count)), config(count), stream, explicit)
+                assertEquals(packed.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999))
+                assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            packed.close()
+            data.close()
+      finally stream.close()
+    }
+
+  test("quoted Float and Double negations flip signs exactly including zeros"):
+    val definition = ScalaKernels.negateBlend
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val floats = Array.tabulate(math.max(1, count))(i => (i % 19 - 9) * 0.25f)
+          val doubles = Array.tabulate(math.max(1, count))(i => (i % 13 - 6) * 0.5)
+          val weight = 1.5f
+          val floatBuffer = context.allocate[Float](floats.length).toOption.get
+          val outF = context.allocate[Float](count + 32).toOption.get
+          val doubleBuffer = context.allocate[Double](doubles.length).toOption.get
+          val outD = context.allocate[Double](count + 32).toOption.get
+          try
+            assertEquals(floatBuffer.copyFrom(floats), Right(()))
+            assertEquals(doubleBuffer.copyFrom(doubles), Right(()))
+            val expectedF = Vector.tabulate(count)(i => -floats(i) * weight + -(floats(i) - weight))
+            val expectedD = Vector.tabulate(count)(i => -doubles(i) * 0.5 + -(doubles(i) * doubles(i)))
+            for explicit <- Vector(false, true) do
+              assertEquals(outF.copyFrom(Array.fill(count + 32)(-999.0f)), Right(()))
+              assertEquals(outD.copyFrom(Array.fill(count + 32)(-999.0)), Right(()))
+              launch(context, function, definition.bind((floatBuffer, outF, doubleBuffer, outD, weight, count)), config(count), stream, explicit)
+              assertEquals(outF.copyToArray().toOption.get.toVector, expectedF ++ Vector.fill(32)(-999.0f))
+              assertEquals(outD.copyToArray().toOption.get.toVector, expectedD ++ Vector.fill(32)(-999.0))
+              assertEquals(floatBuffer.copyToArray().toOption.get.toVector, floats.toVector)
+              assertEquals(doubleBuffer.copyToArray().toOption.get.toVector, doubles.toVector)
+          finally
+            outD.close()
+            doubleBuffer.close()
+            outF.close()
+            floatBuffer.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))
