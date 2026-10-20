@@ -314,6 +314,16 @@ object ScalaKernels:
       p._4(i) = -p._3(i) * 0.5 + -(p._3(i) * p._3(i))
   }
 
+  def convertBlend = kernel("quotedConvertBlend", params(input[Int]("ints"), input[Double]("doubles"),
+      output[Float]("outF"), output[Double]("outD"), value[Int]("count"))) { p =>
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    if i < p._5 then
+      val widened = p._1(i).toDouble
+      val shrunk = p._2(i).toFloat
+      p._3(i) = p._1(i).toFloat * 0.5f + shrunk
+      p._4(i) = widened + p._2(i) + shrunk.toDouble
+  }
+
   def sharedExchange = kernel("quotedSharedExchange", params(input[Float]("data"), output[Float]("target"),
       value[Int]("count"))) { (data, target, count) =>
     val tile = sharedArray[Float](64)
