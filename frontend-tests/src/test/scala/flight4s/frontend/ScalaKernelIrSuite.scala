@@ -29,6 +29,8 @@ class ScalaKernelIrSuite extends FunSuite:
       case (left: SharedElement[?], right: SharedElement[?]) =>
         assertEquals(left.indices.size, right.indices.size)
         left.copy(indices = left.indices.zip(right.indices).map(align), span = right.span)
+      case (left: LocalArrayElement[?], right: LocalArrayElement[?]) =>
+        left.copy(index = align(left.index, right.index), span = right.span)
       case _ => fail(s"place shapes differ: $expected / $actual")
     result.asInstanceOf[Place[T, S, M]]
 
@@ -65,6 +67,8 @@ class ScalaKernelIrSuite extends FunSuite:
     Block(expected.statements.zip(actual.statements).map { (left, right) => (left, right) match
       case (left: LocalDeclaration[?], right: LocalDeclaration[?]) =>
         left.copy(local = left.local.copy(span = right.local.span), initial = align(left.initial, right.initial), span = right.span)
+      case (left: LocalArrayDeclaration[?], right: LocalArrayDeclaration[?]) =>
+        left.copy(array = left.array.copy(span = right.array.span), span = right.span)
       case (left: Store[?, ?], right: Store[?, ?]) =>
         left.copy(to = alignPlace(left.to, right.to), value = align(left.value, right.value), span = right.span)
       case (left: IfThen, right: IfThen) =>
@@ -968,6 +972,31 @@ class ScalaKernelIrSuite extends FunSuite:
     assertReference(actual, reference)
     assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
 
+  test("quoted local arrays exactly match explicit thread-local declarations and element accesses"):
+    val actual = ScalaKernels.localWindow
+    val names = namesOf(actual)
+    val arrayNames = scala.collection.mutable.Queue.from(all(actual.body).collect { case d: LocalArrayDeclaration[?] => d.array.name })
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Float]("data"), output[Float]("target"),
+        value[Int]("count"))) { p =>
+      val window = localArray[Float](arrayNames.dequeue(), 4)
+      val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+      when(i < p._3) {
+        window(literal(0)) := p._1(i).read
+        window(literal(1)) := window(literal(0)).read * literal(0.5f)
+        window(literal(2)) := window(literal(1)).read + literal(1.0f)
+        val pick = declare((i % literal(2)) + literal(1))
+        window(literal(3)) := window(pick).read
+        val slot = declare(i % literal(3))
+        window(slot) := window(slot).read + literal(2.0f)
+        p._2(i) := window(literal(0)).read + window(literal(1)).read + window(literal(2)).read + window(literal(3)).read
+      }
+    }
+    assert(names.isEmpty)
+    assert(arrayNames.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
   test("quoted row loops exactly match ordered explicit DSL loops and bound snapshots"):
     val actual = ScalaKernels.rowSum
     val names = namesOf(actual)
@@ -1768,7 +1797,8 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.scopedFlag, () => ScalaKernels.scopedExchange, () => ScalaKernels.scopedSharedCounter,
       () => ScalaKernels.scopedBounds, () => ScalaKernels.scopedBitmask, () => ScalaKernels.scopedClaim,
       () => ScalaKernels.mathActivation, () => ScalaKernels.mathLogistic, () => ScalaKernels.mathDistance,
-      () => ScalaKernels.bitPack, () => ScalaKernels.negateBlend, () => ScalaKernels.convertBlend)
+      () => ScalaKernels.bitPack, () => ScalaKernels.negateBlend, () => ScalaKernels.convertBlend,
+      () => ScalaKernels.localWindow)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)

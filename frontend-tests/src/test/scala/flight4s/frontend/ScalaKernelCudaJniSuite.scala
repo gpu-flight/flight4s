@@ -1861,6 +1861,39 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("quoted local arrays keep per-thread windows exact across static and dynamic indices"):
+    val definition = ScalaKernels.localWindow
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val initial = Array.tabulate(math.max(1, count))(i => (i % 19 - 9) * 0.25f)
+          val data = context.allocate[Float](initial.length).toOption.get
+          val target = context.allocate[Float](count + 32).toOption.get
+          try
+            assertEquals(data.copyFrom(initial), Right(()))
+            val expected = Vector.tabulate(count) { i =>
+              val window = new Array[Float](4)
+              window(0) = initial(i)
+              window(1) = window(0) * 0.5f
+              window(2) = window(1) + 1.0f
+              val pick = (i % 2) + 1
+              window(3) = window(pick)
+              val slot = i % 3
+              window(slot) = window(slot) + 2.0f
+              window(0) + window(1) + window(2) + window(3)
+            }
+            for explicit <- Vector(false, true) do
+              assertEquals(target.copyFrom(Array.fill(count + 32)(-999.0f)), Right(()))
+              launch(context, function, definition.bind((data, target, count)), config(count), stream, explicit)
+              assertEquals(target.copyToArray().toOption.get.toVector, expected ++ Vector.fill(32)(-999.0f))
+              assertEquals(data.copyToArray().toOption.get.toVector, initial.toVector)
+          finally
+            target.close()
+            data.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))

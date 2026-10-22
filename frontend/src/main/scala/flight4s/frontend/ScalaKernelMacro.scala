@@ -138,6 +138,10 @@ private[frontend] object ScalaKernelMacro:
     val deviceMathMethods = Vector("exp", "log", "sqrt", "rsqrt", "tanh").map { name =>
       name -> TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember(name)
     }
+    val localStorageSymbol = TypeRepr.of[ScalaKernel.DeviceLocalArray[Any]].typeSymbol
+    val localReadMethods = localStorageSymbol.methodMember("apply")
+    val localWriteMethods = localStorageSymbol.methodMember("update")
+    val localArrayDeclarationMethods = TypeRepr.of[ScalaKernel.type].typeSymbol.methodMember("localArray")
     val blockReductionSymbol = TypeRepr.of[ScalaKernel.DeviceBlockReduction[Any]].typeSymbol
     val blockSumMethods = blockReductionSymbol.methodMember("sum")
     val blockTreeMethods = blockReductionSymbol.methodMember("reduceTree")
@@ -413,6 +417,15 @@ private[frontend] object ScalaKernelMacro:
                   val offset = expression[Int](index, env, bindings)
                   '{ Load(SharedElement($handle.name, Vector($offset), $cudaType, $location), $location) }
                 case _ => report.errorAndAbort("shared array reads require shared storage", selection.pos)
+            case Some((selection, List(List(index)))) if localReadMethods.contains(selection.symbol) =>
+              val array = binding(selection.qualifier, env, bindings).getOrElse(
+                report.errorAndAbort("ScalaKernel local array accesses must reference a declared local array or immutable alias", selection.pos))
+              array.handle.tpe.widen.asType match
+                case '[LocalArray[t]] =>
+                  val handle = array.handle.asExprOf[LocalArray[T]]
+                  val offset = expression[Int](index, env, bindings)
+                  '{ Load(LocalArrayElement($handle.name, $offset, $cudaType, $location), $location) }
+                case _ => report.errorAndAbort("ScalaKernel local array accesses require local storage", selection.pos)
             case Some((selection, List(List(row, column)))) if shared2ReadMethods.contains(selection.symbol) =>
               val array = binding(selection.qualifier, env, bindings).getOrElse(
                 report.errorAndAbort("shared array reads must reference a declared shared array or immutable alias", selection.pos))
@@ -1229,6 +1242,17 @@ private[frontend] object ScalaKernelMacro:
                 '{ CudaDsl.:=[t, Shared](SharedElement($handle.name, Vector($offset),
                     $handle.valueType, $location))($initial)(using $builder, ${position(source)}) }
               case _ => report.errorAndAbort("shared array writes require shared storage", selection.pos)
+          case Some((selection, List(List(index, value)))) if localWriteMethods.contains(selection.symbol) =>
+            val array = binding(selection.qualifier, env, bindings).getOrElse(
+              report.errorAndAbort("ScalaKernel local array accesses must reference a declared local array or immutable alias", selection.pos))
+            array.handle.tpe.widen.asType match
+              case '[LocalArray[t]] =>
+                val handle = array.handle.asExprOf[LocalArray[t]]
+                val offset = expression[Int](index, env, bindings)
+                val initial = expression[t](value, env, bindings)
+                '{ CudaDsl.:=[t, Local](LocalArrayElement($handle.name, $offset,
+                    $handle.valueType, $location))($initial)(using $builder, ${position(source)}) }
+              case _ => report.errorAndAbort("ScalaKernel local array accesses require local storage", selection.pos)
           case Some((selection, List(List(row, column, value)))) if shared2WriteMethods.contains(selection.symbol) =>
             val array = binding(selection.qualifier, env, bindings).getOrElse(
               report.errorAndAbort("shared array writes must reference a declared shared array or immutable alias", selection.pos))
@@ -1333,6 +1357,26 @@ private[frontend] object ScalaKernelMacro:
                       }
                     case _ => report.errorAndAbort("ScalaKernel shared arrays support Int, Float, Double and Boolean elements only", value.pos)
                 case _ => report.errorAndAbort(s"ScalaKernel shared arrays require a direct $markerName declaration or immutable alias", rhs.pos)
+          else if ranked(localStorageSymbol) then
+            if mutable then report.errorAndAbort("ScalaKernel local array bindings must be immutable", value.pos)
+            binding(rhs, current, bindings) match
+              case Some(original) => next(tail, result, current.updated(value.symbol, original))
+              case None => markerArguments(rhs, localArrayDeclarationMethods) match
+                case Some(List(List(size))) =>
+                  // Same placement rule as shared storage; the array itself is thread-private.
+                  val root = sharedRoot.getOrElse(report.errorAndAbort(
+                    "ScalaKernel local arrays must be declared outside branches and loops", value.pos))
+                  val count = unwrapped(size) match
+                    case Literal(IntConstant(count)) if count > 0 => count
+                    case _ => report.errorAndAbort("ScalaKernel local array sizes must be positive compile-time Int constants", size.pos)
+                  declaredType.asType match
+                    case '[ScalaKernel.DeviceLocalArray[t]] if primitive(TypeRepr.of[t]) =>
+                      '{
+                        val handle = CudaDsl.localArray[t](${Expr(count)})(using ${valueType[t]}, $root, ${position(value)})
+                        ${next(tail, result, current.updated(value.symbol, Binding('handle.asTerm)))}
+                      }
+                    case _ => report.errorAndAbort("ScalaKernel local arrays support Int, Float, Double and Boolean elements only", value.pos)
+                case _ => report.errorAndAbort("ScalaKernel local arrays require a direct localArray declaration or immutable alias", rhs.pos)
           else if ranked(deviceAtomicSymbol) || ranked(scopedAtomicSymbol) then
             report.errorAndAbort("ScalaKernel atomic views must be consumed immediately by one atomic operation", value.pos)
           else if ranked(blockReductionSymbol) then
