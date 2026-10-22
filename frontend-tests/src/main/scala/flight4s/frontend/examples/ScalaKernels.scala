@@ -324,6 +324,22 @@ object ScalaKernels:
       p._4(i) = widened + p._2(i) + shrunk.toDouble
   }
 
+  def localWindow = kernel("quotedLocalWindow", params(input[Float]("data"), output[Float]("target"),
+      value[Int]("count"))) { p =>
+    val window = localArray[Float](4)
+    val alias = window
+    val i = blockIdx.x * blockDim.x + threadIdx.x
+    if i < p._3 then
+      window(0) = p._1(i)
+      alias(1) = window(0) * 0.5f
+      window(2) = alias(1) + 1.0f
+      val pick = (i % 2) + 1
+      window(3) = window(pick)
+      val slot = i % 3
+      alias(slot) = alias(slot) + 2.0f
+      p._2(i) = window(0) + window(1) + window(2) + window(3)
+  }
+
   def sharedExchange = kernel("quotedSharedExchange", params(input[Float]("data"), output[Float]("target"),
       value[Int]("count"))) { (data, target, count) =>
     val tile = sharedArray[Float](64)

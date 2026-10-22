@@ -35,6 +35,14 @@ object ScalaKernel:
     def apply(layer: Int, row: Int, column: Int): T = markerOnly()
     def update(layer: Int, row: Int, column: Int, value: T): Unit = markerOnly()
 
+  /** Per-thread scratch marker; a C++ automatic array, never shared, no barrier interaction. */
+  final class DeviceLocalArray[T] private[frontend] ():
+    def apply(index: Int): T = markerOnly()
+    def update(index: Int, value: T): Unit = markerOnly()
+
+  /** Declares uninitialized thread-local storage with a positive compile-time element count. */
+  def localArray[T](elementCount: Int): DeviceLocalArray[T] = markerOnly()
+
   /** Declares uninitialized static storage with a positive compile-time element count. */
   def sharedArray[T](elementCount: Int): DeviceSharedArray[T] = markerOnly()
 
