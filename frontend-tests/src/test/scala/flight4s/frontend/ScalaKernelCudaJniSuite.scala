@@ -1828,6 +1828,39 @@ class ScalaKernelCudaJniSuite extends FunSuite:
       finally stream.close()
     }
 
+  test("quoted conversions reproduce JVM widening and nearest-even narrowing bit-for-bit"):
+    val definition = ScalaKernels.convertBlend
+    withKernel(definition) { (context, function) =>
+      val stream = context.createStream().toOption.get
+      try
+        for count <- counts do
+          val ints = Array.tabulate(math.max(1, count))(i => i * 2654435761L.toInt + (i % 19 - 9))
+          val doubles = Array.tabulate(math.max(1, count))(i => (i % 23 - 11) * 0.37 + 1.0 / 3.0)
+          val intBuffer = context.allocate[Int](ints.length).toOption.get
+          val doubleBuffer = context.allocate[Double](doubles.length).toOption.get
+          val outF = context.allocate[Float](count + 32).toOption.get
+          val outD = context.allocate[Double](count + 32).toOption.get
+          try
+            assertEquals(intBuffer.copyFrom(ints), Right(()))
+            assertEquals(doubleBuffer.copyFrom(doubles), Right(()))
+            val expectedF = Vector.tabulate(count)(i => ints(i).toFloat * 0.5f + doubles(i).toFloat)
+            val expectedD = Vector.tabulate(count)(i => ints(i).toDouble + doubles(i) + doubles(i).toFloat.toDouble)
+            for explicit <- Vector(false, true) do
+              assertEquals(outF.copyFrom(Array.fill(count + 32)(-999.0f)), Right(()))
+              assertEquals(outD.copyFrom(Array.fill(count + 32)(-999.0)), Right(()))
+              launch(context, function, definition.bind((intBuffer, doubleBuffer, outF, outD, count)), config(count), stream, explicit)
+              assertEquals(outF.copyToArray().toOption.get.toVector, expectedF ++ Vector.fill(32)(-999.0f))
+              assertEquals(outD.copyToArray().toOption.get.toVector, expectedD ++ Vector.fill(32)(-999.0))
+              assertEquals(intBuffer.copyToArray().toOption.get.toVector, ints.toVector)
+              assertEquals(doubleBuffer.copyToArray().toOption.get.toVector, doubles.toVector)
+          finally
+            outD.close()
+            outF.close()
+            doubleBuffer.close()
+            intBuffer.close()
+      finally stream.close()
+    }
+
   private def launch[Args <: Tuple](context: CudaContext, function: CudaFunction[Args],
       invocation: KernelInvocation[Args], config: LaunchConfig, stream: CudaStream, explicit: Boolean): Unit =
     assertEquals(if explicit then function.launch(invocation, config, stream) else function.launch(invocation, config), Right(()))

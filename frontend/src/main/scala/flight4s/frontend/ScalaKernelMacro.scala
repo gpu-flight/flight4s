@@ -518,6 +518,25 @@ private[frontend] object ScalaKernelMacro:
           case _ =>
             val zero = '{ flight4s.core.ir.Literal(0, I32, $location) }
             '{ Binary(BinaryOperator.Subtract, ${zero.asExprOf[DeviceExpr[T]]}, $operand, ${valueType[T]}, $location) }
+      // Only the conversions whose NearestEven defaults reproduce JVM semantics exactly.
+      else if operation == "toDouble" && arguments.isEmpty && TypeRepr.of[T] =:= TypeRepr.of[Double] &&
+          (operandType =:= TypeRepr.of[Int] || operandType =:= TypeRepr.of[Float]) then
+        val staged =
+          if operandType =:= TypeRepr.of[Int] then
+            '{ CudaDsl.convert.i32ToF64(${expression[Int](selection.qualifier, env, bindings)})(using ${position(source)}) }
+          else
+            '{ CudaDsl.convert.f32ToF64(${expression[Float](selection.qualifier, env, bindings)})(using ${position(source)}) }
+        staged.asExprOf[DeviceExpr[T]]
+      else if operation == "toFloat" && arguments.isEmpty && TypeRepr.of[T] =:= TypeRepr.of[Float] &&
+          (operandType =:= TypeRepr.of[Int] || operandType =:= TypeRepr.of[Double]) then
+        val staged =
+          if operandType =:= TypeRepr.of[Int] then
+            '{ CudaDsl.convert.i32ToF32(${expression[Int](selection.qualifier, env, bindings)},
+                RoundingMode.NearestEven)(using ${position(source)}) }
+          else
+            '{ CudaDsl.convert.f64ToF32(${expression[Double](selection.qualifier, env, bindings)},
+                RoundingMode.NearestEven)(using ${position(source)}) }
+        staged.asExprOf[DeviceExpr[T]]
       else report.errorAndAbort("ScalaKernel does not support this primitive operation or conversion yet", source.pos)
 
     def traversal(term: Term, env: Environment, bindings: Expr[Params], builder: Expr[CudaDsl.BlockBuilder])(

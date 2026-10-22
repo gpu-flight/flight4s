@@ -53,6 +53,10 @@ class ScalaKernelIrSuite extends FunSuite:
       case (left: SignedShift, right: SignedShift) =>
         assert(left.operator == right.operator, s"shift operators differ: $left / $right")
         left.copy(value = align(left.value, right.value), distance = align(left.distance, right.distance), span = right.span)
+      case (left: Convert[?, ?], right: Convert[?, ?]) =>
+        assert(left.valueType == right.valueType && left.rounding == right.rounding &&
+          left.saturation == right.saturation, s"conversion policies differ: $left / $right")
+        left.copy(value = align(left.value, right.value), span = right.span)
       case _ => fail(s"expression shapes differ: $expected / $actual")
     result.asInstanceOf[Expr[T]]
 
@@ -946,6 +950,24 @@ class ScalaKernelIrSuite extends FunSuite:
     assertReference(actual, reference)
     assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
 
+  test("quoted conversions exactly match explicit convert staging with nearest-even policies"):
+    val actual = ScalaKernels.convertBlend
+    val names = namesOf(actual)
+    def declare[T](initial: Expr[T])(using CudaType[T], BlockBuilder): Expr[T] = local(names.dequeue(), initial).read
+    val reference = CudaDsl.kernel(actual.name, params(input[Int]("ints"), input[Double]("doubles"),
+        output[Float]("outF"), output[Double]("outD"), value[Int]("count"))) { p =>
+      val i = declare(blockIdx.x * blockDim.x + threadIdx.x)
+      when(i < p._5) {
+        val widened = declare(convert.i32ToF64(p._1(i).read))
+        val shrunk = declare(convert.f64ToF32(p._2(i).read, RoundingMode.NearestEven))
+        p._3(i) := convert.i32ToF32(p._1(i).read, RoundingMode.NearestEven) * literal(0.5f) + shrunk
+        p._4(i) := widened + p._2(i).read + convert.f32ToF64(shrunk)
+      }
+    }
+    assert(names.isEmpty)
+    assertReference(actual, reference)
+    assertEquals(KernelValidator.validate(actual).warnings, Vector.empty)
+
   test("quoted row loops exactly match ordered explicit DSL loops and bound snapshots"):
     val actual = ScalaKernels.rowSum
     val names = namesOf(actual)
@@ -1746,7 +1768,7 @@ class ScalaKernelIrSuite extends FunSuite:
       () => ScalaKernels.scopedFlag, () => ScalaKernels.scopedExchange, () => ScalaKernels.scopedSharedCounter,
       () => ScalaKernels.scopedBounds, () => ScalaKernels.scopedBitmask, () => ScalaKernels.scopedClaim,
       () => ScalaKernels.mathActivation, () => ScalaKernels.mathLogistic, () => ScalaKernels.mathDistance,
-      () => ScalaKernels.bitPack, () => ScalaKernels.negateBlend)
+      () => ScalaKernels.bitPack, () => ScalaKernels.negateBlend, () => ScalaKernels.convertBlend)
     factories.foreach { factory =>
       val actual = factory()
       val statements = all(actual.body)
