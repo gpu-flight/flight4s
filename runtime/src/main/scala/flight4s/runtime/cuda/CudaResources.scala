@@ -302,6 +302,16 @@ final class CudaContext private (
         )
     }
 
+  def createPool(
+      config: MemoryPoolConfig = MemoryPoolConfig()
+  ): Either[CudaDriverFailure, CudaMemoryPool] =
+    lifecycleLock.synchronized {
+      requireOpen()
+      val pool = new CudaMemoryPool(this, backend, config)
+      resources :+= pool.contextResource
+      Right(pool)
+    }
+
   def createStream(
       mode: CudaStreamMode = CudaStreamMode.NonBlocking
   ): Either[CudaDriverFailure, CudaStream] =
@@ -784,25 +794,29 @@ final class CudaPinnedBuffer[T] private[cuda] (
     val sizeBytes: Long,
     private val handle: Long,
     private val storage: ByteBuffer,
-    private val backend: CudaDriverBackend
+    private val backend: CudaDriverBackend,
+    // A pool substitutes its return-to-cache release; None keeps the driver free.
+    releaseOverride: Option[() => Either[CudaDriverFailure, Unit]] = None
 ) extends AutoCloseable,
       CudaInFlightResource:
-  private val lifetime = InFlightResourceState[CudaDriverFailure] { () =>
-    val status = backend.freePinnedMemory(
-      context.nativeHandle,
-      handle
-    )
-    if status.succeeded then
-      context.unregister(this)
-      Right(())
-    else
-      Left(
-        CudaDriverFailure.fromStatus(
-          "CUDA pinned memory free",
-          status
-        )
+  private val lifetime = InFlightResourceState[CudaDriverFailure](
+    releaseOverride.getOrElse { () =>
+      val status = backend.freePinnedMemory(
+        context.nativeHandle,
+        handle
       )
-  }
+      if status.succeeded then
+        context.unregister(this)
+        Right(())
+      else
+        Left(
+          CudaDriverFailure.fromStatus(
+            "CUDA pinned memory free",
+            status
+          )
+        )
+    }
+  )
 
   def isOpen: Boolean =
     context.synchronizedLifecycle(lifetime.isOpen && context.isOpen)
@@ -888,26 +902,30 @@ final class CudaDeviceBuffer[T] private[cuda] (
     val elementCount: Int,
     val sizeBytes: Long,
     private val handle: Long,
-    private val backend: CudaDriverBackend
+    private val backend: CudaDriverBackend,
+    // A pool substitutes its return-to-cache release; None keeps the driver free.
+    releaseOverride: Option[() => Either[CudaDriverFailure, Unit]] = None
 ) extends DeviceBuffer[T],
       AutoCloseable,
       CudaInFlightResource:
-  private val lifetime = InFlightResourceState[CudaDriverFailure] { () =>
-    val status = backend.freeDeviceMemory(
-      context.nativeHandle,
-      handle
-    )
-    if status.succeeded then
-      context.unregister(this)
-      Right(())
-    else
-      Left(
-        CudaDriverFailure.fromStatus(
-          "CUDA device memory free",
-          status
-        )
+  private val lifetime = InFlightResourceState[CudaDriverFailure](
+    releaseOverride.getOrElse { () =>
+      val status = backend.freeDeviceMemory(
+        context.nativeHandle,
+        handle
       )
-  }
+      if status.succeeded then
+        context.unregister(this)
+        Right(())
+      else
+        Left(
+          CudaDriverFailure.fromStatus(
+            "CUDA device memory free",
+            status
+          )
+        )
+    }
+  )
 
   def isOpen: Boolean =
     context.synchronizedLifecycle(lifetime.isOpen && context.isOpen)
