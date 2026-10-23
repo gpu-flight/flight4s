@@ -35,76 +35,75 @@ source syntax only, never JVM reads of GPU values or host arrays. Calling a
 marker outside the captured body throws. The macro generates existing IR
 construction code and does not retain or execute the source lambda.
 
-Supported: literal lambdas with named tuple parameters or `p._N`, explicit
-typed signatures (including empty), `Int`/`Float`/`Double`/`Boolean` literals and
-parameters, arithmetic `+ - * /`, Int `% & | ^`, numeric comparisons,
-primitive `== !=`, unary `+`, Int unary `-`, Boolean `! && ||`, primitive
-`val` snapshots, initialized `var`, assignment/compound assignment, immutable
-buffer aliases, static 1-D shared arrays and aliases, `sync.block()` and `sync.blockAfter`
-(with `barrier()` retained for compatibility),
-statement scopes, statement `if`/`else`, and pure expression
-`if`/`else`, direct unit-stride `start until end` range loops with lazy guards,
-and explicit `deviceRange` scalar/flat-tuple yield/map/flatMap/withFilter/foreach plans with ordered
-scalar and immutable flat-tuple `foldLeft` initializers, including named tuples. Short-circuit
-booleans lower to lazy `Conditional` IR. An input's
-`update` requires read-write evidence, and lowering independently requires an
-output parameter. Existing validation and CUDA generation remain authoritative.
+Supported surface, each piece with its own contract section below: literal
+lambdas with named tuple parameters or `p._N`; explicit typed signatures
+(including empty and generic tuple evidence); `Int`/`Float`/`Double`/`Boolean`
+literals and parameters; arithmetic `+ - * /` and Int `%`; Int bitwise
+`& | ^ ~` and shifts `<< >> >>>` with exact JVM semantics; numeric comparisons
+and primitive `== !=`; Boolean `! && ||` lowered to lazy `Conditional` IR;
+unary `-` on Int (zero subtraction) and on Float/Double (an exact IEEE sign
+flip via multiplication by -1); the four exact numeric conversions
+`Int.toFloat`, `Int.toDouble`, `Float.toDouble` and `Double.toFloat`; device
+math `exp`, `log`, `sqrt`, `rsqrt` and `tanh` (Float/Double, exact libm, no
+fast-math); primitive `val` snapshots, initialized `var`, assignment and
+compound assignment; statement scopes, statement and expression `if`/`else`;
+direct unit-stride `start until end` loops with lazy guards; `deviceRange`
+scalar and flat/named-tuple yield/map/flatMap/withFilter/foreach plans with
+ordered scalar and immutable tuple `foldLeft` initializers; buffers with
+immutable aliases (an input's `update` requires read-write evidence, and
+lowering independently requires an output parameter); static 1-D/2-D/3-D and
+dynamic shared arrays; thread-local `localArray`; `sync.block()`,
+`sync.blockAfter`, `sync.warp(mask)` and `sync.warpAfter(mask)` with
+compile-time masks (`barrier()` retained for compatibility);
+`warpReduceSum`/`warpReduceTree` with optional widths, `blockReduction`
+sum/reduceTree, and the four warp shuffles; plain `atomic(target)`
+add/fetchAdd; and scoped `atomicDevice`/`atomicBlock` with
+store/load/exchange/fetchAdd/fetchSub, integral fetchMin/Max/And/Or/Xor and
+compareExchange with explicit success and failure orders.
 
-Deferred/rejected: other loops, eager range `.filter`, `to`/`by`, stored range values,
-eager Range `yield`, `match`/`try`/return, lazy/uninitialized bindings,
-local definitions, general expression blocks, arbitrary tuple/product local state, source-level
-embedded folds, case-class fold state/traversals and collectives, captured host state/values/helper calls,
-numeric conversions, shifts, floating remainder, dynamic floating unary minus,
-vector/low-precision source types, signature inference, and Unit-style annotated
-methods. Dynamic floating negation is not approximated by `0 - x`, which would
-mishandle signed zero. Negative floating literals remain supported. This is a
-documented compiler subset, not a sandbox. Host kernel names and signatures
-evaluate once in normal call order; that configuration is outside the body.
+Deliberate boundaries, each rejecting at macro expansion with a diagnostic the
+sweep suite (`ScalaKernelDiagnosticsSuite`) pins verbatim:
 
-`ScalaKernelCompilerSuite` contains 29 actual compiler-program tests,
-including separate callers, negative admission, all intrinsic axes, supported
-operators, scopes and configuration evaluation order. `ScalaKernelIrSuite`
-contains thirty-four tests: independent explicit-DSL branch/short-circuit/loop/guard/traversal/fold/flatMap/signature/shared-memory/phase references
-compare exact IR/effects/generated artifacts after aligning only source spans;
-all thirty-five fixtures validate and retain source maps and deterministic CUDA.
-`ScalaKernelTupleCompilerSuite` adds twelve real compiler-program tests for flat
-tuple admission, field types, tupled callbacks, nested plans and rejected effects.
-`TupleSignatureCompilerSuite` retains seventeen signature compiler-program tests.
-`ScalaKernelTupleFoldCompilerSuite` adds thirteen real compiler-program tests for
-typed tuple states, seed/result aliases, dependent fields and rejected effects.
-`ScalaKernelNamedTupleCompilerSuite` adds fourteen compiler-program tests for named
-fields, mixed states, nesting, separate callers and rejected malformed/effectful inputs.
-Four named fixtures share independent primitive-DSL and CPU references with their
-unnamed counterparts, proving the field-label change preserves operations and order.
-`ScalaKernelSharedCompilerSuite` adds twelve compiler/admission and host-marker
-tests for shared types, aliases, placements, sizes, purity and divergence warnings.
-Three independent shared-memory IR/GPU reference pairs cover cross-warp exchange,
-repeated reuse, Boolean/Double arrays and rejected mismatched block launches.
-`ScalaKernelPhaseCompilerSuite` adds sixteen admission/marker tests for exact
-body-then-barrier order, scopes, nested/empty phases, purity and divergence,
-including standalone sync imports, compatibility and the retired prototype spelling.
-Two phase fixtures share unchanged CPU assertions with their explicit-barrier
-counterparts and have separate independent IR/effect/generated-artifact references.
-`ScalaKernelCudaJniSuite` has thirty-five real GPU fixtures for Float scaling, mutable
-Int snapshots/shadowing, tightly sized short-circuit inputs, and Double/Boolean
-branches. They cover counts 0/1/63/64/65/193/257, 32 output tails, both stream
-paths, disabled execution, unchanged read-only inputs, and in-place updates.
-The loop fixtures additionally cover Float row sums with 0/1/3/17/65 columns,
-mutable bound snapshots, negative/empty/reversed ranges and signed Int edges,
-dependent nested bounds, shadowed loop indices and per-iteration snapshots.
-The guarded fixtures additionally check chained predicates protecting tight
-allocations, all/none/mixed matches, live mutable state, guarded nested generators
-and distinct/shadowed callback indices.
-Traversal fixtures verify tight guarded rows, aliases/repeated terminals, live
-captures after changed bounds, single-evaluation mapped values after buffer stores,
-and nested lexical plans. Compiler cases cover all four scalar map result types,
-literal-union widening, unused-plan purity and separate typed callers.
-Fold fixtures verify Float cancellation order and seeds, filtered/empty traversals,
-Int plan reuse after changed memory/bias, and nested Boolean/Double state with
-distinct Int elements. Full buffers, tails and both stream paths are checked.
-FlatMap fixtures additionally verify guarded inner-bound loads, per-outer bounds,
-saved outer values across stores, reused inner aliases, three-level flattening,
-live terminal captures and global Boolean/Double fold state.
+| Boundary | Diagnostic contains |
+| --- | --- |
+| Other loop forms, `to`/`by`, non-unit strides | "direct start until end with unit stride" |
+| Lazy or uninitialized bindings | "must be initialized and cannot be lazy" |
+| Local definitions and imports in the body | "local definitions or imports" |
+| General expression blocks and effectful branches | "expression blocks" |
+| Captured host values and helper calls | "captures" / "does not translate this expression" |
+| Float/Double `toInt`, `toLong`, other conversions | "primitive operation or conversion" |
+| Long shift distances | "primitive operation or conversion" |
+| Dynamic or computed warp masks | "compile-time constant Int values" |
+| Dynamic or host-computed memory orders | "direct MemoryOrder case references" |
+| Illegal compareExchange failure orders | "failure orders" |
+| Non-Int integral atomics | "Int elements only" |
+| Dynamic or nonpositive storage sizes | "positive compile-time Int constants" |
+| Conditional shared/local array declarations | "outside branches and loops" |
+| Embedded reductions, shuffles, atomic results, folds | "directly initialize" |
+| Non-primitive elements and fold states | "Int, Float, Double and Boolean" |
+
+Vector and low-precision source types, signature inference and Unit-style
+annotated methods stay deferred (REMAINING_WORK.md). This is a documented
+compiler subset, not a sandbox. Host kernel names and signatures evaluate once
+in normal call order; that configuration is outside the body. Existing
+validation and CUDA generation remain authoritative.
+
+Every contract below is verified three ways. An admission suite per feature
+compiles real programs through `CompilerHarness` and pins both acceptance and
+the rejection diagnostics; `ScalaKernelDiagnosticsSuite` additionally sweeps
+one probe per boundary-table row so the table and the actual messages cannot
+drift. Exact-IR reference pairs in `ScalaKernelIrSuite` compare every staged
+fixture node-for-node against an independently written explicit-DSL kernel,
+aligning only source spans. GPU fixtures in `ScalaKernelCudaJniSuite`
+(currently 68) execute against CPU references over counts
+0/1/63/64/65/193/257 with sentinel tails, input preservation and both stream
+paths, and pass memcheck, racecheck and synccheck. Where Scala defines the
+semantics, the GPU asserts bit-exact equality (Int arithmetic, shifts,
+conversions, negation); the one documented tolerance is CUDA libm vs JVM ulps
+in device math, the same boundary flight4s-ml documents for `tanh`.
+A runnable end-to-end kernel lives in the examples module
+(`QuotedRowNormalizeExample`), combining shared memory, barriers, block
+reductions, device math, conversions and a local array in one quoted kernel.
 
 ### Shared Memory And Barrier Contract
 
@@ -478,9 +477,32 @@ int ready;
 if (ready == 1) out[i] = cell[blockIdx.x];
 ```
 
-Integral `fetchMin/Max/And/Or/Xor` and `compareExchange` with success and
-failure orders remain the next slice; system scope and dynamic orders stay
-deferred.
+Integral operations complete the scoped surface on Int elements:
+`fetchMin`, `fetchMax`, `fetchAnd`, `fetchOr` and `fetchXor` take a value and
+an order like the other fetch forms, and
+`compareExchange(expected, desired, success, failure)` binds the observed old
+value (equality with expected means the exchange happened). Failure-order
+legality mirrors core `permitsFailure` at expansion: Relaxed always; Acquire
+when the success order is Acquire, AcquireRelease or SequentiallyConsistent;
+SequentiallyConsistent only with a SequentiallyConsistent success order;
+Release and AcquireRelease never. Float and Double targets reject the integral
+forms ("Int elements only").
+
+```scala
+val ticket = atomicBlock(gate(0)).compareExchange(0, 1,
+  MemoryOrder.AcquireRelease, MemoryOrder.Acquire)
+val previousLow = atomicDevice(floors(i)).fetchMin(candidate, MemoryOrder.Relaxed)
+```
+
+```cpp
+int ticket = 0;
+::__nv_atomic_compare_exchange_n(&(gate[0]), &ticket, 1, false,
+    __NV_ATOMIC_ACQ_REL, __NV_ATOMIC_ACQUIRE, __NV_THREAD_SCOPE_BLOCK);
+int previousLow = ::__nv_atomic_fetch_min(&(floors[i]), candidate,
+    __NV_ATOMIC_RELAXED, __NV_THREAD_SCOPE_DEVICE);
+```
+
+System scope and dynamic orders stay deferred.
 
 ### Block Reduction Contract
 
@@ -965,6 +987,95 @@ pinned macro setup exposes symbol trees without constructor bodies, so this
 frontend cannot safely erase their potential effects. The explicit DSL's
 `ProductFoldState` still uses its existing host-staging contract. A separately
 validated case-class schema is future work, not an implicit fallback.
+
+### Local Array Contract
+
+`localArray[T](elementCount)` returns a `DeviceLocalArray[T]` marker: one
+private, uninitialized C++ automatic array per thread, with no sharing and
+therefore no barrier interaction or launch-shape requirement. Sizes are
+positive compile-time Int constants; bindings are immutable with aliases
+sharing the handle; declarations stay in unconditional scopes like shared
+storage; elements are Int, Float, Double or Boolean; indices may be static or
+dynamic Int expressions. Register promotion versus per-thread local memory is
+the CUDA compiler's choice, not part of the contract.
+
+```scala
+val window = localArray[Float](4)
+window(0) = data(i)
+val slot = i % 3
+window(slot) = window(slot) + 2.0f
+```
+
+```cpp
+float window[4];
+window[0] = data[i];
+int slot = (i % 3);
+window[slot] = (window[slot] + 2.0f);
+```
+
+### Device Math Contract
+
+`exp`, `log`, `sqrt`, `rsqrt` and `tanh` are pure expressions on Float or
+Double values, composable anywhere an expression is admitted, staging the
+explicit DSL's `UnaryMath` node. Emission is the exact-precision libm builtin
+(`::tanhf` for Float, `::tanh` for Double, and likewise for the others);
+NVRTC compiles without `--use_fast_math` and the fast `__expf`-style
+intrinsics are never emitted. CUDA libm and JVM `Math` differ in final ulps,
+the same documented boundary as flight4s-ml's `tanh` tolerances.
+
+```scala
+val scale = rsqrt(variance + 0.00001f)
+target(i) = tanh((data(i) - mean) * scale)
+```
+
+```cpp
+float scale = ::rsqrtf(variance + 1.0E-5f);
+target[i] = ::tanhf((data[i] - mean) * scale);
+```
+
+### Shift, Complement And Negation Contract
+
+Int `<<`, `>>` and `>>>` stage the core `SignedShift` node, whose emission
+reproduces JVM semantics bit-exactly: distances are masked `& 31u`, `>>` sign
+extends, `>>>` zero fills, and the value round-trips through unsigned so no
+C++ undefined behavior is reachable, including negative values and distances
+of 0 or 32 and above. Long distances reject. `~x` on Int stages the DSL
+complement, `(x ^ -1)`. Unary minus on Float and Double multiplies by the
+literal -1, an exact IEEE sign flip for every input including signed zeros,
+infinities and NaN; Int negation stays `(0 - x)`, exact for all values
+including `Int.MinValue`.
+
+```scala
+val rotated = (code << r) | (code >>> (32 - r))
+outF(i) = -floats(i) * weight
+```
+
+```cpp
+// each shift expands to an unsigned, distance-masked, bounded-cast lambda
+int rotated = (shift_left(code, r) | shift_logical_right(code, 32 - r));
+outF[i] = ((-0x1.0p0f * floats[i]) * weight);
+```
+
+### Numeric Conversion Contract
+
+Exactly four conversion spellings are admitted, the ones whose explicit-DSL
+NearestEven defaults reproduce JVM semantics bit-for-bit: `Int.toDouble` and
+`Float.toDouble` (exact widenings), `Int.toFloat` and `Double.toFloat` (round
+to nearest even, the JVM's `i2f`/`d2f`). They stage the `convert.*` helpers
+onto the `Convert` node. `Float.toInt` and `Double.toInt` stay rejected until
+core gains a truncation/saturation policy matching the JVM's
+truncate-toward-zero with NaN-to-zero and range saturation; `toLong`,
+`toShort` and the other non-device types keep their existing rejections.
+
+```scala
+val widened = ints(i).toDouble
+outF(i) = ints(i).toFloat * 0.5f + doubles(i).toFloat
+```
+
+```cpp
+double widened = ::__int2double_rn(ints[i]);
+outF[i] = ((::__int2float_rn(ints[i]) * 0.5f) + ::__double2float_rn(doubles[i]));
+```
 
 ## Kernel Annotation Prototype
 
