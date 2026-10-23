@@ -43,6 +43,9 @@ private[cuda] final class RecordingBackend extends CudaDriverBackend:
   var queryEventComplete = false
   var synchronizeEventStatus: NativeCudaDriverStatus = successStatus
   var waitForEventStatus: NativeCudaDriverStatus = successStatus
+  var createBlasStatus: NativeCudaDriverStatus = successStatus
+  var destroyBlasStatus: NativeCudaDriverStatus = successStatus
+  var gemmStatus: NativeCudaDriverStatus = successStatus
   var allocatePinnedStatus: NativeCudaDriverStatus = successStatus
   var freePinnedStatus: NativeCudaDriverStatus = successStatus
   var allocateStatus: NativeCudaDriverStatus = successStatus
@@ -216,6 +219,46 @@ private[cuda] final class RecordingBackend extends CudaDriverBackend:
   ): NativeCudaDriverStatus =
     events += s"waitForEvent:$contextHandle:$streamHandle:$eventHandle"
     waitForEventStatus
+
+  private var nextBlasHandle = 600L
+
+  override def createBlasHandle(
+      contextHandle: Long
+  ): NativeCudaResourceResult =
+    events += s"createBlas:$contextHandle"
+    val handle = nextBlasHandle
+    nextBlasHandle += 1
+    NativeCudaResourceResult(
+      handle = if createBlasStatus.succeeded then handle else 0L,
+      status = createBlasStatus
+    )
+
+  override def destroyBlasHandle(
+      contextHandle: Long,
+      blasHandle: Long
+  ): NativeCudaDriverStatus =
+    events += s"destroyBlas:$contextHandle:$blasHandle"
+    destroyBlasStatus
+
+  override def executeGemmF32(
+      contextHandle: Long,
+      blasHandle: Long,
+      streamHandle: Long,
+      m: Int,
+      n: Int,
+      k: Int,
+      alpha: Float,
+      beta: Float,
+      aAddress: Long,
+      bAddress: Long,
+      cAddress: Long,
+      workspaceAddress: Long,
+      workspaceBytes: Long
+  ): NativeCudaDriverStatus =
+    events +=
+      s"gemm:$contextHandle:$blasHandle:$streamHandle:$m:$n:$k:" +
+        s"$alpha:$beta:$aAddress:$bAddress:$cAddress:$workspaceAddress:$workspaceBytes"
+    gemmStatus
 
   override def allocatePinnedMemory(
       contextHandle: Long,

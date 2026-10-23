@@ -312,6 +312,27 @@ final class CudaContext private (
       Right(pool)
     }
 
+  def createBlas(): Either[CudaDriverFailure, CudaBlas] =
+    lifecycleLock.synchronized {
+      requireOpen()
+      val result = backend.createBlasHandle(handle)
+      if result.status.succeeded then
+        require(
+          result.handle != 0L,
+          "successful cuBLASLt handle creation returned a null handle"
+        )
+        val blas = new CudaBlas(this, backend, result.handle)
+        resources :+= blas.contextResource
+        Right(blas)
+      else
+        Left(
+          CudaDriverFailure.fromStatus(
+            "cuBLASLt handle creation",
+            result.status
+          )
+        )
+    }
+
   def createStream(
       mode: CudaStreamMode = CudaStreamMode.NonBlocking
   ): Either[CudaDriverFailure, CudaStream] =
@@ -861,6 +882,8 @@ final class CudaPinnedBuffer[T] private[cuda] (
   private[cuda] def requireIdle(): Unit =
     lifetime.requireIdle("CUDA pinned buffer")
 
+  private[cuda] def nativeAddress: Long = handle
+
   override private[cuda] def acquireInFlight()
       : InFlightLease[CudaDriverFailure] =
     requireOpen()
@@ -1226,6 +1249,8 @@ final class CudaDeviceBuffer[T] private[cuda] (
 
   private def requireIdle(): Unit =
     lifetime.requireIdle("CUDA device buffer")
+
+  private[cuda] def nativeAddress: Long = handle
 
   override private[cuda] def acquireInFlight()
       : InFlightLease[CudaDriverFailure] =
