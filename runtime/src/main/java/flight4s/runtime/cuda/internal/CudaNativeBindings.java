@@ -108,6 +108,31 @@ final class CudaNativeBindings {
       long streamHandle,
       long eventHandle);
 
+  static native NativeCudaDriverResult beginStreamCapture(
+      long contextHandle,
+      long streamHandle);
+
+  static native NativeCudaDriverResult endStreamCapture(
+      long contextHandle,
+      long streamHandle);
+
+  static native NativeCudaDriverResult instantiateGraph(
+      long contextHandle,
+      long graphHandle);
+
+  static native NativeCudaDriverResult launchGraph(
+      long contextHandle,
+      long execHandle,
+      long streamHandle);
+
+  static native NativeCudaDriverResult destroyGraphExec(
+      long contextHandle,
+      long execHandle);
+
+  static native NativeCudaDriverResult destroyGraph(
+      long contextHandle,
+      long graphHandle);
+
   static native NativeCudaDriverResult createBlasHandle(
       long contextHandle);
 

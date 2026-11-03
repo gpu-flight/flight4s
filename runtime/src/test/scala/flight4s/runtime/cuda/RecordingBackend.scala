@@ -43,6 +43,12 @@ private[cuda] final class RecordingBackend extends CudaDriverBackend:
   var queryEventComplete = false
   var synchronizeEventStatus: NativeCudaDriverStatus = successStatus
   var waitForEventStatus: NativeCudaDriverStatus = successStatus
+  var beginCaptureStatus: NativeCudaDriverStatus = successStatus
+  var endCaptureStatus: NativeCudaDriverStatus = successStatus
+  var instantiateGraphStatus: NativeCudaDriverStatus = successStatus
+  var launchGraphStatus: NativeCudaDriverStatus = successStatus
+  var destroyGraphExecStatus: NativeCudaDriverStatus = successStatus
+  var destroyGraphStatus: NativeCudaDriverStatus = successStatus
   var createBlasStatus: NativeCudaDriverStatus = successStatus
   var destroyBlasStatus: NativeCudaDriverStatus = successStatus
   var gemmStatus: NativeCudaDriverStatus = successStatus
@@ -221,6 +227,61 @@ private[cuda] final class RecordingBackend extends CudaDriverBackend:
     waitForEventStatus
 
   private var nextBlasHandle = 600L
+  private var nextGraphHandle = 700L
+  private var nextGraphExecHandle = 800L
+
+  override def beginStreamCapture(
+      contextHandle: Long,
+      streamHandle: Long
+  ): NativeCudaDriverStatus =
+    events += s"beginCapture:$contextHandle:$streamHandle"
+    beginCaptureStatus
+
+  override def endStreamCapture(
+      contextHandle: Long,
+      streamHandle: Long
+  ): NativeCudaResourceResult =
+    events += s"endCapture:$contextHandle:$streamHandle"
+    val handle = nextGraphHandle
+    nextGraphHandle += 1
+    NativeCudaResourceResult(
+      handle = if endCaptureStatus.succeeded then handle else 0L,
+      status = endCaptureStatus
+    )
+
+  override def instantiateGraph(
+      contextHandle: Long,
+      graphHandle: Long
+  ): NativeCudaResourceResult =
+    events += s"instantiateGraph:$contextHandle:$graphHandle"
+    val handle = nextGraphExecHandle
+    nextGraphExecHandle += 1
+    NativeCudaResourceResult(
+      handle = if instantiateGraphStatus.succeeded then handle else 0L,
+      status = instantiateGraphStatus
+    )
+
+  override def launchGraph(
+      contextHandle: Long,
+      execHandle: Long,
+      streamHandle: Long
+  ): NativeCudaDriverStatus =
+    events += s"launchGraph:$contextHandle:$execHandle:$streamHandle"
+    launchGraphStatus
+
+  override def destroyGraphExec(
+      contextHandle: Long,
+      execHandle: Long
+  ): NativeCudaDriverStatus =
+    events += s"destroyGraphExec:$contextHandle:$execHandle"
+    destroyGraphExecStatus
+
+  override def destroyGraph(
+      contextHandle: Long,
+      graphHandle: Long
+  ): NativeCudaDriverStatus =
+    events += s"destroyGraph:$contextHandle:$graphHandle"
+    destroyGraphStatus
 
   override def createBlasHandle(
       contextHandle: Long
