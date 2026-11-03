@@ -108,6 +108,28 @@ final class CudaNativeBindings {
       long streamHandle,
       long eventHandle);
 
+  static native NativeCudaDriverResult createBlasHandle(
+      long contextHandle);
+
+  static native NativeCudaDriverResult destroyBlasHandle(
+      long contextHandle,
+      long blasHandle);
+
+  static native NativeCudaDriverResult executeGemmF32(
+      long contextHandle,
+      long blasHandle,
+      long streamHandle,
+      int m,
+      int n,
+      int k,
+      float alpha,
+      float beta,
+      long aAddress,
+      long bAddress,
+      long cAddress,
+      long workspaceAddress,
+      long workspaceBytes);
+
   static native NativeCudaPinnedMemoryResult allocatePinnedMemory(
       long contextHandle,
       long sizeBytes);

@@ -135,6 +135,31 @@ private[flight4s] trait CudaDriverBackend:
       eventHandle: Long
   ): NativeCudaDriverStatus
 
+  def createBlasHandle(
+      contextHandle: Long
+  ): NativeCudaResourceResult
+
+  def destroyBlasHandle(
+      contextHandle: Long,
+      blasHandle: Long
+  ): NativeCudaDriverStatus
+
+  def executeGemmF32(
+      contextHandle: Long,
+      blasHandle: Long,
+      streamHandle: Long,
+      m: Int,
+      n: Int,
+      k: Int,
+      alpha: Float,
+      beta: Float,
+      aAddress: Long,
+      bAddress: Long,
+      cAddress: Long,
+      workspaceAddress: Long,
+      workspaceBytes: Long
+  ): NativeCudaDriverStatus
+
   def allocatePinnedMemory(
       contextHandle: Long,
       sizeBytes: Long
@@ -359,6 +384,52 @@ private[flight4s] object NativeCudaDriver extends CudaDriverBackend:
         contextHandle,
         streamHandle,
         eventHandle
+      )
+    )
+
+  override def createBlasHandle(
+      contextHandle: Long
+  ): NativeCudaResourceResult =
+    resource(CudaNativeBindings.createBlasHandle(contextHandle))
+
+  override def destroyBlasHandle(
+      contextHandle: Long,
+      blasHandle: Long
+  ): NativeCudaDriverStatus =
+    status(
+      CudaNativeBindings.destroyBlasHandle(contextHandle, blasHandle)
+    )
+
+  override def executeGemmF32(
+      contextHandle: Long,
+      blasHandle: Long,
+      streamHandle: Long,
+      m: Int,
+      n: Int,
+      k: Int,
+      alpha: Float,
+      beta: Float,
+      aAddress: Long,
+      bAddress: Long,
+      cAddress: Long,
+      workspaceAddress: Long,
+      workspaceBytes: Long
+  ): NativeCudaDriverStatus =
+    status(
+      CudaNativeBindings.executeGemmF32(
+        contextHandle,
+        blasHandle,
+        streamHandle,
+        m,
+        n,
+        k,
+        alpha,
+        beta,
+        aAddress,
+        bAddress,
+        cAddress,
+        workspaceAddress,
+        workspaceBytes
       )
     )
 

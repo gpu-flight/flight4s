@@ -81,6 +81,29 @@ set_target_properties(
 )
 
 add_library(
+  flight4s_cublaslt
+  STATIC
+  src/cublaslt_gemm.cpp
+)
+target_compile_features(flight4s_cublaslt PUBLIC cxx_std_20)
+target_include_directories(
+  flight4s_cublaslt
+  PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
+target_link_libraries(
+  flight4s_cublaslt
+  PUBLIC
+  CUDA::cublasLt
+  CUDA::cuda_driver
+)
+set_target_properties(
+  flight4s_cublaslt
+  PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+)
+
+add_library(
   flight4s_cuda
   SHARED
   src/cuda_launcher.cpp
@@ -90,6 +113,7 @@ add_library(
   src/jni_cuda_launcher.cpp
   src/jni_cuda_driver.cpp
   src/jni_nvrtc_compiler.cpp
+  src/jni_cublaslt.cpp
 )
 target_compile_features(flight4s_cuda PRIVATE cxx_std_20)
 target_include_directories(
@@ -104,6 +128,7 @@ target_link_libraries(
   flight4s_launch_contract
   flight4s_cuda_driver
   flight4s_nvrtc_compiler
+  flight4s_cublaslt
   CUDA::cuda_driver
 )
 
@@ -342,6 +367,49 @@ if(BUILD_TESTING)
     )
     set_tests_properties(
       flight4s_cuda_driver_integration
+      PROPERTIES
+      LABELS gpu
+      SKIP_RETURN_CODE 77
+    )
+
+    add_executable(
+      flight4s_cublaslt_gemm_integration_tests
+      tests/cublaslt_gemm_integration_test.cpp
+    )
+    target_compile_features(
+      flight4s_cublaslt_gemm_integration_tests
+      PRIVATE
+      cxx_std_20
+    )
+    target_link_libraries(
+      flight4s_cublaslt_gemm_integration_tests
+      PRIVATE
+      flight4s_cublaslt
+      flight4s_cuda_driver
+    )
+    if(MSVC)
+      target_compile_options(
+        flight4s_cublaslt_gemm_integration_tests
+        PRIVATE
+        /W4
+        /permissive-
+      )
+    else()
+      target_compile_options(
+        flight4s_cublaslt_gemm_integration_tests
+        PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+      )
+    endif()
+
+    add_test(
+      NAME flight4s_cublaslt_gemm_integration
+      COMMAND flight4s_cublaslt_gemm_integration_tests
+    )
+    set_tests_properties(
+      flight4s_cublaslt_gemm_integration
       PROPERTIES
       LABELS gpu
       SKIP_RETURN_CODE 77
