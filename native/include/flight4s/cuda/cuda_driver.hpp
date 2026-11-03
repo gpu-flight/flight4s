@@ -81,6 +81,16 @@ struct CudaEventQueryResult {
   bool complete;
 };
 
+struct CudaGraphResult {
+  CudaDriverStatus status;
+  CUgraph graph;
+};
+
+struct CudaGraphExecResult {
+  CudaDriverStatus status;
+  CUgraphExec exec;
+};
+
 class CudaDriver final {
  public:
   [[nodiscard]] CudaContextResult retain_primary_context(
@@ -193,6 +203,31 @@ class CudaDriver final {
       std::uint64_t source_offset_bytes,
       std::uint64_t size_bytes,
       CUstream stream) const;
+
+  [[nodiscard]] CudaDriverStatus begin_stream_capture(
+      CUcontext context,
+      CUstream stream) const;
+
+  [[nodiscard]] CudaGraphResult end_stream_capture(
+      CUcontext context,
+      CUstream stream) const;
+
+  [[nodiscard]] CudaGraphExecResult instantiate_graph(
+      CUcontext context,
+      CUgraph graph) const;
+
+  [[nodiscard]] CudaDriverStatus launch_graph(
+      CUcontext context,
+      CUgraphExec exec,
+      CUstream stream) const;
+
+  [[nodiscard]] CudaDriverStatus destroy_graph_exec(
+      CUcontext context,
+      CUgraphExec exec) const;
+
+  [[nodiscard]] CudaDriverStatus destroy_graph(
+      CUcontext context,
+      CUgraph graph) const;
 };
 
 }  // namespace flight4s::cuda

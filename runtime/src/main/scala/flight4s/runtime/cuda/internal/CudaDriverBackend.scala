@@ -135,6 +135,37 @@ private[flight4s] trait CudaDriverBackend:
       eventHandle: Long
   ): NativeCudaDriverStatus
 
+  def beginStreamCapture(
+      contextHandle: Long,
+      streamHandle: Long
+  ): NativeCudaDriverStatus
+
+  def endStreamCapture(
+      contextHandle: Long,
+      streamHandle: Long
+  ): NativeCudaResourceResult
+
+  def instantiateGraph(
+      contextHandle: Long,
+      graphHandle: Long
+  ): NativeCudaResourceResult
+
+  def launchGraph(
+      contextHandle: Long,
+      execHandle: Long,
+      streamHandle: Long
+  ): NativeCudaDriverStatus
+
+  def destroyGraphExec(
+      contextHandle: Long,
+      execHandle: Long
+  ): NativeCudaDriverStatus
+
+  def destroyGraph(
+      contextHandle: Long,
+      graphHandle: Long
+  ): NativeCudaDriverStatus
+
   def createBlasHandle(
       contextHandle: Long
   ): NativeCudaResourceResult
@@ -385,6 +416,55 @@ private[flight4s] object NativeCudaDriver extends CudaDriverBackend:
         streamHandle,
         eventHandle
       )
+    )
+
+  override def beginStreamCapture(
+      contextHandle: Long,
+      streamHandle: Long
+  ): NativeCudaDriverStatus =
+    status(
+      CudaNativeBindings.beginStreamCapture(contextHandle, streamHandle)
+    )
+
+  override def endStreamCapture(
+      contextHandle: Long,
+      streamHandle: Long
+  ): NativeCudaResourceResult =
+    resource(
+      CudaNativeBindings.endStreamCapture(contextHandle, streamHandle)
+    )
+
+  override def instantiateGraph(
+      contextHandle: Long,
+      graphHandle: Long
+  ): NativeCudaResourceResult =
+    resource(
+      CudaNativeBindings.instantiateGraph(contextHandle, graphHandle)
+    )
+
+  override def launchGraph(
+      contextHandle: Long,
+      execHandle: Long,
+      streamHandle: Long
+  ): NativeCudaDriverStatus =
+    status(
+      CudaNativeBindings.launchGraph(contextHandle, execHandle, streamHandle)
+    )
+
+  override def destroyGraphExec(
+      contextHandle: Long,
+      execHandle: Long
+  ): NativeCudaDriverStatus =
+    status(
+      CudaNativeBindings.destroyGraphExec(contextHandle, execHandle)
+    )
+
+  override def destroyGraph(
+      contextHandle: Long,
+      graphHandle: Long
+  ): NativeCudaDriverStatus =
+    status(
+      CudaNativeBindings.destroyGraph(contextHandle, graphHandle)
     )
 
   override def createBlasHandle(

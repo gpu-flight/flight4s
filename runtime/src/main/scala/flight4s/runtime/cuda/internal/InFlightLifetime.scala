@@ -6,9 +6,11 @@ private[flight4s] final class InFlightResourceState[E] private (
   private var closeRequested = false
   private var released = false
   private var leaseCount = 0
+  private var retainCount = 0
 
   def isOpen: Boolean = !closeRequested && !released
   def isReleased: Boolean = released
+  // Retained leases pin lifetime without counting as pending activity.
   def isInFlight: Boolean = leaseCount > 0
 
   def requireIdle(description: String): Unit =
@@ -19,7 +21,13 @@ private[flight4s] final class InFlightResourceState[E] private (
     if !isOpen then
       throw IllegalStateException("cannot retain a closed CUDA resource")
     leaseCount += 1
-    new InFlightLease(this)
+    new InFlightLease(this, retained = false)
+
+  def acquireRetained(): InFlightLease[E] =
+    if !isOpen then
+      throw IllegalStateException("cannot retain a closed CUDA resource")
+    retainCount += 1
+    new InFlightLease(this, retained = true)
 
   def requestClose(): Either[E, Unit] =
     if released then Right(())
@@ -27,13 +35,17 @@ private[flight4s] final class InFlightResourceState[E] private (
       closeRequested = true
       releaseIfReady()
 
-  private[internal] def releaseLease(): Either[E, Unit] =
-    require(leaseCount > 0, "in-flight lease count underflow")
-    leaseCount -= 1
+  private[internal] def releaseLease(retained: Boolean): Either[E, Unit] =
+    if retained then
+      require(retainCount > 0, "retained lease count underflow")
+      retainCount -= 1
+    else
+      require(leaseCount > 0, "in-flight lease count underflow")
+      leaseCount -= 1
     releaseIfReady()
 
   private def releaseIfReady(): Either[E, Unit] =
-    if closeRequested && leaseCount == 0 && !released then
+    if closeRequested && leaseCount == 0 && retainCount == 0 && !released then
       releaseNative() match
         case Right(()) =>
           released = true
@@ -50,7 +62,8 @@ private[flight4s] object InFlightResourceState:
     new InFlightResourceState(releaseNative)
 
 private[flight4s] final class InFlightLease[E] private[internal] (
-    owner: InFlightResourceState[E]
+    owner: InFlightResourceState[E],
+    retained: Boolean = false
 ):
   private var released = false
 
@@ -58,7 +71,7 @@ private[flight4s] final class InFlightLease[E] private[internal] (
     if released then Right(())
     else
       released = true
-      owner.releaseLease()
+      owner.releaseLease(retained)
 
 private[flight4s] final class InFlightBatch[E](
     leases: Vector[InFlightLease[E]]

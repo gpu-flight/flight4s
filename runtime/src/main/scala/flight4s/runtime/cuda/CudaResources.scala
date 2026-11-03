@@ -131,6 +131,7 @@ enum CudaEventMode(private[cuda] val nativeFlags: Int):
 
 private[cuda] trait CudaInFlightResource:
   private[cuda] def acquireInFlight(): InFlightLease[CudaDriverFailure]
+  private[cuda] def acquireRetained(): InFlightLease[CudaDriverFailure]
 
 private final case class PtxModuleKey private (hex: String)
 
@@ -441,6 +442,11 @@ final class CudaContext private (
     if closed then
       throw IllegalStateException("CUDA context is closed")
 
+  private[cuda] def register(resource: AutoCloseable): Unit =
+    lifecycleLock.synchronized {
+      resources :+= resource
+    }
+
   private[cuda] def unregister(resource: AutoCloseable): Unit =
     resources = resources.filterNot(_ eq resource)
 
@@ -641,6 +647,9 @@ final class CudaStream private[cuda] (
       handle
     }
 
+  private var captureSet =
+    Option.empty[Vector[(CudaInFlightResource, InFlightLease[CudaDriverFailure])]]
+
   private[cuda] def submitTracked(
       resources: Vector[CudaInFlightResource]
   )(
@@ -654,18 +663,87 @@ final class CudaStream private[cuda] (
         if unique.exists(_ eq resource) then unique
         else unique :+ resource
       }
-      val batch = InFlightBatch(
-        uniqueResources.map(_.acquireInFlight())
-      )
-      try
-        val status = submit(handle)
-        if status.succeeded then tracker.add(batch)
-        else releaseFailedSubmission(batch)
-        status
-      catch
-        case NonFatal(error) =>
-          releaseFailedSubmission(batch)
-          throw error
+      captureSet match
+        case Some(captured) =>
+          // Captured work never completes via synchronize: the graph will own
+          // one lease per distinct resource until it closes.
+          val extended = uniqueResources.foldLeft(captured) { (set, resource) =>
+            if set.exists(_._1 eq resource) then set
+            else set :+ (resource, resource.acquireRetained())
+          }
+          captureSet = Some(extended)
+          submit(handle)
+        case None =>
+          val batch = InFlightBatch(
+            uniqueResources.map(_.acquireInFlight())
+          )
+          try
+            val status = submit(handle)
+            if status.succeeded then tracker.add(batch)
+            else releaseFailedSubmission(batch)
+            status
+          catch
+            case NonFatal(error) =>
+              releaseFailedSubmission(batch)
+              throw error
+    }
+
+  /** Captures the body's submissions on this stream into an instantiated
+    * graph; nothing inside executes. Every exit path ends the capture. */
+  def capture(body: => Unit): Either[CudaDriverFailure, CudaGraph] =
+    context.synchronizedLifecycle {
+      requireOpen()
+      require(captureSet.isEmpty, "CUDA stream is already capturing")
+      val begin = backend.beginStreamCapture(context.nativeHandle, handle)
+      if !begin.succeeded then
+        Left(CudaDriverFailure.fromStatus("CUDA stream capture begin", begin))
+      else
+        captureSet = Some(Vector.empty)
+        val bodyError =
+          try
+            body
+            None
+          catch case NonFatal(error) => Some(error)
+        val captured = captureSet.getOrElse(Vector.empty)
+        captureSet = None
+        val end = backend.endStreamCapture(context.nativeHandle, handle)
+        def releaseCaptured(): Unit =
+          captured.foreach { (_, lease) =>
+            lease.release() match
+              case Left(failure) => throw CudaDriverException(failure)
+              case Right(()) => ()
+          }
+        def destroyCapturedGraph(): Either[CudaDriverFailure, Unit] =
+          if end.status.succeeded && end.handle != 0L then
+            val status = backend.destroyGraph(context.nativeHandle, end.handle)
+            if status.succeeded then Right(())
+            else Left(CudaDriverFailure.fromStatus("CUDA graph destruction", status))
+          else Right(())
+        bodyError match
+          case Some(error) =>
+            destroyCapturedGraph() match
+              case Left(failure) => throw CudaDriverException(failure)
+              case Right(()) => ()
+            releaseCaptured()
+            throw error
+          case None =>
+            if !end.status.succeeded then
+              releaseCaptured()
+              Left(CudaDriverFailure.fromStatus("CUDA stream capture end", end.status))
+            else
+              val instantiated = backend.instantiateGraph(context.nativeHandle, end.handle)
+              if !instantiated.status.succeeded then
+                val destroyed = destroyCapturedGraph()
+                releaseCaptured()
+                destroyed match
+                  case Left(failure) => Left(failure)
+                  case Right(()) =>
+                    Left(CudaDriverFailure.fromStatus("CUDA graph instantiation", instantiated.status))
+              else
+                val graph = new CudaGraph(context, backend, end.handle,
+                  instantiated.handle, captured.map(_._2))
+                context.register(graph.contextResource)
+                Right(graph)
     }
 
   private[cuda] def completionSnapshot()
@@ -888,6 +966,11 @@ final class CudaPinnedBuffer[T] private[cuda] (
       : InFlightLease[CudaDriverFailure] =
     requireOpen()
     lifetime.acquire()
+
+  override private[cuda] def acquireRetained()
+      : InFlightLease[CudaDriverFailure] =
+    requireOpen()
+    lifetime.acquireRetained()
 
   private[cuda] def transferView: ByteBuffer =
     transferView(0L, sizeBytes)
@@ -1257,6 +1340,11 @@ final class CudaDeviceBuffer[T] private[cuda] (
     requireOpen()
     lifetime.acquire()
 
+  override private[cuda] def acquireRetained()
+      : InFlightLease[CudaDriverFailure] =
+    requireOpen()
+    lifetime.acquireRetained()
+
   private def requireHostCodec(codec: CudaHostCodec[T]): Unit =
     require(
       codec.cudaType eq valueType,
@@ -1471,6 +1559,11 @@ final class CudaModule private[cuda] (
       : InFlightLease[CudaDriverFailure] =
     requireOpen()
     lifetime.acquire()
+
+  override private[cuda] def acquireRetained()
+      : InFlightLease[CudaDriverFailure] =
+    requireOpen()
+    lifetime.acquireRetained()
 
   private[cuda] def submit(
       functionHandle: Long,

@@ -711,4 +711,100 @@ CudaDriverStatus CudaDriver::copy_device_to_host_async(
       current);
 }
 
+CudaDriverStatus CudaDriver::begin_stream_capture(
+    CUcontext context,
+    CUstream stream) const {
+  require_handle(context, "CUDA context handle");
+  require_handle(stream, "CUDA stream handle");
+
+  CurrentContextScope current(context);
+  if (current.push_result() != CUDA_SUCCESS) {
+    return make_driver_status(current.push_result());
+  }
+  return finish_context_operation(
+      cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_GLOBAL),
+      current);
+}
+
+CudaGraphResult CudaDriver::end_stream_capture(
+    CUcontext context,
+    CUstream stream) const {
+  require_handle(context, "CUDA context handle");
+  require_handle(stream, "CUDA stream handle");
+
+  CurrentContextScope current(context);
+  if (current.push_result() != CUDA_SUCCESS) {
+    return {make_driver_status(current.push_result()), nullptr};
+  }
+  CUgraph graph = nullptr;
+  const auto status = finish_context_operation(
+      cuStreamEndCapture(stream, &graph),
+      current);
+  if (!status.succeeded()) {
+    return {status, nullptr};
+  }
+  return {status, graph};
+}
+
+CudaGraphExecResult CudaDriver::instantiate_graph(
+    CUcontext context,
+    CUgraph graph) const {
+  require_handle(context, "CUDA context handle");
+  require_handle(graph, "CUDA graph handle");
+
+  CurrentContextScope current(context);
+  if (current.push_result() != CUDA_SUCCESS) {
+    return {make_driver_status(current.push_result()), nullptr};
+  }
+  CUgraphExec exec = nullptr;
+  const auto status = finish_context_operation(
+      cuGraphInstantiate(&exec, graph, 0),
+      current);
+  if (!status.succeeded()) {
+    return {status, nullptr};
+  }
+  return {status, exec};
+}
+
+CudaDriverStatus CudaDriver::launch_graph(
+    CUcontext context,
+    CUgraphExec exec,
+    CUstream stream) const {
+  require_handle(context, "CUDA context handle");
+  require_handle(exec, "CUDA graph exec handle");
+  require_handle(stream, "CUDA stream handle");
+
+  CurrentContextScope current(context);
+  if (current.push_result() != CUDA_SUCCESS) {
+    return make_driver_status(current.push_result());
+  }
+  return finish_context_operation(cuGraphLaunch(exec, stream), current);
+}
+
+CudaDriverStatus CudaDriver::destroy_graph_exec(
+    CUcontext context,
+    CUgraphExec exec) const {
+  require_handle(context, "CUDA context handle");
+  require_handle(exec, "CUDA graph exec handle");
+
+  CurrentContextScope current(context);
+  if (current.push_result() != CUDA_SUCCESS) {
+    return make_driver_status(current.push_result());
+  }
+  return finish_context_operation(cuGraphExecDestroy(exec), current);
+}
+
+CudaDriverStatus CudaDriver::destroy_graph(
+    CUcontext context,
+    CUgraph graph) const {
+  require_handle(context, "CUDA context handle");
+  require_handle(graph, "CUDA graph handle");
+
+  CurrentContextScope current(context);
+  if (current.push_result() != CUDA_SUCCESS) {
+    return make_driver_status(current.push_result());
+  }
+  return finish_context_operation(cuGraphDestroy(graph), current);
+}
+
 }  // namespace flight4s::cuda

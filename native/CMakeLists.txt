@@ -414,5 +414,47 @@ if(BUILD_TESTING)
       LABELS gpu
       SKIP_RETURN_CODE 77
     )
+
+    add_executable(
+      flight4s_cuda_graph_integration_tests
+      tests/cuda_graph_integration_test.cpp
+    )
+    target_compile_features(
+      flight4s_cuda_graph_integration_tests
+      PRIVATE
+      cxx_std_20
+    )
+    target_link_libraries(
+      flight4s_cuda_graph_integration_tests
+      PRIVATE
+      flight4s_cuda_driver
+    )
+    if(MSVC)
+      target_compile_options(
+        flight4s_cuda_graph_integration_tests
+        PRIVATE
+        /W4
+        /permissive-
+      )
+    else()
+      target_compile_options(
+        flight4s_cuda_graph_integration_tests
+        PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+      )
+    endif()
+
+    add_test(
+      NAME flight4s_cuda_graph_integration
+      COMMAND flight4s_cuda_graph_integration_tests
+    )
+    set_tests_properties(
+      flight4s_cuda_graph_integration
+      PROPERTIES
+      LABELS gpu
+      SKIP_RETURN_CODE 77
+    )
   endif()
 endif()
